@@ -388,6 +388,11 @@ Reads a joblib bundle `{"model", "features"}`. Raises `ModelLoadError` or
 `BUY` when `predict_proba` buy-class probability ≥ threshold. `None` when short,
 flat, or below threshold. Never `SELL`.
 
+**`build_features(candles: list[Candle]) → list[float]`**
+Pure. Values in `FEATURE_NAMES` order from the most recent `lookback` candles.
+Raises `ValueError` when given fewer candles than `lookback`. Sole owner of
+feature construction.
+
 ## `zarabot.strategies.registry`
 
 **`enabled(config: Config) → list[Strategy]`**

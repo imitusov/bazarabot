@@ -37,14 +37,22 @@ def _sma(closes: list[Decimal], period: int) -> Decimal:
     return sum(window, Decimal(0)) / Decimal(period)
 
 
-def _features(candles: list[Candle]) -> list[Decimal]:
+def build_features(candles: list[Candle]) -> list[float]:
+    """Feature vector in FEATURE_NAMES order. Raises if shorter than lookback."""
+    if len(candles) < _LOOKBACK:
+        raise ValueError("not enough candles to build features")
     closes = [c.close for c in candles]
     last = candles[-1]
     return_1 = (closes[-1] - closes[-2]) / closes[-2]
     return_5 = (closes[-1] - closes[-6]) / closes[-6]
     high_low_range = (last.high - last.low) / last.close
     close_sma_10 = closes[-1] / _sma(closes, _SMA_PERIOD)
-    return [return_1, return_5, high_low_range, close_sma_10]
+    return [
+        float(return_1),
+        float(return_5),
+        float(high_low_range),
+        float(close_sma_10),
+    ]
 
 
 @dataclass(frozen=True)
@@ -61,8 +69,8 @@ class LoadedModel:
         closes = [c.close for c in candles]
         if len(set(closes)) == 1:
             return None
-        row = _features(candles)
-        x = np.array([[float(value) for value in row]], dtype=np.float64)
+        row = build_features(candles)
+        x = np.array([row], dtype=np.float64)
         proba = self.estimator.predict_proba(x)[0]
         buy_p = Decimal(str(proba[1]))
         if buy_p < CONFIDENCE_THRESHOLD:
