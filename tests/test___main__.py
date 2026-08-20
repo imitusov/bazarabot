@@ -127,7 +127,7 @@ def test_sigterm_and_sigint_are_installed(
             installed.append(sig)
             original(sig, callback)
 
-        loop.add_signal_handler = _add  # type: ignore[method-assign]
+        loop.add_signal_handler = _add
         return loop
 
     monkeypatch.setattr("zarabot.__main__.asyncio.get_running_loop", _get_loop)
@@ -151,10 +151,9 @@ def test_signal_routes_to_shutdown(
     async def _run(_ctx: AppContext) -> None:
         callback = handlers[int(signal.SIGTERM)]
         assert callable(callback)
-        result = callback()
-        if hasattr(result, "__await__"):
-            await result  # type: ignore[misc]
-        return
+        callback()
+        await __import__("asyncio").sleep(0)
+        await __import__("asyncio").sleep(0)
 
     async def _shutdown(received: AppContext, sig: int) -> None:
         calls.append(sig)
@@ -174,7 +173,7 @@ def test_signal_routes_to_shutdown(
             handlers[int(sig)] = callback
             original(sig, callback)
 
-        loop.add_signal_handler = _add  # type: ignore[method-assign]
+        loop.add_signal_handler = _add
         return loop
 
     monkeypatch.setattr("zarabot.__main__.asyncio.get_running_loop", _get_loop)

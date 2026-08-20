@@ -649,3 +649,12 @@ settled or left `SUBMITTING`; positions are neither cancelled nor liquidated.
 Waits up to 30 seconds for unresolved orders to reach a known state via
 `resolve_unfinished`. Remaining `SUBMITTING` rows are left for the next startup.
 Never cancels a stop or submits a sell. Alerts, then returns.
+
+## `zarabot.__main__`
+
+Process entry for `python -m zarabot`. No application logic of its own.
+
+**`main() → int`**
+Installs `SIGTERM`/`SIGINT` handlers that call `app.shutdown.shutdown`, runs
+`app.startup.start` then `app.loops.run`. Returns 0 on a clean shutdown. On
+`StartupError` sleeps 30 seconds and returns non-zero (rule 15).
