@@ -16,6 +16,7 @@ from zarabot.db.positions import (
     adopt,
     close,
     get,
+    list_closed,
     list_open,
     open,
     set_stop_protection,
@@ -290,3 +291,20 @@ async def test_update_lots_rejects_non_positive(db: Path) -> None:
     position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
     with pytest.raises(PositionStateError):
         await update_lots(position.id, 0)
+
+
+async def test_list_closed_returns_closed_newest_first(db: Path) -> None:
+    assert await list_closed() == []
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    assert await list_closed() == []
+    exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
+    await _insert_order(db, exit_order)
+    closed = await close(
+        position.id, ExitTrigger.TAKE_PROFIT, Decimal("110.00"), AWARE, exit_order
+    )
+    found = await list_closed()
+    assert len(found) == 1
+    assert found[0].id == closed.id
+    assert found[0].status == "CLOSED"
+    assert found[0].exit_trigger is ExitTrigger.TAKE_PROFIT
+    assert await list_open() == []
