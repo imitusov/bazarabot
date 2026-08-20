@@ -331,4 +331,14 @@ Pure. RSI period 14, oversold below 30. `lookback` is 15.
 `BUY` when RSI of closes is below 30. `None` when short, flat, or not oversold.
 Never `SELL`.
 
+## `zarabot.strategies.momentum`
+
+Pure. Breakout above the prior 20-bar high. `lookback` is 21.
+
+**`MomentumBreakout`** — `name = "momentum"`, `lookback = 21`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when the latest close exceeds the high of the prior 20 bars. `None` when
+short, flat, or not a breakout. Never `SELL`.
+
 
