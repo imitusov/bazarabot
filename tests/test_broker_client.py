@@ -313,6 +313,8 @@ async def test_post_market_order_returns_order_record_and_disables_margin(
     record = await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
     assert isinstance(record, OrderRecord)
     assert record.key == "key-1"
+    assert record.commission == Decimal("0.5")
+    assert isinstance(record.commission, Decimal)
     posted = [kwargs for name, kwargs in capture.calls if name == "post_order"]
     assert posted
     assert posted[0]["confirm_margin_trade"] is False
@@ -357,9 +359,26 @@ async def test_get_operations_returns_domain_records(capture: _Capture) -> None:
 async def test_get_order_state_uses_request_id_type(capture: _Capture) -> None:
     record = await get_order_state("key-1")
     assert isinstance(record, OrderRecord)
+    assert record.commission == Decimal("0.5")
+    assert isinstance(record.commission, Decimal)
     called = [kwargs for name, kwargs in capture.calls if name == "get_order_state"]
     assert called[0]["order_id"] == "key-1"
     assert called[0]["order_id_type"] is OrderIdType.ORDER_ID_TYPE_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_commission_is_converted_with_money_to_decimal(
+    capture: _Capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "zarabot.broker.client.money_to_decimal",
+        lambda _money: Decimal("7.25"),
+        raising=False,
+    )
+    posted = await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
+    assert posted.commission == Decimal("7.25")
+    state = await get_order_state("key-1")
+    assert state.commission == Decimal("7.25")
 
 
 @pytest.mark.asyncio
