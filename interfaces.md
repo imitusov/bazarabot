@@ -209,4 +209,29 @@ is missing, already terminal, or `status` is not terminal.
 **`async list_unresolved() → list[OrderRecord]`**
 `SUBMITTING` or `SUBMITTED`, oldest first. Empty list when none.
 
+## `zarabot.db.stop_orders`
+
+Sole owner of `stop_orders` rows. Reuses `DuplicateOrderError` and
+`OrderStateError` from `zarabot.db.orders`.
+
+**`async record_placing(key: str, position_id: int, ticker: str, lots: int, stop_price: Decimal) → StopOrderRecord`**
+Inserts `PLACING` with `created_at=clock.now()`. Raises `DuplicateOrderError`
+on a repeated key.
+
+**`async activate(key: str, stop_order_id: str) → StopOrderRecord`**
+Sets status `ACTIVE` and stores the broker identifier. Raises `OrderStateError`
+if already terminal.
+
+**`async settle(key: str, status: StopOrderStatus, settled_at: datetime) → StopOrderRecord`**
+Terminal statuses: `CANCELLED`, `EXECUTED`, `ORPHANED`, `FAILED`. Raises
+`OrderStateError` on a transition out of a terminal status or a non-terminal
+target. Raises `ValueError` on naive `settled_at`.
+
+**`async active_for_position(position_id: int) → StopOrderRecord | None`**
+The single `PLACING` or `ACTIVE` stop for the position, or `None`. Raises
+`OrderStateError` if more than one standing stop exists.
+
+**`async list_active() → list[StopOrderRecord]`**
+Every `ACTIVE` stop, oldest first. Empty list when none.
+
 
