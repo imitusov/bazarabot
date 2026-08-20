@@ -22,7 +22,8 @@ from zarabot.broker.client import (
 )
 from zarabot.db.migrations import apply
 from zarabot.db.orders import list_unresolved
-from zarabot.db.positions import list_open, set_stop_protection
+from zarabot.db.positions import PositionStateError, list_open, set_stop_protection
+from zarabot.db.signals import record
 from zarabot.db.stop_orders import list_active
 from zarabot.execution.orders import (
     ExitFailed,
@@ -42,6 +43,8 @@ from zarabot.models import (
     Instrument,
     OrderRecord,
     OrderStatus,
+    Position,
+    RiskDecision,
     SessionInfo,
     Side,
     Signal,
@@ -97,6 +100,9 @@ class _Broker:
         self.stop_failures_left = 0
         self.timeout = False
         self.missing_state = False
+        self.state_unavailable = False
+        self.empty_stop_id = False
+        self.posted_status = OrderStatus.FILLED
         self.partial_fill_lots: int | None = None
         self.state: dict[str, OrderRecord] = {}
 
@@ -128,7 +134,7 @@ class _Broker:
             side=side,
             intent="ENTRY" if side is Side.BUY else "EXIT",
             lots=lots,
-            status=OrderStatus.FILLED,
+            status=self.posted_status,
             filled_lots=filled,
             filled_price=Decimal("100"),
             commission=Decimal("1"),
@@ -143,6 +149,8 @@ class _Broker:
         self.calls.append("get_order_state")
         if self.missing_state:
             raise OrderNotFound("gone")
+        if self.state_unavailable:
+            raise BrokerUnavailable("state down")
         return self.state[key]
 
     async def post_stop_loss(
@@ -154,7 +162,7 @@ class _Broker:
             raise StopOrderRejected("stop rejected")
         return StopOrderRecord(
             key=key,
-            stop_order_id="ex-stop",
+            stop_order_id="" if self.empty_stop_id else "ex-stop",
             position_id=0,
             ticker="SBER",
             lots=lots,
@@ -177,12 +185,13 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
     async with aiosqlite.connect(path) as conn:
         await apply(conn)
     broker = _Broker()
-    monkeypatch.setattr("zarabot.execution.orders.get_max_lots", broker.get_max_lots)
-    monkeypatch.setattr("zarabot.execution.orders.get_instrument", broker.get_instrument)
-    monkeypatch.setattr("zarabot.execution.orders.post_market_order", broker.post_market_order)
-    monkeypatch.setattr("zarabot.execution.orders.get_order_state", broker.get_order_state)
-    monkeypatch.setattr("zarabot.execution.orders.post_stop_loss", broker.post_stop_loss)
-    monkeypatch.setattr("zarabot.execution.orders.cancel_stop_order", broker.cancel_stop_order)
+    module = "zarabot.execution.orders"
+    monkeypatch.setattr(f"{module}.get_max_lots", broker.get_max_lots)
+    monkeypatch.setattr(f"{module}.get_instrument", broker.get_instrument)
+    monkeypatch.setattr(f"{module}.post_market_order", broker.post_market_order)
+    monkeypatch.setattr(f"{module}.get_order_state", broker.get_order_state)
+    monkeypatch.setattr(f"{module}.post_stop_loss", broker.post_stop_loss)
+    monkeypatch.setattr(f"{module}.cancel_stop_order", broker.cancel_stop_order)
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
     counter = {"n": 0}
 
@@ -297,9 +306,8 @@ async def test_rejected_exit_raises_exit_failed_and_alerts(
 ) -> None:
     position = await open_position(_signal(), 2, _instrument())
     env.reject_exit = True
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(ExitFailed):
-            await close_position(position, ExitTrigger.TAKE_PROFIT)
+    with caplog.at_level(logging.ERROR), pytest.raises(ExitFailed):
+        await close_position(position, ExitTrigger.TAKE_PROFIT)
     assert await list_open()
     assert caplog.records
     await close_position((await list_open())[0], ExitTrigger.TAKE_PROFIT)
@@ -476,7 +484,9 @@ async def test_orphaned_stop_is_cancelled(env: _Broker) -> None:
     assert position.status == "OPEN"
 
 
-async def test_restart_adopts_existing_stop_without_placing_another(env: _Broker) -> None:
+async def test_restart_adopts_existing_stop_without_placing_another(
+    env: _Broker,
+) -> None:
     env.stop_failures_left = 3
     position = await open_position(_signal(), 2, _instrument())
     existing = StopOrderRecord(
@@ -502,3 +512,357 @@ async def test_mispriced_stop_is_replaced(env: _Broker) -> None:
     replaced = await replace_stop(position, _instrument())
     assert replaced.stop_protection is StopProtection.EXCHANGE
     assert env.calls.index("cancel_stop") < env.calls.index("post_stop")
+
+
+async def test_replace_stop_on_missing_position(env: _Broker) -> None:
+    ghost = _ghost_position()
+    assert await replace_stop(ghost, _instrument()) is ghost
+
+
+async def test_resolve_fill_skips_when_already_open(env: _Broker) -> None:
+    from zarabot.db.orders import record_submitting
+
+    await open_position(_signal(), 2, _instrument())
+    extra = await record_submitting(
+        "dup-entry-key-000000000001", "SBER", Side.BUY, 1, "ENTRY"
+    )
+    env.state[extra.key] = OrderRecord(
+        key=extra.key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=1,
+        status=OrderStatus.FILLED,
+        filled_lots=1,
+        filled_price=Decimal("100"),
+        commission=None,
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+    await resolve_unfinished(NOW)
+    assert len(await list_open()) == 1
+
+
+def _ghost_position() -> Position:
+    return Position(
+        id=999,
+        ticker="SBER",
+        figi="BBG000000001",
+        strategy="ma_crossover",
+        lots=1,
+        lot_size=10,
+        entry_price=Decimal("100"),
+        entry_at=NOW,
+        stop_price=Decimal("95"),
+        target_price=Decimal("110"),
+        status="OPEN",
+        adopted=False,
+        open_order_key="ghost",
+        close_order_key=None,
+        exit_trigger=None,
+        exit_price=None,
+        exit_at=None,
+        realised_pnl=None,
+        stop_protection=StopProtection.LOCAL,
+        stop_order_key=None,
+    )
+
+
+async def test_max_lots_clamps_requested_size(env: _Broker) -> None:
+    env.max_lots = 1
+    position = await open_position(_signal(), 5, _instrument())
+    assert position.lots == 1
+
+
+async def test_unknown_entry_outcome_leaves_unresolved(env: _Broker) -> None:
+    env.posted_status = OrderStatus.SUBMITTED
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    assert await list_unresolved()
+
+
+async def test_empty_stop_id_degrades_to_local(env: _Broker) -> None:
+    env.empty_stop_id = True
+    position = await open_position(_signal(), 2, _instrument())
+    assert position.stop_protection is StopProtection.LOCAL
+
+
+async def test_place_protective_stop_is_idempotent_when_exchange(env: _Broker) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    env.calls.clear()
+    again = await place_protective_stop(position, _instrument())
+    assert again.stop_protection is StopProtection.EXCHANGE
+    assert "post_stop" not in env.calls
+
+
+async def test_place_protective_stop_missing_position(env: _Broker) -> None:
+    ghost = _ghost_position()
+    assert await place_protective_stop(ghost, _instrument()) is ghost
+
+
+async def test_adopt_stop_requires_broker_id(env: _Broker) -> None:
+    env.stop_failures_left = 3
+    position = await open_position(_signal(), 2, _instrument())
+    existing = StopOrderRecord(
+        key="no-id",
+        stop_order_id=None,
+        position_id=position.id,
+        ticker="SBER",
+        lots=2,
+        stop_price=position.stop_price,
+        status=StopOrderStatus.ACTIVE,
+        created_at=NOW,
+        settled_at=None,
+    )
+    with pytest.raises(StopOrderRejected):
+        await adopt_existing_stop(position, existing)
+
+
+async def test_orphan_without_broker_id_still_settles(env: _Broker) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    stop = (await list_active())[0]
+    orphan = StopOrderRecord(
+        key=stop.key,
+        stop_order_id=None,
+        position_id=stop.position_id,
+        ticker=stop.ticker,
+        lots=stop.lots,
+        stop_price=stop.stop_price,
+        status=stop.status,
+        created_at=stop.created_at,
+        settled_at=None,
+    )
+    await cancel_orphaned_stop(orphan)
+    assert await list_active() == []
+    del position
+
+
+async def test_close_stop_loss_trigger_is_rejected(env: _Broker) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    with pytest.raises(ValueError, match="STOP_LOSS"):
+        await close_position(position, ExitTrigger.STOP_LOSS)
+
+
+async def test_close_missing_position(env: _Broker) -> None:
+    with pytest.raises(PositionStateError):
+        await close_position(_ghost_position(), ExitTrigger.TAKE_PROFIT)
+
+
+async def test_exit_unreachable_raises_exit_failed(env: _Broker) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    env.timeout = True
+    with pytest.raises(ExitFailed):
+        await close_position(position, ExitTrigger.TAKE_PROFIT)
+    assert await list_open()
+
+
+async def test_unknown_exit_outcome_raises_exit_failed(env: _Broker) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    env.posted_status = OrderStatus.SUBMITTED
+    with pytest.raises(ExitFailed):
+        await close_position(position, ExitTrigger.TAKE_PROFIT)
+
+
+async def test_close_executed_stop_on_local_position(env: _Broker) -> None:
+    env.stop_failures_left = 3
+    position = await open_position(_signal(), 2, _instrument())
+    closed = await close_executed_stop(position, Decimal("95"))
+    assert closed.exit_trigger is ExitTrigger.STOP_LOSS
+
+
+async def test_close_executed_missing_position(env: _Broker) -> None:
+    with pytest.raises(PositionStateError):
+        await close_executed_stop(_ghost_position(), Decimal("95"))
+
+
+async def test_resolve_naive_datetime_rejected(env: _Broker) -> None:
+    naive = datetime(2026, 3, 16, 12, 0)  # noqa: DTZ001
+    with pytest.raises(ValueError):
+        await resolve_unfinished(naive)
+
+
+async def test_resolve_skips_when_state_unavailable(env: _Broker) -> None:
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    env.state_unavailable = True
+    assert await resolve_unfinished(NOW) == []
+    assert await list_unresolved()
+
+
+async def test_resolve_rejected_state(env: _Broker) -> None:
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    key = (await list_unresolved())[0].key
+    env.state[key] = OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=2,
+        status=OrderStatus.REJECTED,
+        filled_lots=0,
+        filled_price=None,
+        commission=None,
+        broker_reason="nope",
+        created_at=NOW,
+        settled_at=NOW,
+    )
+    recovered = await resolve_unfinished(NOW)
+    assert recovered[0].status is OrderStatus.REJECTED
+    assert await list_open() == []
+
+
+async def test_resolve_unknown_status_left_unresolved(env: _Broker) -> None:
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    key = (await list_unresolved())[0].key
+    env.state[key] = OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=2,
+        status=OrderStatus.SUBMITTED,
+        filled_lots=None,
+        filled_price=None,
+        commission=None,
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=None,
+    )
+    assert await resolve_unfinished(NOW) == []
+    assert await list_unresolved()
+
+
+async def test_resolve_zero_fill_does_not_open(env: _Broker) -> None:
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    key = (await list_unresolved())[0].key
+    env.state[key] = OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=2,
+        status=OrderStatus.FILLED,
+        filled_lots=0,
+        filled_price=Decimal("100"),
+        commission=None,
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+    await resolve_unfinished(NOW)
+    assert await list_open() == []
+
+
+async def test_resolve_uses_recorded_signal_strategy(env: _Broker) -> None:
+    await record(_signal(), RiskDecision(approved=True, lots=2, reason=None))
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    key = (await list_unresolved())[0].key
+    env.state[key] = OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=2,
+        status=OrderStatus.FILLED,
+        filled_lots=2,
+        filled_price=Decimal("100"),
+        commission=Decimal("1"),
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+    await resolve_unfinished(NOW)
+    opened = await list_open()
+    assert opened[0].strategy == "ma_crossover"
+
+
+async def test_resolve_exit_fill_closes_position(env: _Broker) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    env.timeout = True
+    with pytest.raises(ExitFailed):
+        await close_position(position, ExitTrigger.TAKE_PROFIT)
+    key = (await list_unresolved())[0].key
+    env.state[key] = OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.SELL,
+        intent="EXIT",
+        lots=2,
+        status=OrderStatus.FILLED,
+        filled_lots=2,
+        filled_price=Decimal("110"),
+        commission=Decimal("1"),
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+    await resolve_unfinished(NOW)
+    assert await list_open() == []
+
+
+async def test_resolve_exit_fill_without_position(env: _Broker) -> None:
+    from zarabot.db.orders import record_submitting
+
+    extra = await record_submitting(
+        "exit-orphan-key-000000000001", "SBER", Side.SELL, 1, "EXIT"
+    )
+    env.state[extra.key] = OrderRecord(
+        key=extra.key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.SELL,
+        intent="EXIT",
+        lots=1,
+        status=OrderStatus.FILLED,
+        filled_lots=1,
+        filled_price=Decimal("110"),
+        commission=None,
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+    await resolve_unfinished(NOW)
+    assert await list_open() == []
+
+
+async def test_database_write_failure_halts(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise aiosqlite.Error("disk")
+
+    monkeypatch.setattr("zarabot.execution.orders.record_submitting", boom)
+    with pytest.raises(aiosqlite.Error):
+        await open_position(_signal(), 2, _instrument())
+    assert await is_halted() is True
+
+
+async def test_halt_failure_after_db_error_is_logged(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise aiosqlite.Error("disk")
+
+    async def halt_boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("halt failed")
+
+    monkeypatch.setattr("zarabot.execution.orders.record_submitting", boom)
+    monkeypatch.setattr("zarabot.execution.orders.halt", halt_boom)
+    with pytest.raises(aiosqlite.Error):
+        await open_position(_signal(), 2, _instrument())

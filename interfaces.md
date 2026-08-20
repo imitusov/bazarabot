@@ -459,4 +459,64 @@ Persists halt. No-op when already halted. Raises `ValueError` on naive `at`.
 **`async resume(actor: str, at: datetime) → bool`**
 Clears the halt and records `actor`. `False` when not halted.
 
+## `zarabot.pnl`
+
+Commission is never estimated. `realised` uses the stored net figure on a closed
+row. Positive `daily_loss_pct` is a loss versus the snapshot opening baseline.
+
+**`realised(position: Position) → Decimal`**
+**`unrealised(position: Position, price: Decimal) → Decimal`**
+Mark-to-market vs entry, `lots × lot_size` units.
+
+**`async daily_loss_pct(now: datetime) → Decimal`**
+`(opening_equity - current_equity) / opening_equity × 100`. Writes today's
+snapshot from the broker portfolio when the row is missing (rule 12).
+
+**`async benchmark_return(start: date, end: date) → Decimal | None`**
+Equal-weight buy-and-hold over the watchlist. `None` if any constituent's
+prices are missing, never zero-filled.
+
+## `zarabot.execution.orders`
+
+Owns order submission, per-ticker and global submission locks, crash recovery,
+and stop-order remedies. Write-then-send. Never resubmits an entry. Never
+passes `confirm_margin_trade=True`. Alerts are ERROR logs until
+`telegram.notifier` exists.
+
+**`ExitFailed`**
+Raised when an exit is rejected or the broker is unreachable. Caller retries.
+
+**`async open_position(signal: Signal, lots: int, instrument: Instrument) → Position`**
+Records `SUBMITTING` before `post_market_order`. Clamps lots to
+`get_max_lots`; a maximum of 0 records a rejection and raises `OrderRejected`.
+Opens LOCAL from the fill, then places the stop (3 attempts). Stop failure
+leaves the position LOCAL and open. Partial entry opens filled lots only.
+
+**`async close_position(position: Position, trigger: ExitTrigger) → Position`**
+Cancels the standing stop and demotes to LOCAL, then market-sells until flat.
+Raises `ValueError` if `trigger` is `STOP_LOSS`. Raises `ExitFailed` on reject
+or unavailability. Never blocked by halt, cooldown, or risk limits.
+
+**`async resolve_unfinished(now: datetime) → list[OrderRecord]`**
+Queries `get_order_state` by key; never resubmits. `OrderNotFound` settles as
+`REJECTED` / never-placed. A discovered entry fill opens via `get_instrument`
+and today's `db.signals` row (else strategy `ma_crossover`). A discovered exit
+fill closes as `TAKE_PROFIT`. Raises `ValueError` on naive `now`.
+
+**`async place_protective_stop(position: Position, instrument: Instrument) → Position`**
+Places a standing stop on an unprotected position. Idempotent when already
+EXCHANGE. Does not unwind.
+
+**`async adopt_existing_stop(position: Position, stop: StopOrderRecord) → Position`**
+Binds a live broker stop locally without posting a second one.
+
+**`async cancel_orphaned_stop(stop: StopOrderRecord) → None`**
+Cancels a live stop with no matching open position; settles `ORPHANED`.
+
+**`async replace_stop(position: Position, instrument: Instrument) → Position`**
+Cancels the standing stop, then places a replacement at the stored stop price.
+
+**`async close_executed_stop(position: Position, fill_price: Decimal) → Position`**
+Closes from an exchange-executed stop with `exit_trigger=STOP_LOSS` and starts
+the cooldown. Never submits a sell.
 
