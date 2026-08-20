@@ -16,6 +16,7 @@ from zarabot.strategies.ml_model import (
     FEATURE_NAMES,
     ModelContractError,
     ModelLoadError,
+    build_features,
     load,
 )
 
@@ -139,3 +140,24 @@ def test_prediction_below_confidence_threshold_returns_none(tmp_path: Path) -> N
     below = float(CONFIDENCE_THRESHOLD) - 0.01
     strategy = load(_dump(tmp_path / "below.joblib", below))
     assert strategy.evaluate("SBER", _rising(), NOW) is None
+
+
+def test_build_features_matches_feature_names_order() -> None:
+    candles = _rising()
+    values = build_features(candles)
+    assert len(values) == len(FEATURE_NAMES)
+    assert all(isinstance(value, float) for value in values)
+    closes = [candle.close for candle in candles]
+    last = candles[-1]
+    expected = [
+        float((closes[-1] - closes[-2]) / closes[-2]),
+        float((closes[-1] - closes[-6]) / closes[-6]),
+        float((last.high - last.low) / last.close),
+        float(closes[-1] / (sum(closes[-10:], Decimal(0)) / Decimal(10))),
+    ]
+    assert values == expected
+
+
+def test_build_features_rejects_short_series() -> None:
+    with pytest.raises(ValueError):
+        build_features(_candles([100, 101, 102]))
