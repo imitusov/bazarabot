@@ -20,6 +20,7 @@ from zarabot.broker.client import (
     StopOrderRejected,
 )
 from zarabot.db.migrations import apply
+from zarabot.db.orders import get as get_order
 from zarabot.db.orders import list_unresolved
 from zarabot.db.positions import (
     PositionStateError,
@@ -237,7 +238,17 @@ async def test_entry_writes_before_broker_and_fills(env: _Broker) -> None:
     assert await list_unresolved() == []
 
 
-async def test_crash_before_broker_is_resolved_by_key_lookup(env: _Broker) -> None:
+async def test_filled_entry_and_exit_persist_broker_commission(env: _Broker) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    entry = await get_order(position.open_order_key)
+    assert entry is not None
+    assert entry.commission == Decimal("1")
+    closed = await close_position(position, ExitTrigger.TAKE_PROFIT)
+    assert closed.close_order_key is not None
+    exit_order = await get_order(closed.close_order_key)
+    assert exit_order is not None
+    assert exit_order.commission == Decimal("1")
+    assert closed.realised_pnl == Decimal("0") - Decimal("1") - Decimal("1")
     env.timeout = True
     with pytest.raises(BrokerUnavailable):
         await open_position(_signal(), 2, _instrument())
