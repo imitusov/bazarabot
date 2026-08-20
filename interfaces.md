@@ -290,6 +290,18 @@ allocated, cash) / (lot × price)`. Returns 0 when one lot exceeds the cap or
 cash, or when lot cost is not positive. Never negative. Satisfies
 `lots × lot × price ≤ cap_pct% × allocated` and `≤ cash`.
 
+## `zarabot.risk.gate`
+
+Pure. No I/O. 95% coverage required. Calls `risk.sizing`. Never mutates `state`.
+
+**`check(signal: Signal, state: PortfolioState, instrument: Instrument, cooldown_active: bool, session_open: bool, halted: bool, now: datetime, config: Config) → RiskDecision`**
+Approved with lots, or rejected with exactly one reason. Priority:
+`HALTED` → `SESSION_CLOSED` → `INSTRUMENT_NOT_TRADING` → `DUPLICATE_TICKER` →
+`MAX_POSITIONS` → `COOLDOWN_ACTIVE` → `INSUFFICIENT_CASH` → `ZERO_LOTS` →
+`POSITION_CAP`. `MAX_POSITIONS` at or above the configured maximum. `SELL`
+signals are never approved. Instrument is trading iff `trading_status` is
+`NORMAL_TRADING`.
+
 ## `zarabot.lifecycle.exits`
 
 Pure. No I/O. 95% coverage required. Never consults halt.

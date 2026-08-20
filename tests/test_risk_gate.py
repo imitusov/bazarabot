@@ -12,6 +12,7 @@ from zarabot.models import (
     PortfolioState,
     Position,
     RejectionReason,
+    RiskDecision,
     Side,
     Signal,
     StopProtection,
@@ -122,7 +123,7 @@ def _check(
     session_open: bool = True,
     halted: bool = False,
     config: Config | None = None,
-) -> object:
+) -> RiskDecision:
     return check(
         signal if signal is not None else _signal(),
         state if state is not None else _state(),
@@ -168,7 +169,10 @@ def test_duplicate_ticker_rejects() -> None:
 
 def test_max_positions_rejects() -> None:
     tickers = tuple(f"T{i}" for i in range(10))
-    decision = _check(state=_state(tickers=tickers), config=_config(max_open_positions=10))
+    decision = _check(
+        state=_state(tickers=tickers),
+        config=_config(max_open_positions=10),
+    )
     assert decision.approved is False
     assert decision.reason is RejectionReason.MAX_POSITIONS
 
@@ -253,6 +257,20 @@ def test_one_below_max_open_positions_approves() -> None:
 def test_sell_is_never_approved() -> None:
     decision = _check(signal=_signal(side=Side.SELL))
     assert decision.approved is False
+
+
+def test_zero_price_rejects_with_zero_lots() -> None:
+    decision = _check(
+        signal=Signal(
+            ticker="SBER",
+            strategy="ma_crossover",
+            side=Side.BUY,
+            generated_at=NOW,
+            reference_price=Decimal("0"),
+        )
+    )
+    assert decision.approved is False
+    assert decision.reason is RejectionReason.ZERO_LOTS
 
 
 def test_gate_performs_no_io() -> None:
