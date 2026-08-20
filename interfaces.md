@@ -497,8 +497,7 @@ prices are missing, never zero-filled.
 
 Owns order submission, per-ticker and global submission locks, crash recovery,
 and stop-order remedies. Write-then-send. Never resubmits an entry. Never
-passes `confirm_margin_trade=True`. Alerts are ERROR logs until
-`telegram.notifier` exists.
+passes `confirm_margin_trade=True`. Alerts go through `telegram.notifier.alert`.
 
 **`ExitFailed`**
 Raised when an exit is rejected or the broker is unreachable. Caller retries.

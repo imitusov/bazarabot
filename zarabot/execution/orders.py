@@ -53,6 +53,7 @@ from zarabot.models import (
     StopProtection,
 )
 from zarabot.state.halt import halt
+from zarabot.telegram.notifier import alert
 
 _LOG = logging.getLogger(__name__)
 _HUNDRED = Decimal("100")
@@ -72,12 +73,8 @@ def _reject_naive(moment: datetime) -> None:
         raise ValueError("datetime must be timezone-aware")
 
 
-def _alert(message: str) -> None:
-    _LOG.error(message)
-
-
 async def _halt_on_db_failure(detail: str) -> None:
-    _alert(f"trading halted: {detail}")
+    await alert(f"trading halted: {detail}")
     try:
         await halt(HaltReason.MANUAL, detail, clock_now())
     except Exception:
@@ -162,7 +159,7 @@ async def _place_stop(position: Position, instrument: Instrument) -> Position:
                 await settle_stop(key, StopOrderStatus.FAILED, clock_now())
             except (OrderStateError, aiosqlite.Error):
                 _LOG.exception("failed to settle unplaceable stop %s", key)
-    _alert(
+    await alert(
         f"stop-loss unplaceable for {position.ticker} after {_STOP_ATTEMPTS} attempts"
         f"{': ' + str(last_error) if last_error else ''}"
     )
@@ -288,7 +285,7 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
             posted = await post_market_order(key, instrument.figi, Side.BUY, lots)
         except OrderRejected as exc:
             await _write(settle_order(key, OrderStatus.REJECTED, 0, None, exc.reason))
-            _alert(f"entry rejected for {signal.ticker}: {exc.reason}")
+            await alert(f"entry rejected for {signal.ticker}: {exc.reason}")
             raise
         except (BrokerUnavailable, BrokerRateLimited):
             raise
@@ -310,7 +307,9 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
             )
         )
         if filled_lots < lots:
-            _alert(f"partial entry fill for {signal.ticker}: {filled_lots} of {lots}")
+            await alert(
+                f"partial entry fill for {signal.ticker}: {filled_lots} of {lots}"
+            )
         return await _open_from_fill(signal, settled, instrument)
 
 
@@ -356,15 +355,15 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
                 await _write(
                     settle_order(key, OrderStatus.REJECTED, 0, None, exc.reason)
                 )
-                _alert(f"exit rejected for {current.ticker}: {exc.reason}")
+                await alert(f"exit rejected for {current.ticker}: {exc.reason}")
                 raise ExitFailed(exc.reason) from exc
             except (BrokerUnavailable, BrokerRateLimited) as exc:
-                _alert(f"exit unreachable for {current.ticker}: {exc}")
+                await alert(f"exit unreachable for {current.ticker}: {exc}")
                 raise ExitFailed(str(exc)) from exc
             filled = posted.filled_lots if posted.filled_lots is not None else 0
             price = posted.filled_price
             if posted.status is not OrderStatus.FILLED or filled <= 0 or price is None:
-                _alert(f"exit outcome unknown for {current.ticker}")
+                await alert(f"exit outcome unknown for {current.ticker}")
                 raise ExitFailed("exit outcome unknown")
             last_order = await _write(
                 settle_order(
@@ -412,7 +411,7 @@ async def close_executed_stop(position: Position, fill_price: Decimal) -> Positi
                 "stop executed",
             )
         )
-        _alert(f"stop executed for {current.ticker}")
+        await alert(f"stop executed for {current.ticker}")
         return await _finish_close(current, order, ExitTrigger.STOP_LOSS, clock_now())
 
 
@@ -482,7 +481,7 @@ async def _apply_discovered_fill(order: OrderRecord, now: datetime) -> None:
         if open_pos is None:
             return
         if order.exit_trigger is None:
-            _alert(
+            await alert(
                 f"exit order {order.key} has no trigger; leaving {order.ticker} open"
             )
             return
