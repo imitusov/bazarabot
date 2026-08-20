@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
 import pytest
 
@@ -32,11 +35,9 @@ from zarabot.models import (
     TradingCalendar,
 )
 
-
 AWARE = datetime(2026, 3, 15, 10, 0, tzinfo=UTC)
-NAIVE = datetime(2026, 3, 15, 10, 0)
+NAIVE = datetime(2026, 3, 15, 10, 0)  # noqa: DTZ001  # the naive input under test
 PRICE = Decimal("100.50")
-ZERO = Decimal("0")
 
 
 def _instrument(**overrides: object) -> Instrument:
@@ -216,7 +217,7 @@ def _backtest(**overrides: object) -> BacktestResult:
     return BacktestResult(**fields)  # type: ignore[arg-type]
 
 
-def _all_valid_instances() -> list[object]:
+def _all_valid_instances() -> list[Any]:
     return [
         _candle(),
         _instrument(),
@@ -237,6 +238,7 @@ def _all_valid_instances() -> list[object]:
 
 # --- naive datetime ----------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "factory,field",
     [
@@ -252,7 +254,9 @@ def _all_valid_instances() -> list[object]:
         (_report, "ran_at"),
     ],
 )
-def test_naive_datetime_raises_value_error(factory, field) -> None:
+def test_naive_datetime_raises_value_error(
+    factory: Callable[..., object], field: str
+) -> None:
     with pytest.raises(ValueError):
         factory(**{field: NAIVE})
 
@@ -287,6 +291,7 @@ def test_session_naive_end_raises() -> None:
 
 # --- negative lots / prices / non-positive lot size --------------------------
 
+
 def test_negative_lot_count_raises() -> None:
     with pytest.raises(ValueError):
         _position(lots=-1)
@@ -320,31 +325,34 @@ def test_non_positive_lot_size_raises() -> None:
 
 # --- float money -------------------------------------------------------------
 
+
 def test_monetary_field_given_float_raises_type_error() -> None:
     with pytest.raises(TypeError):
-        _candle(close=100.5)  # type: ignore[arg-type]
+        _candle(close=100.5)
     with pytest.raises(TypeError):
-        _signal(reference_price=10.0)  # type: ignore[arg-type]
+        _signal(reference_price=10.0)
     with pytest.raises(TypeError):
-        _position(entry_price=100.0)  # type: ignore[arg-type]
+        _position(entry_price=100.0)
     with pytest.raises(TypeError):
-        _operation(commission=1.25)  # type: ignore[arg-type]
+        _operation(commission=1.25)
     with pytest.raises(TypeError):
-        _portfolio(cash=100000.0)  # type: ignore[arg-type]
+        _portfolio(cash=100000.0)
     with pytest.raises(TypeError):
-        _backtest(pnl=12.34)  # type: ignore[arg-type]
+        _backtest(pnl=12.34)
 
 
 # --- frozen ------------------------------------------------------------------
 
+
 def test_every_dataclass_is_frozen() -> None:
     for instance in _all_valid_instances():
-        field_name = next(iter(instance.__dataclass_fields__))
+        field_name = dataclass_fields(instance)[0].name
         with pytest.raises(AttributeError):
             setattr(instance, field_name, getattr(instance, field_name))
 
 
 # --- RiskDecision ------------------------------------------------------------
+
 
 def test_risk_decision_cannot_be_both_approved_and_rejected() -> None:
     with pytest.raises(ValueError):
@@ -378,6 +386,7 @@ def test_approved_and_rejected_risk_decisions_construct() -> None:
 
 # --- enum round-trip ---------------------------------------------------------
 
+
 def _public_enums() -> list[type[Enum]]:
     return [
         Side,
@@ -400,6 +409,7 @@ def test_every_enum_member_round_trips_through_its_string_value() -> None:
 
 
 # --- Position stop-protection pairing ----------------------------------------
+
 
 def test_position_exchange_without_stop_order_key_raises() -> None:
     with pytest.raises(ValueError):
