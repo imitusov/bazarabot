@@ -11,8 +11,9 @@ from pathlib import Path
 import pytest
 
 from zarabot.app.startup import AppContext
-from zarabot.broker.client import BrokerUnavailable
+from zarabot.broker.client import BrokerUnavailable, InstrumentNotFound, OrderRejected
 from zarabot.config import Config
+from zarabot.execution.orders import ExitFailed
 from zarabot.models import (
     Candle,
     ExitTrigger,
@@ -27,6 +28,7 @@ from zarabot.models import (
     Side,
     Signal,
     StopOrderRecord,
+    StopOrderStatus,
     StopProtection,
 )
 
@@ -525,24 +527,34 @@ async def test_run_one_task_failure_does_not_kill_others(
     async def _alert(text: str, urgent: bool = False) -> None:
         calls.append(f"alert:{text[:20]}")
 
+    sunday_noon = datetime(2026, 3, 22, 9, 0, tzinfo=UTC)
     monkeypatch.setattr(loops, "trading_cycle", _trade)
     monkeypatch.setattr(loops, "backup_run", _backup)
     monkeypatch.setattr(loops, "prune", _prune)
     monkeypatch.setattr(loops, "send_report", _send)
     monkeypatch.setattr(loops, "alert", _alert)
     monkeypatch.setattr(loops, "is_open", lambda moment: False)
+    monkeypatch.setattr(loops, "now", lambda: sunday_noon)
+    loops._backed_up_on = None
+    loops._heartbeat_on = None
+    loops._weekly_on = None
+    loops._rolled_on = None
+
+    real_sleep = asyncio.sleep
 
     async def _yield(_seconds: float) -> None:
-        await asyncio.sleep(0)
+        await real_sleep(0)
 
-    monkeypatch.setattr(loops.asyncio, "sleep", _yield)
+    monkeypatch.setattr(asyncio, "sleep", _yield)
     task = asyncio.create_task(run(_ctx()))
-    for _ in range(30):
-        await asyncio.sleep(0)
+    for _ in range(50):
+        await real_sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert "trade" in calls
+    assert "backup" in calls
+    assert "weekly" in calls
     assert any(item.startswith("alert:") for item in calls)
 
 
@@ -570,3 +582,156 @@ async def test_market_data_failure_logs_warning_and_keeps_running(
         await trading_cycle(_ctx())
     assert caplog.records
     assert loops._market_failures == 1
+
+
+async def test_live_exchange_stop_is_not_closed_as_executed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    executed: list[object] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(
+        stop_protection=StopProtection.EXCHANGE,
+        stop_order_key="stop-key-1",
+    )
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _stops() -> list[StopOrderRecord]:
+        return [
+            StopOrderRecord(
+                key="stop-key-1",
+                stop_order_id="broker-stop",
+                position_id=1,
+                ticker="SBER",
+                lots=2,
+                stop_price=Decimal("95"),
+                status=StopOrderStatus.ACTIVE,
+                created_at=NOW,
+                settled_at=None,
+            )
+        ]
+
+    async def _executed(*_a: object, **_k: object) -> None:
+        executed.append("closed")
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "list_stop_orders", _stops)
+    monkeypatch.setattr(loops, "close_executed_stop", _executed)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert executed == []
+
+
+async def test_missing_stop_while_still_held_does_not_sell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    executed: list[object] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(
+        stop_protection=StopProtection.EXCHANGE,
+        stop_order_key="stop-key-1",
+    )
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _portfolio() -> PortfolioState:
+        return PortfolioState(cash=Decimal("1000"), positions=(position,))
+
+    async def _executed(*_a: object, **_k: object) -> None:
+        executed.append("closed")
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "get_portfolio", _portfolio)
+    monkeypatch.setattr(loops, "close_executed_stop", _executed)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert executed == []
+
+
+async def test_rejected_entry_alerts_and_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _fetch_instrument(ticker: str) -> Instrument:
+        return _make_instrument()
+
+    async def _open(*_a: object, **_k: object) -> None:
+        raise OrderRejected("max lots")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(loops, "get_instrument", _fetch_instrument)
+    monkeypatch.setattr(loops, "open_position", _open)
+    monkeypatch.setattr(loops, "alert", _alert)
+    monkeypatch.setattr(
+        loops,
+        "check",
+        lambda *a, **k: RiskDecision(approved=True, lots=1, reason=None),
+    )
+    await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+    assert alerts
+
+
+async def test_missing_instrument_skips_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    opened: list[object] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _fetch_instrument(ticker: str) -> Instrument:
+        raise InstrumentNotFound("gone")
+
+    async def _open(*_a: object, **_k: object) -> None:
+        opened.append("open")
+
+    monkeypatch.setattr(loops, "get_instrument", _fetch_instrument)
+    monkeypatch.setattr(loops, "open_position", _open)
+    await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+    assert opened == []
+
+
+async def test_exit_failure_is_retried_next_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(target_price=Decimal("100"))
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _price(figi: str) -> Decimal:
+        return Decimal("110")
+
+    async def _close(pos: Position, trigger: ExitTrigger) -> Position:
+        raise ExitFailed("broker down")
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "get_last_price", _price)
+    monkeypatch.setattr(loops, "close_position", _close)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))

@@ -621,3 +621,21 @@ Frozen: `config`, `strategies`, `halt`, `reconciliation`. Lives here, not in
 `strategies.registry.enabled` → `market.session.refresh` →
 `execution.orders.resolve_unfinished` → `broker.reconcile.reconcile` plus stop
 remedies → restore halt → ready `alert`.
+
+## `zarabot.app.loops`
+
+The trading cycle. Exits run before the halt check. Halt blocks entries only.
+A failure in one scheduled task never terminates another.
+
+**`async trading_cycle(ctx: AppContext) → None`**
+Session closed → return with no broker call. Otherwise: resolve unfinished
+orders; refresh prices; close exchange-executed stops via `close_executed_stop`;
+evaluate remaining exits (LOCAL stop-loss, take-profit, max age) and submit
+via `close_position`; recompute daily P&L and halt on the loss limit; if halted
+return; else fetch candles, evaluate strategies, gate, record, and open
+approved entries.
+
+**`async run(ctx: AppContext) → None`**
+Schedules the trading cycle, daily rollover at session open, nightly backup
+with 30-day prune, Sunday 12:00 Moscow weekly report, and a daily heartbeat.
+Each task is restarted with exponential backoff after an unhandled exception.
