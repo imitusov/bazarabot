@@ -630,6 +630,19 @@ On failure, alerts and still returns the intended path.
 Deletes `zarabot-*.db` files whose mtime is strictly older than `retention_days`.
 Returns how many were removed. Missing directory → `0`.
 
+## `zarabot.ops.commissions`
+
+Fills in commissions reported after the fill. Never places, cancels, or modifies
+an order. Callers schedule this at daily rollover and immediately before the
+weekly report.
+
+**`async backfill(since: datetime, until: datetime) → int`**
+Re-queries `get_order_state(key)` for `list_missing_commission`, records any
+commission now present, and `recompute_realised` for affected closed positions.
+Returns how many orders were updated. Alerts only when commission is still
+unknown more than 24 hours after the fill. Raises `ValueError` on naive
+datetimes.
+
 ## `zarabot.app.startup`
 
 Fixed order. No entry before the ready alert. `StartupError` after an alert

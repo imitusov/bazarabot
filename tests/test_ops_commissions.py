@@ -9,7 +9,6 @@ from pathlib import Path
 
 import aiosqlite
 import pytest
-from zarabot.ops.commissions import backfill
 
 from zarabot.broker.client import OrderNotFound
 from zarabot.db.migrations import apply
@@ -24,6 +23,7 @@ from zarabot.models import (
     Side,
     Signal,
 )
+from zarabot.ops.commissions import backfill
 
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
 KEY = "11111111-1111-4111-8111-111111111111"
