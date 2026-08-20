@@ -321,4 +321,14 @@ Pure. Fast SMA 10 vs slow SMA 30. `lookback` is 31.
 `BUY` when the fast SMA crosses above the slow SMA on the latest bar. `None`
 when short, flat, or no golden cross. Never `SELL`.
 
+## `zarabot.strategies.rsi_reversion`
+
+Pure. RSI period 14, oversold below 30. `lookback` is 15.
+
+**`RSIReversion`** — `name = "rsi_reversion"`, `lookback = 15`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when RSI of closes is below 30. `None` when short, flat, or not oversold.
+Never `SELL`.
+
 
