@@ -16,7 +16,7 @@ from zarabot.db.orders import (
     record_submitting,
     settle,
 )
-from zarabot.models import OrderStatus, Side
+from zarabot.models import ExitTrigger, OrderStatus, Side
 
 KEY = "11111111-1111-4111-8111-111111111111"
 
@@ -65,6 +65,25 @@ async def test_duplicate_idempotency_key_raises(db: Path) -> None:
     await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
     with pytest.raises(DuplicateOrderError):
         await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+
+
+async def test_exit_without_trigger_and_entry_with_trigger_raise(db: Path) -> None:
+    with pytest.raises(ValueError):
+        await record_submitting(KEY, "SBER", Side.SELL, 1, "EXIT")
+    with pytest.raises(ValueError):
+        await record_submitting(
+            KEY, "SBER", Side.BUY, 1, "ENTRY", ExitTrigger.TAKE_PROFIT
+        )
+    recorded = await record_submitting(
+        KEY, "SBER", Side.SELL, 1, "EXIT", ExitTrigger.STOP_LOSS
+    )
+    assert recorded.intent == "EXIT"
+    assert recorded.exit_trigger is ExitTrigger.STOP_LOSS
+    entry = await record_submitting(
+        "22222222-2222-4222-8222-222222222222", "SBER", Side.BUY, 1, "ENTRY"
+    )
+    assert entry.intent == "ENTRY"
+    assert entry.exit_trigger is None
 
 
 async def test_terminal_order_cannot_leave_terminal_state(db: Path) -> None:
