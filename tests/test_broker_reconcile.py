@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -90,6 +89,7 @@ class _Broker:
         self.stops: list[StopOrderRecord] = []
         self.last_price = PRICE
         self.calls: list[str] = []
+        self.alerts: list[str] = []
 
     async def get_portfolio(self) -> PortfolioState:
         self.calls.append("get_portfolio")
@@ -155,6 +155,11 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
         return UUID(f"aaaaaaaa-aaaa-4aaa-8aaa-{counter['n']:012d}")
 
     monkeypatch.setattr(f"{module}.uuid4", _uuid)
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        broker.alerts.append(text)
+
+    monkeypatch.setattr(f"{module}.alert", _alert, raising=False)
     return broker
 
 
@@ -186,27 +191,21 @@ async def _open_local() -> Position:
     )
 
 
-async def test_agreement_produces_no_adjustments_and_no_alert(
-    env: _Broker, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_agreement_produces_no_adjustments_and_no_alert(env: _Broker) -> None:
     await _open_local()
     env.holdings = (_broker_position(),)
-    with caplog.at_level(logging.ERROR):
-        report = await reconcile(NOW)
+    report = await reconcile(NOW)
     assert report.adjustments == ()
-    assert not caplog.records
+    assert env.alerts == []
     assert "post_market_order" not in env.calls
     assert "cancel_stop_order" not in env.calls
 
 
-async def test_local_open_absent_at_broker_is_closed_externally(
-    env: _Broker, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_local_open_absent_at_broker_is_closed_externally(env: _Broker) -> None:
     position = await _open_local()
     env.holdings = ()
     env.last_price = Decimal("123.45")
-    with caplog.at_level(logging.ERROR):
-        report = await reconcile(NOW)
+    report = await reconcile(NOW)
     types = [item["type"] for item in report.adjustments]
     assert "CLOSED_EXTERNALLY" in types
     closed = next(
@@ -220,16 +219,13 @@ async def test_local_open_absent_at_broker_is_closed_externally(
     assert stored.status == "CLOSED"
     assert stored.exit_trigger is ExitTrigger.EXTERNAL
     assert await list_open() == []
-    assert caplog.records
+    assert env.alerts
     assert "post_market_order" not in env.calls
 
 
-async def test_broker_holding_absent_locally_is_adopted(
-    env: _Broker, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_broker_holding_absent_locally_is_adopted(env: _Broker) -> None:
     env.holdings = (_broker_position(lots=3, price=Decimal("123.45")),)
-    with caplog.at_level(logging.ERROR):
-        report = await reconcile(NOW)
+    report = await reconcile(NOW)
     types = [item["type"] for item in report.adjustments]
     assert "ADOPTED" in types
     adopted = next(item for item in report.adjustments if item["type"] == "ADOPTED")
@@ -241,16 +237,13 @@ async def test_broker_holding_absent_locally_is_adopted(
     assert opened[0].adopted is True
     assert opened[0].strategy == "ADOPTED"
     assert opened[0].entry_price == Decimal("123.45")
-    assert caplog.records
+    assert env.alerts
 
 
-async def test_lot_mismatch_writes_broker_count(
-    env: _Broker, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_lot_mismatch_writes_broker_count(env: _Broker) -> None:
     position = await _open_local()
     env.holdings = (_broker_position(lots=1),)
-    with caplog.at_level(logging.ERROR):
-        report = await reconcile(NOW)
+    report = await reconcile(NOW)
     types = [item["type"] for item in report.adjustments]
     assert "LOTS_ADJUSTED" in types
     adjusted = next(
@@ -263,7 +256,7 @@ async def test_lot_mismatch_writes_broker_count(
     assert stored is not None
     assert stored.lots == 1
     assert stored.status == "OPEN"
-    assert caplog.records
+    assert env.alerts
 
 
 async def test_reconcile_is_idempotent(env: _Broker) -> None:
@@ -342,4 +335,44 @@ async def test_mispriced_and_orphan_and_adoptable_stops(env: _Broker) -> None:
     env.stops = [_stop(ticker="GAZP", stop_id="orphan")]
     report = await reconcile(NOW)
     assert any(item["type"] == "STOP_ORPHAN" for item in report.adjustments)
+
+
+async def test_external_close_writes_no_order_row(env: _Broker) -> None:
+    from zarabot.config import load
+
+    await _open_local()
+    env.holdings = ()
+    async with aiosqlite.connect(load().db_path) as conn:
+        before = await conn.execute("SELECT COUNT(*) FROM orders")
+        count_before = int((await before.fetchone())[0])
+    report = await reconcile(NOW)
+    assert any(item["type"] == "CLOSED_EXTERNALLY" for item in report.adjustments)
+    opened = await list_open()
+    assert opened == []
+    async with aiosqlite.connect(load().db_path) as conn:
+        after = await conn.execute("SELECT COUNT(*) FROM orders")
+        count_after = int((await after.fetchone())[0])
+        closed = await conn.execute(
+            "SELECT close_order_key FROM positions WHERE status = 'CLOSED'"
+        )
+        row = await closed.fetchone()
+    assert count_after == count_before
+    assert row is not None
+    assert row[0] is None
+
+
+async def test_two_live_stops_report_duplicate_naming_both(env: _Broker) -> None:
+    position = await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [
+        _stop(stop_id="stop-a"),
+        _stop(stop_id="stop-b"),
+    ]
+    report = await reconcile(NOW)
+    dup = next(item for item in report.adjustments if item["type"] == "STOP_DUPLICATE")
+    rendered = str(dup)
+    assert "stop-a" in rendered
+    assert "stop-b" in rendered
+    assert dup["position_id"] == position.id
+    assert dup["ticker"] == "SBER"
 
