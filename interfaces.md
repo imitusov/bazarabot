@@ -214,9 +214,20 @@ because the contract does not receive a FIGI. `exit_trigger` is required for
 `EXIT` and forbidden for `ENTRY`; either violation raises `ValueError`. Raises
 `DuplicateOrderError` on a repeated key.
 
-**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, broker_reason: str | None) → OrderRecord`**
-Records a terminal outcome and `settled_at`. Raises `OrderStateError` if the row
-is missing, already terminal, or `status` is not terminal.
+**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None) → OrderRecord`**
+Records a terminal outcome, `commission`, and `settled_at`. `commission=None`
+means not yet known and reads back distinct from zero. Raises `OrderStateError`
+if the row is missing, already terminal, or `status` is not terminal.
+
+**`async get(key: str) → OrderRecord | None`**
+The order, or `None` when absent (including synthetic adopted keys).
+
+**`async record_commission(key: str, commission: Decimal) → OrderRecord`**
+The one field settable on a terminal row. Raises `OrderStateError` if absent.
+
+**`async list_missing_commission(since: datetime, until: datetime) → list[OrderRecord]`**
+`FILLED` orders in the period whose commission is still unknown. Empty list when
+none. Raises `ValueError` on naive datetimes.
 
 **`async list_unresolved() → list[OrderRecord]`**
 `SUBMITTING` or `SUBMITTED`, oldest first. Empty list when none.

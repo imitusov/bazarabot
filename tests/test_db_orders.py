@@ -51,7 +51,7 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 async def test_submitting_then_filled_reports_terminal_state(db: Path) -> None:
     recorded = await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
     assert recorded.status is OrderStatus.SUBMITTING
-    filled = await settle(KEY, OrderStatus.FILLED, 2, Decimal("100.50"), None)
+    filled = await settle(KEY, OrderStatus.FILLED, 2, Decimal("100.50"), None, None)
     assert filled.status is OrderStatus.FILLED
     assert filled.filled_lots == 2
     assert filled.filled_price == Decimal("100.50")
@@ -64,7 +64,7 @@ async def test_submitting_orders_are_listed_unresolved(db: Path) -> None:
     assert len(unresolved) == 1
     assert unresolved[0].key == KEY
     assert unresolved[0].status is OrderStatus.SUBMITTING
-    await settle(KEY, OrderStatus.FILLED, 2, Decimal("100.00"), None)
+    await settle(KEY, OrderStatus.FILLED, 2, Decimal("100.00"), None, None)
     assert await list_unresolved() == []
 
 
@@ -95,11 +95,11 @@ async def test_exit_without_trigger_and_entry_with_trigger_raise(db: Path) -> No
 
 async def test_terminal_order_cannot_leave_terminal_state(db: Path) -> None:
     await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
-    await settle(KEY, OrderStatus.FILLED, 2, Decimal("100.00"), None)
+    await settle(KEY, OrderStatus.FILLED, 2, Decimal("100.00"), None, None)
     with pytest.raises(OrderStateError):
-        await settle(KEY, OrderStatus.SUBMITTED, 2, Decimal("100.00"), None)
+        await settle(KEY, OrderStatus.SUBMITTED, 2, Decimal("100.00"), None, None)
     with pytest.raises(OrderStateError):
-        await settle(KEY, OrderStatus.CANCELLED, 0, None, "too late")
+        await settle(KEY, OrderStatus.CANCELLED, 0, None, None, "too late")
 
 
 async def test_settle_persists_commission_and_none_is_not_zero(db: Path) -> None:

@@ -11,9 +11,12 @@ from zarabot.clock import now
 from zarabot.config import load
 from zarabot.models import ExitTrigger, OrderRecord, OrderStatus, Side
 
-_TERMINAL = frozenset(
-    {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED}
-)
+_TERMINAL = frozenset({OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED})
+
+
+def _reject_naive(moment: datetime) -> None:
+    if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
+        raise ValueError("datetime must be timezone-aware")
 
 
 class DuplicateOrderError(Exception):
@@ -125,6 +128,7 @@ async def settle(
     status: OrderStatus,
     filled_lots: int,
     filled_price: Decimal | None,
+    commission: Decimal | None,
     broker_reason: str | None,
 ) -> OrderRecord:
     """Record a terminal outcome. Raises if the row is already terminal."""
@@ -143,13 +147,14 @@ async def settle(
             """
             UPDATE orders
             SET status = ?, filled_lots = ?, filled_price = ?,
-                broker_reason = ?, settled_at = ?
+                commission = ?, broker_reason = ?, settled_at = ?
             WHERE key = ?
             """,
             (
                 status.value,
                 filled_lots,
                 str(filled_price) if filled_price is not None else None,
+                str(commission) if commission is not None else None,
                 broker_reason,
                 now().isoformat(),
                 key,
@@ -161,6 +166,69 @@ async def settle(
         if updated is None:
             raise OrderStateError(f"order {key} is absent")
         return _row_to_order(updated)
+    finally:
+        await conn.close()
+
+
+async def get(key: str) -> OrderRecord | None:
+    """Return the order or None when absent."""
+    conn = await _connect()
+    try:
+        cursor = await conn.execute("SELECT * FROM orders WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_order(row)
+    finally:
+        await conn.close()
+
+
+async def record_commission(key: str, commission: Decimal) -> OrderRecord:
+    """Write commission onto an already-terminal order."""
+    conn = await _connect()
+    try:
+        cursor = await conn.execute("SELECT * FROM orders WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        if row is None:
+            raise OrderStateError(f"order {key} is absent")
+        current = OrderStatus(row["status"])
+        if current not in _TERMINAL:
+            raise OrderStateError(f"order {key} is {current.value}")
+        await conn.execute(
+            "UPDATE orders SET commission = ? WHERE key = ?",
+            (str(commission), key),
+        )
+        await conn.commit()
+        cursor = await conn.execute("SELECT * FROM orders WHERE key = ?", (key,))
+        updated = await cursor.fetchone()
+        if updated is None:
+            raise OrderStateError(f"order {key} is absent")
+        return _row_to_order(updated)
+    finally:
+        await conn.close()
+
+
+async def list_missing_commission(
+    since: datetime, until: datetime
+) -> list[OrderRecord]:
+    """FILLED orders in the period whose commission is still unknown."""
+    _reject_naive(since)
+    _reject_naive(until)
+    conn = await _connect()
+    try:
+        cursor = await conn.execute(
+            """
+            SELECT * FROM orders
+            WHERE status = 'FILLED'
+              AND commission IS NULL
+              AND settled_at >= ?
+              AND settled_at <= ?
+            ORDER BY settled_at ASC
+            """,
+            (since.isoformat(), until.isoformat()),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_order(row) for row in rows]
     finally:
         await conn.close()
 
