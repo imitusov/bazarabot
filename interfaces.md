@@ -597,6 +597,27 @@ On failure, alerts and still returns the intended path.
 Deletes `zarabot-*.db` files whose mtime is strictly older than `retention_days`.
 Returns how many were removed. Missing directory → `0`.
 
+## `zarabot.app.startup`
+
+Fixed order. No entry before the ready alert. `StartupError` after an alert
+when Telegram credentials are present. Sleep-on-failure belongs to `__main__`.
+Wires `/report` to `reporter.weekly.build`. Applies stop remedies from
+reconciliation via `execution.orders`.
+
+**`StartupError`**
+Raised when startup aborts. No trading has begun.
+
+**`AppContext`**
+Frozen: `config`, `strategies`, `halt`, `reconciliation`. Lives here, not in
+`models`.
+
+**`async start() → AppContext`**
+`config.load` → `logging_setup.configure` → `db.migrations.apply` →
+`strategies.registry.enabled` → `market.session.refresh` →
+`execution.orders.resolve_unfinished` → `broker.reconcile.reconcile` plus stop
+remedies → restore halt → ready `alert`.
+
+
 
 
 
