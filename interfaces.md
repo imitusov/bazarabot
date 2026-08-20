@@ -177,6 +177,9 @@ Raises `ValueError` on a naive `closed_at`.
 **`async list_open() → list[Position]`**
 Open positions, or `[]`. Never `None`.
 
+**`async list_closed() → list[Position]`**
+Closed positions, newest `exit_at` first, or `[]`. Never `None`.
+
 **`async get(position_id: int) → Position | None`**
 `None` when absent.
 

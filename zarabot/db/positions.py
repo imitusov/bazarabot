@@ -248,6 +248,23 @@ async def list_open() -> list[Position]:
         await conn.close()
 
 
+async def list_closed() -> list[Position]:
+    """Closed positions, newest exit first. Empty list when none; never None."""
+    conn = await _connect()
+    try:
+        cursor = await conn.execute(
+            """
+            SELECT * FROM positions
+            WHERE status = 'CLOSED'
+            ORDER BY exit_at DESC, id DESC
+            """
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_position(row) for row in rows]
+    finally:
+        await conn.close()
+
+
 async def get(position_id: int) -> Position | None:
     """Return the position or None when absent."""
     conn = await _connect()
