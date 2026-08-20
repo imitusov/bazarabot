@@ -312,3 +312,31 @@ async def adopt(
         return loaded
     finally:
         await conn.close()
+
+
+async def update_lots(position_id: int, lots: int) -> Position:
+    """Write the broker's lot count onto an open position."""
+    if lots <= 0:
+        raise PositionStateError("lots must be positive")
+    existing = await get(position_id)
+    if existing is None:
+        raise PositionStateError(f"position {position_id} is absent")
+    if existing.status != "OPEN":
+        raise PositionStateError(f"position {position_id} is already closed")
+    conn = await _connect()
+    try:
+        cursor = await conn.execute(
+            "UPDATE positions SET lots = ? WHERE id = ? AND status = 'OPEN'",
+            (lots, position_id),
+        )
+        await conn.commit()
+        if cursor.rowcount != 1:
+            raise PositionStateError(
+                f"position {position_id} is already closed or absent"
+            )
+        loaded = await get(position_id)
+        if loaded is None:
+            raise PositionStateError(f"position {position_id} is absent")
+        return loaded
+    finally:
+        await conn.close()

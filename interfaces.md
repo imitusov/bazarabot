@@ -184,6 +184,10 @@ Open positions, or `[]`. Never `None`.
 Open LOCAL adopted position, strategy `ADOPTED`, stop/target from average price
 at 5%/10% (brief defaults). `open_order_key` is `ADOPTED-{figi}`.
 
+**`async update_lots(position_id: int, lots: int) → Position`**
+Writes the broker's lot count onto an open row. Raises `PositionStateError` if
+the row is absent, already closed, or `lots` is not positive.
+
 ## `zarabot.db.orders`
 
 Sole owner of `orders` rows and status transitions. Reads `DB_PATH` via
