@@ -1,0 +1,42 @@
+---
+description: Rules for appending to interfaces.md after a module passes
+globs: ["interfaces.md"]
+alwaysApply: false
+---
+
+# interfaces.md is a promise, not a notepad
+
+A signature recorded here means: this function exists, matches its contract, and
+its tests pass. Every later module calls what is written here without checking
+the source, so an inaccurate entry propagates into every module built after it.
+
+## Append only after tests pass
+
+Never record a signature for unfinished code. The append is the last step of a
+module, after green — not a plan written in advance.
+
+## Record, per public function
+
+- Exact name, exact parameters with types
+- Return type **including `| None`** where applicable
+- Whether it is `async`
+- One line on what it does
+- Exceptions that are part of the contract
+- Critical constraints — "sole owner of position mutation", "never raises",
+  "must be called before the broker"
+
+## Do not record
+
+Private helpers (leading underscore), implementation details, or constants not
+meant to be imported elsewhere. This file is the callable surface, nothing more.
+
+## Rules
+
+- **Match the implementation exactly.** If what you built differs from the
+  contract in the spec, record what actually exists **and flag the discrepancy** —
+  the spec may need amending. Never record the contract's version of a signature
+  when the code says something else.
+- **Never edit another module's entry.** Entries are appended. Rewriting one
+  silently changes what every later module believes it can call.
+- **One section per module, in build order**, so the file reads top-to-bottom as
+  the dependency chain.

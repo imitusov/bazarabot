@@ -88,6 +88,65 @@ SIGNIFICANT if it diverges from the contract, MINOR otherwise. Quote the
 contract line and the code line for each. If you find nothing, say so plainly.
 ```
 
+## Which wiki skills to load
+
+The wiki guides are **authoring** guides — how to write a brief, a spec, a build
+order. Those documents already exist here, so most of them have no role in the
+build loop, and loading them is actively harmful: an agent handed
+`business-brief-guide` may decide to "improve" the brief in the middle of
+implementing a module, which is precisely the scope creep `AGENTS.md` forbids.
+
+| Wiki skill | Where it lives here | Why |
+|---|---|---|
+| `interfaces-template` | `.cursor/rules/interfaces.mdc` | Auto-attaches on `interfaces.md`. The one discipline exercised at the end of **every** module |
+| `technical-spec-guide` | `.cursor/skills/technical-spec-guide/` | **Manual only** (`/technical-spec-guide`). For amending the spec when a module reveals a contract defect |
+| `business-brief-guide` | `.cursor/skills/business-brief-guide/` | **Manual only**. For amending the brief when scope changes |
+| `project-rules-template` | already output as `AGENTS.md` | The template authored the rulebook; the rulebook is what agents read |
+| `module-task-template` | already output as `tasks/*.md` | Its agent instructions are embedded verbatim in all 38 task files |
+| `dependency-order-guide` | already output as `dependency-order.md` | |
+| `environment-setup-template` | already output as `environment-setup.md` | |
+| `documents-relationship` | — | Orientation for a human; changes no per-module behaviour |
+| `workflow` | — | Same |
+
+Both installed skills carry `disable-model-invocation: true`, so the agent cannot
+pull them in on its own initiative — you invoke them deliberately when a document
+genuinely needs amending.
+
+## Test-first: how it is actually enforced
+
+Test-first is stated in three places, deliberately, because each reaches a
+different surface:
+
+1. `AGENTS.md` — the workflow, read by Agent mode every session
+2. `.cursor/rules/test-first.mdc` — globbed on `*.py`, so it reaches Chat and
+   Composer too, which never read `AGENTS.md`
+3. Every task file's **Agent instructions** — steps 1 and 2, in the prompt itself
+
+None of that mechanically prevents an agent writing the implementation first and
+back-filling tests that pass against it. Two things make it stick:
+
+**The test cases come from the spec, not from the agent.** Each task file pastes
+that module's test contract verbatim from `technical-spec.md` §3.2. The agent is
+transcribing assertions someone else wrote against the contract, not inventing
+tests that describe whatever it happened to build. This is the strongest control
+and it is already in place.
+
+**Two commits per module makes red-then-green auditable.** Commit the failing
+tests first, then the implementation:
+
+```
+test(models): failing tests from spec section 3.2
+Implement models: domain types and validation
+```
+
+The first commit is proof the tests existed and failed before any implementation
+did. One commit per module hides the order and you have only the agent's word for
+it. This deviates from the `AGENTS.md` git convention of one commit per module —
+deliberately, and `AGENTS.md` records the exception.
+
+If you ever doubt a module: `git show` the test commit and check the tests fail
+against an empty implementation.
+
 ## Build order
 
 Follow `dependency-order.md`. Modules 1–20 need nothing from the broker and can

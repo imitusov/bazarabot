@@ -121,8 +121,12 @@ vendor/           the broker SDK wheel
 
 ## Git
 
-- One commit per completed module, tests and implementation together.
-- Message: `Implement <module>: <one-line summary>`.
+- **Two commits per module**, in this order:
+  1. `test(<module>): failing tests from spec §3.2` — the tests alone, red.
+  2. `Implement <module>: <one-line summary>` — the implementation, green.
+  The first commit is the evidence that tests preceded implementation. A single
+  combined commit hides the order, leaving only the agent's assurance that
+  test-first was followed.
 - Never commit with failing tests.
 - Never commit secrets or generated artefacts.
 
