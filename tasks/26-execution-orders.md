@@ -134,14 +134,23 @@ Owns order submission, the submission locks, and crash recovery.
   on exception, and on task cancellation.
 
 **`async close_position(position: Position, trigger: ExitTrigger) → Position`**
-- **Cancels the standing stop order first**, returns the position to `LOCAL`,
-  then submits a market sell for the full position, settles, closes the position, and starts the ticker's cooldown.
-  This order is binding: selling before cancelling leaves a live stop order
-  against a position that no longer exists, which can sell a quantity the account
-  does not hold.
-- When the trigger is `STOP_LOSS`, the exchange has already sold. This function is
-  not called; the fill is discovered by polling stop-order state or by
-  reconciliation, and the position is closed from that fill.
+- This is the **bot-initiated** exit path, for any trigger. It applies whenever
+  the bot decides to leave a position, including `STOP_LOSS` on a position the
+  bot itself is protecting.
+- When `position.stop_protection == 'EXCHANGE'`: cancels the standing stop order
+  first and demotes the position to `LOCAL`, then submits a market sell, settles,
+  closes the position, and starts the cooldown. This order is binding — selling
+  before cancelling leaves a live stop order against a position that no longer
+  exists, which can sell a quantity the account does not hold.
+- When `position.stop_protection == 'LOCAL'`: there is no standing stop to
+  cancel; submits the market sell directly.
+- Raises `ValueError` for `STOP_LOSS` **only when the position is `EXCHANGE`**.
+  There the exchange owns the trigger and selling here would sell the position
+  twice; the exchange's own fill is handled by `close_executed_stop` instead.
+- The discriminator is **who acts**, never which trigger fired. A `STOP_LOSS` can
+  arrive by either path depending on which side owns the stop at that moment,
+  and conflating the two leaves a `LOCAL` position with a breached stop that
+  nothing is able to sell.
 - Raises `ExitFailed` after alerting, when the broker rejects or is unreachable.
   The caller retries on the next cycle. This is the documented exception to the
   no-retry rule.
@@ -186,7 +195,9 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 23. **Protective stop order rejected or unplaceable** → retry three times, then
     mark the position `stop_protection = 'LOCAL'`, alert, and enforce the stop by
-    polling. Never unwind a sound position because a secondary order failed.
+    polling: `lifecycle.exits` returns `STOP_LOSS` for that position and
+    `execution.orders.close_position` sells it. Never unwind a sound position
+    because a secondary order failed.
 
 26. **Stop order executed by the exchange** → not an error. Close the position
     from the fill with `exit_trigger = STOP_LOSS`, start the cooldown, alert.
@@ -235,6 +246,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A `LOCAL` position returns `STOP_LOSS` from `lifecycle.exits`; an `EXCHANGE`
   position never does (proves the trigger has exactly one owner — the test that
   prevents selling a position twice).
+- `close_position(position, STOP_LOSS)` on a **`LOCAL`** position submits a market
+  sell and closes it (proves the bot can act on the stop it owns — the path that
+  makes the `LOCAL` degrade of rule 23 real protection rather than a label).
+- `close_position(position, STOP_LOSS)` on an **`EXCHANGE`** position raises
+  `ValueError` and submits nothing (proves the bot cannot sell out from under a
+  stop the exchange owns).
 - A take-profit exit cancels the stop order **before** submitting the sell
   (proves the binding order).
 - A cancel that races an already-executed stop is not an error (proves
