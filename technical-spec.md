@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.5
+**Version:** 1.6
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -466,8 +466,13 @@ Additionally, `strategies.ml_model`:
 **stop-order lifecycle** (`execution.orders`, `broker.reconcile`)
 - Opening a position places exactly one stop order at the computed price
   (happy path).
-- A stop order rejected three times marks the position `LOCAL`, alerts, and
-  leaves the position open (proves the degrade path, not an unwind).
+- A position is `LOCAL` between its creation and the stop being confirmed, and
+  `EXCHANGE` only after (proves there is no window in which neither owner is
+  watching — the gap this two-step design exists to close).
+- A stop order rejected three times leaves the position `LOCAL` and open, and
+  alerts (proves the degrade path, not an unwind).
+- `set_stop_protection(EXCHANGE, None)` raises, as does `(LOCAL, key)` (proves
+  the pairing invariant that keeps ownership unambiguous).
 - A `LOCAL` position returns `STOP_LOSS` from `lifecycle.exits`; an `EXCHANGE`
   position never does (proves the trigger has exactly one owner — the test that
   prevents selling a position twice).
@@ -593,11 +598,26 @@ Domain types shared across every module. Contains validation only, never logic.
 - `Side` — `BUY`, `SELL`
 - `OrderStatus` — `SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED`, `UNKNOWN`
 - `ExitTrigger` — `STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`
-- `RejectionReason` — `HALTED`, `SESSION_CLOSED`, `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`, `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `ZERO_LOTS`, `POSITION_CAP`
+- `RejectionReason` — `HALTED`, `SESSION_CLOSED`, `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`, `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `ZERO_LOTS`, `POSITION_CAP`, `BROKER_LOT_LIMIT`
 - `HaltReason` — `DAILY_LOSS_LIMIT`, `MANUAL`, `RECONCILIATION_MISMATCH`
+- `StopOrderStatus` — `PLACING`, `ACTIVE`, `CANCELLED`, `EXECUTED`, `ORPHANED`, `FAILED`
+- `StopProtection` — `EXCHANGE`, `LOCAL`. Which side owns a position's stop trigger
+
+`BROKER_LOT_LIMIT` covers the broker refusing the size outright — its maximum
+for the account is zero lots. It is distinct from `ZERO_LOTS`, which means our
+own sizing arithmetic produced nothing affordable; the two have different causes
+and only separate reasons make the rejection log diagnostic.
 
 **Frozen dataclasses** — `Candle`, `Instrument`, `Signal`, `Position`,
-`OrderRecord`, `PortfolioState`, `SessionInfo`, `RiskDecision`, `BacktestResult`.
+`OrderRecord`, `StopOrderRecord`, `OperationRecord`, `PortfolioState`,
+`SessionInfo`, `RiskDecision`, `HaltState`, `ReconciliationReport`,
+`TradingCalendar`, `BacktestResult`.
+
+`OperationRecord` carries the broker's actual commission. `TradingCalendar` is
+the queried schedule that `clock.trading_days_between` and `market.session` read.
+`AppContext` (the assembled dependencies) and `LoadedModel` (an ML model plus its
+feature manifest) are **not** domain types — they live with `app.startup` and
+`strategies.ml_model` respectively, and no other module constructs them.
 
 - Every monetary field is `Decimal`; every timestamp field is timezone-aware.
 - Construction with a naive datetime raises `ValueError`.
@@ -681,7 +701,21 @@ Owns schema creation and version tracking.
 
 **`async open(signal: Signal, order: OrderRecord, instrument: Instrument, stop: Decimal, target: Decimal, opened_at: datetime) → Position`**
 - Inserts an open position and returns it with its assigned identifier.
+- Inserts with `stop_protection = LOCAL` **always**. The position row is created
+  before the standing stop order exists, and for that window the bot itself is
+  the only thing watching the stop. Defaulting to `LOCAL` means the position is
+  never recorded as protected by something that has not been confirmed to exist;
+  the failure direction is a redundant local check, not an unwatched position.
 - Raises `PositionStateError` if an open position already exists for the ticker.
+
+**`async set_stop_protection(position_id: int, protection: StopProtection, stop_order_key: str | None) → Position`**
+- Promotes a position to `EXCHANGE` once its standing stop is confirmed active,
+  or returns it to `LOCAL` when that stop is cancelled, executed, or found
+  missing.
+- Raises `PositionStateError` when `EXCHANGE` is requested without a key, or
+  `LOCAL` with one — the pairing is the invariant that prevents both owners
+  acting on the same position.
+- Called only by `execution.orders` and by the startup remediation step.
 
 **`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
@@ -1006,8 +1040,12 @@ Owns order submission, the submission locks, and crash recovery.
   `broker.client.get_max_lots`; a request above it is reduced to the broker's
   maximum and logged, and a maximum of zero cancels the entry with a recorded
   rejection.
+- On confirmation that the stop is standing, promotes the position to
+  `EXCHANGE` via `db.positions.set_stop_protection`. Until that call the position
+  remains `LOCAL` and the bot watches the stop itself, so no window exists in
+  which nothing is watching.
 - If the stop-loss cannot be placed after three attempts, the position is **not**
-  unwound. It is marked `stop_protection = 'LOCAL'`, the owner is alerted, and
+  unwound. It stays `LOCAL`, the owner is alerted, and
   `lifecycle.exits` enforces that position's stop by polling instead. Force
   selling a sound position because a secondary order failed would convert an
   operational problem into a realised loss.
@@ -1019,8 +1057,8 @@ Owns order submission, the submission locks, and crash recovery.
   on exception, and on task cancellation.
 
 **`async close_position(position: Position, trigger: ExitTrigger) → Position`**
-- **Cancels the standing stop order first**, then submits a market sell for the
-  full position, settles, closes the position, and starts the ticker's cooldown.
+- **Cancels the standing stop order first**, returns the position to `LOCAL`,
+  then submits a market sell for the full position, settles, closes the position, and starts the ticker's cooldown.
   This order is binding: selling before cancelling leaves a live stop order
   against a position that no longer exists, which can sell a quantity the account
   does not hold.
@@ -1461,7 +1499,7 @@ is a defect — these fields are what makes the log answerable after the fact.
 | `exit_failed` | ERROR | `position_id`, `ticker`, `attempt`, `error` |
 | `stop_order_placed` | INFO | `position_id`, `ticker`, `stop_price`, `stop_order_id` |
 | `stop_order_cancelled` | INFO | `position_id`, `stop_order_id`, `cause` |
-| `stop_order_executed` | INFO | `position_id`, `ticker`, `fill_price`, `slippage_vs_stop` |
+| `stop_order_executed` | INFO | `position_id`, `ticker`, `fill_price`, `gap_vs_stop` |
 | `stop_protection_degraded` | ERROR | `position_id`, `ticker`, `attempts` |
 | `stop_order_orphaned` | ERROR | `stop_order_id`, `ticker` |
 | `partial_fill` | WARNING | `key`, `ticker`, `intent`, `requested_lots`, `filled_lots` |
@@ -1590,9 +1628,10 @@ This has consequences the deployment section must handle: the image build depend
 on a single third-party index that is not PyPI, cannot be assumed to be as
 available or as long-lived, and complicates hash-pinning. See §10.
 
-Two dependency sets: `requirements-server.txt` runs on the VPS,
+Three dependency sets: `requirements-server.txt` runs on the VPS;
 `requirements-sandbox.txt` adds research tooling and is never installed on the
-server.
+server; `requirements-dev.txt` adds the test and lint toolchain and is installed
+neither on the server nor in the image.
 
 **Server**
 

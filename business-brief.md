@@ -1,6 +1,6 @@
 # Zarabot — Business Brief
 
-**Version:** 1.3
+**Version:** 1.4
 **Date:** 2026-08-18
 **Status:** Ready for technical spec
 
@@ -817,7 +817,7 @@ record, the following were open during drafting and are now settled:
 | Language | English. |
 | Server | A VPS still to be rented; provisioning is a pre-development step. |
 | Position size on entry | 10% of allocated capital, identical for every trade. |
-| What closes a losing position | A fixed stop-loss 5% below entry, checked every polling cycle. |
+| What closes a losing position | A fixed stop-loss 5% below entry, held as a standing order by the exchange. |
 | Maximum concurrent positions | 10, so the whole allocation can be deployed. |
 | Daily order cap | None. Removed deliberately; a good day should not be truncated by a counter. |
 | Runaway-loop protection | A 2-hour per-instrument re-entry cooldown, replacing the order cap. |
