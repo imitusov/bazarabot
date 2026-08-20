@@ -1,6 +1,6 @@
 # Dependency Order — Zarabot
 
-**Version:** 1.0
+**Version:** 1.1
 **Derived from:** `technical-spec.md` v1.5
 **Versioning:** new version when a module is added, removed, or its dependencies
 change.
@@ -18,6 +18,10 @@ reads.
 2. **clock** — depends on: (nothing)
 3. **config** — depends on: (nothing)
 4. **logging_setup** — depends on: config
+4b. **telegram.notifier** — depends on: config, logging_setup
+    *(built as step 28 — see Corrections. It belongs here: it imports nothing
+    but `config`, and modules from step 21 onward are contractually required to
+    alert.)*
 
 `models` comes first because every other module's signatures are written in its
 types. `clock` before everything that touches time, since it is the sole owner
@@ -85,7 +89,6 @@ remedies through the executor. Building it second keeps that separation obvious.
 
 ## Layer 7 — Interface and reporting
 
-28. **telegram.notifier** — depends on: config, logging_setup
 29. **telegram.commands** — depends on: config, state.halt, db.positions, pnl,
     execution.orders
 30. **reporter.weekly** — depends on: pnl, db.positions, db.signals,
@@ -112,6 +115,26 @@ does, backtests stop being evidence about live behaviour and the whole research
 loop becomes decorative.
 
 ---
+
+## Corrections
+
+**`telegram.notifier` was placed at step 28 and belongs at step 4b.** It imports
+only `config`, so nothing forced it late — the placement came from grouping it
+with the other Telegram code rather than from its dependencies.
+
+The cost was not cosmetic. `execution.orders` (26) and `broker.reconcile` (27)
+are both contractually required to alert the owner — a failed exit, an
+unprotected position, an external close, an orphaned stop — and both were built
+before the notifier existed. Each defined a local `_alert()` writing to the error
+log instead. The brief's monitoring model is that Telegram is the dashboard and
+silence means something is wrong; those alerts were going to stdout on an
+unwatched server, and nothing in the build loop was scheduled to come back for
+them.
+
+Step numbers below 28 are left as built so they continue to match `tasks/`
+filenames and commit history. The lesson generalises: **place a module by what it
+imports, not by which directory it lives in.** Anything the safety-critical
+modules must call belongs beneath them, whatever it is named.
 
 ## Notes on the graph
 

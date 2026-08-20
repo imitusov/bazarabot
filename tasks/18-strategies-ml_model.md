@@ -20,6 +20,11 @@ Module **18** of 38 in `dependency-order.md`. Everything before it is complete a
 - Loads the exported model and its feature manifest.
 - Raises `ModelLoadError` when absent or unreadable, and `ModelContractError`
   when the manifest's feature names or order differ from those the code builds.
+- **Trust assumption:** loading a joblib bundle executes code contained in the
+  file. `ML_MODEL_PATH` must therefore point only at a model this project's own
+  `sandbox.train` produced and the owner copied across. It is not a path to
+  accept from anywhere else, and this is a deployment rule rather than something
+  the loader can validate.
 - Called once at startup, never on the trading path — a model failure must be
   loud and early, never mid-session.
 
@@ -31,7 +36,11 @@ Module **18** of 38 in `dependency-order.md`. Everything before it is complete a
   no other code computes these features. Duplicating it is a critical defect —
   see the sandbox contract.
 
-**`evaluate(...) → Signal | None`** — as the protocol, returning `None` below the configured confidence threshold. Absent from the registry entirely when `ML_MODEL_PATH` is unset.
+**`evaluate(...) → Signal | None`** — as the protocol, returning `None` below
+`CONFIDENCE_THRESHOLD`, a module constant rather than an environment variable.
+The threshold is a property of the trained model, not of the deployment: moving
+it changes what the model means, so it travels with the code and a redeploy, the
+same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Absent from the registry entirely when `ML_MODEL_PATH` is unset.
 
 ## Relevant error handling rules
 

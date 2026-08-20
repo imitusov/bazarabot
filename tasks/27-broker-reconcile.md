@@ -105,12 +105,19 @@ historical record is the purpose of the project. Backups are retained 30 days.
 - **Stop orders are reconciled too, but this module does not act on them.**
   Every open position must have exactly one live stop order. This module
   *reports* each discrepancy — a position with no stop, a stop with no position,
-  a stop at the wrong price — and the caller performs the remedy through
+  a stop at the wrong price, **or more than one live stop on the same position** —
+  and the caller performs the remedy through
   `execution.orders`, which is the only module permitted to place or cancel
   orders. Keeping reconciliation observational is what allows it to run
   anywhere, including read-only diagnostics, without financial side effects.
 - On restart an existing stop is **adopted** rather than replaced — two stops on
   one position would sell it twice.
+- **More than one live stop on a position is reported as `STOP_DUPLICATE`**, and
+  is the most serious discrepancy this module can find: it is the double-sell
+  condition the ownership design exists to prevent, actually present. The remedy
+  keeps the stop whose key matches the position's recorded `stop_order_key`, or
+  the oldest if none matches, and cancels every other. A duplicate must never be
+  silently skipped as though it were the position's one legitimate stop.
 - Returns a report enumerating every adjustment; an empty report means agreement.
 - Idempotent.
 - Ordering constraint: runs during `app.startup` after migrations and after
@@ -150,10 +157,16 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - An externally-closed position is closed with `order = None` and **no row is
   written to `orders`** (proves reconciliation records only what the bot actually
   submitted).
+- Two live stops on one open position report `STOP_DUPLICATE` naming both
+  (proves the double-sell condition is detected rather than half-claimed — the
+  case where the second stop is neither adopted nor reported as an orphan).
 - A lot-count mismatch adopts the broker's count and alerts (proves quantity
   reconciliation).
-- Reconciliation is idempotent: running it twice against an unchanged broker
-  produces adjustments once (proves it does not thrash).
+- Reconciliation applies each **corrective write** at most once: running it twice
+  against an unchanged broker closes, adopts or re-lots nothing the second time
+  (proves it does not thrash). Stop-order *findings* are re-reported until the
+  caller remedies them, which is correct — this module observes, and an
+  unremedied discrepancy is still true on the second pass.
 
 ## Expected output
 

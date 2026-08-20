@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.11
+**Version:** 1.12
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -387,10 +387,16 @@ it proves.
 - An externally-closed position is closed with `order = None` and **no row is
   written to `orders`** (proves reconciliation records only what the bot actually
   submitted).
+- Two live stops on one open position report `STOP_DUPLICATE` naming both
+  (proves the double-sell condition is detected rather than half-claimed — the
+  case where the second stop is neither adopted nor reported as an orphan).
 - A lot-count mismatch adopts the broker's count and alerts (proves quantity
   reconciliation).
-- Reconciliation is idempotent: running it twice against an unchanged broker
-  produces adjustments once (proves it does not thrash).
+- Reconciliation applies each **corrective write** at most once: running it twice
+  against an unchanged broker closes, adopts or re-lots nothing the second time
+  (proves it does not thrash). Stop-order *findings* are re-reported until the
+  caller remedies them, which is correct — this module observes, and an
+  unremedied discrepancy is still true on the second pass.
 
 **`market.session`**
 - A timestamp inside the main session reports open (happy path).
@@ -770,6 +776,14 @@ Owns schema creation and version tracking.
 **`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
   P&L and the closing order.
+- Realised P&L is `(exit − entry) × lots × lot_size` **minus commission on both
+  legs** — the opening order's and the closing order's. Netting only the closing
+  leg overstates every realised result by the entry commission, permanently and
+  invisibly. On an account this size, commission on a round trip is a meaningful
+  fraction of a 10% move.
+- Also clears `stop_protection` to `LOCAL` and `stop_order_key` to null, since a
+  closed position owns no stop. This is recorded here because it is a mutation a
+  caller would otherwise not expect.
 - `order` is `None` **only** when `trigger` is `EXTERNAL` — a position that
   disappeared at the broker was not closed by an order of ours, and there is
   nothing to record. Any other trigger with `order = None` raises `ValueError`,
@@ -788,6 +802,17 @@ Owns schema creation and version tracking.
 
 **`async get(position_id: int) → Position | None`**
 - Returns `None` when absent rather than raising.
+
+**`async list_closed() → list[Position]`**
+- Closed positions, newest exit first. Empty list when none. Consumed by
+  `reporter.weekly` and `/history`.
+
+**`async update_lots(position_id: int, lots: int) → Position`**
+- Writes the broker's lot count onto an open position during reconciliation.
+- Raises `PositionStateError` for a non-positive count, or a position that is
+  absent or already closed.
+- Never changes entry price, stop or target: the position's risk levels were set
+  at entry and a quantity correction does not re-price them.
 
 **`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime) → Position`**
 - Creates an open position for a holding discovered at the broker but unknown
@@ -981,12 +1006,19 @@ above; must never return a `float`.
 - **Stop orders are reconciled too, but this module does not act on them.**
   Every open position must have exactly one live stop order. This module
   *reports* each discrepancy — a position with no stop, a stop with no position,
-  a stop at the wrong price — and the caller performs the remedy through
+  a stop at the wrong price, **or more than one live stop on the same position** —
+  and the caller performs the remedy through
   `execution.orders`, which is the only module permitted to place or cancel
   orders. Keeping reconciliation observational is what allows it to run
   anywhere, including read-only diagnostics, without financial side effects.
 - On restart an existing stop is **adopted** rather than replaced — two stops on
   one position would sell it twice.
+- **More than one live stop on a position is reported as `STOP_DUPLICATE`**, and
+  is the most serious discrepancy this module can find: it is the double-sell
+  condition the ownership design exists to prevent, actually present. The remedy
+  keeps the stop whose key matches the position's recorded `stop_order_key`, or
+  the oldest if none matches, and cancels every other. A duplicate must never be
+  silently skipped as though it were the position's one legitimate stop.
 - Returns a report enumerating every adjustment; an empty report means agreement.
 - Idempotent.
 - Ordering constraint: runs during `app.startup` after migrations and after
@@ -1042,6 +1074,11 @@ unknown name.
 - Loads the exported model and its feature manifest.
 - Raises `ModelLoadError` when absent or unreadable, and `ModelContractError`
   when the manifest's feature names or order differ from those the code builds.
+- **Trust assumption:** loading a joblib bundle executes code contained in the
+  file. `ML_MODEL_PATH` must therefore point only at a model this project's own
+  `sandbox.train` produced and the owner copied across. It is not a path to
+  accept from anywhere else, and this is a deployment rule rather than something
+  the loader can validate.
 - Called once at startup, never on the trading path — a model failure must be
   loud and early, never mid-session.
 
@@ -1053,7 +1090,11 @@ unknown name.
   no other code computes these features. Duplicating it is a critical defect —
   see the sandbox contract.
 
-**`evaluate(...) → Signal | None`** — as the protocol, returning `None` below the configured confidence threshold. Absent from the registry entirely when `ML_MODEL_PATH` is unset.
+**`evaluate(...) → Signal | None`** — as the protocol, returning `None` below
+`CONFIDENCE_THRESHOLD`, a module constant rather than an environment variable.
+The threshold is a property of the trained model, not of the deployment: moving
+it changes what the model means, so it travels with the code and a redeploy, the
+same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Absent from the registry entirely when `ML_MODEL_PATH` is unset.
 
 ### `zarabot/risk/sizing.py`
 

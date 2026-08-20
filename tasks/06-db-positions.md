@@ -78,6 +78,14 @@ Module **6** of 38 in `dependency-order.md`. Everything before it is complete an
 **`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
   P&L and the closing order.
+- Realised P&L is `(exit − entry) × lots × lot_size` **minus commission on both
+  legs** — the opening order's and the closing order's. Netting only the closing
+  leg overstates every realised result by the entry commission, permanently and
+  invisibly. On an account this size, commission on a round trip is a meaningful
+  fraction of a 10% move.
+- Also clears `stop_protection` to `LOCAL` and `stop_order_key` to null, since a
+  closed position owns no stop. This is recorded here because it is a mutation a
+  caller would otherwise not expect.
 - `order` is `None` **only** when `trigger` is `EXTERNAL` — a position that
   disappeared at the broker was not closed by an order of ours, and there is
   nothing to record. Any other trigger with `order = None` raises `ValueError`,
@@ -96,6 +104,17 @@ Module **6** of 38 in `dependency-order.md`. Everything before it is complete an
 
 **`async get(position_id: int) → Position | None`**
 - Returns `None` when absent rather than raising.
+
+**`async list_closed() → list[Position]`**
+- Closed positions, newest exit first. Empty list when none. Consumed by
+  `reporter.weekly` and `/history`.
+
+**`async update_lots(position_id: int, lots: int) → Position`**
+- Writes the broker's lot count onto an open position during reconciliation.
+- Raises `PositionStateError` for a non-positive count, or a position that is
+  absent or already closed.
+- Never changes entry price, stop or target: the position's risk levels were set
+  at entry and a quantity correction does not re-price them.
 
 **`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime) → Position`**
 - Creates an open position for a holding discovered at the broker but unknown
