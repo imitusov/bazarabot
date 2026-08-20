@@ -7,9 +7,9 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sandbox.data import load
 from t_tech.invest.schemas import CandleInterval
 
+from sandbox.data import load
 from zarabot.models import Candle, Instrument
 
 NOW = datetime(2026, 3, 16, 15, 0, tzinfo=UTC)
