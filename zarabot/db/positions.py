@@ -8,6 +8,7 @@ from decimal import Decimal
 import aiosqlite
 
 from zarabot.config import load
+from zarabot.db.orders import get as get_order
 from zarabot.models import (
     ExitTrigger,
     Instrument,
@@ -172,12 +173,13 @@ async def set_stop_protection(
         await conn.close()
 
 
-async def _commission_for_key(conn: aiosqlite.Connection, key: str) -> Decimal:
-    cursor = await conn.execute("SELECT commission FROM orders WHERE key = ?", (key,))
-    row = await cursor.fetchone()
-    if row is None or row["commission"] is None:
+async def _order_commission(key: str | None) -> Decimal:
+    if not key:
         return Decimal("0")
-    return Decimal(str(row["commission"]))
+    order = await get_order(key)
+    if order is None or order.commission is None:
+        return Decimal("0")
+    return order.commission
 
 
 async def close(
@@ -205,15 +207,13 @@ async def close(
         if order is not None and order.commission is not None
         else Decimal("0")
     )
+    entry_commission = await _order_commission(existing.open_order_key)
+    realised = (
+        (exit_price - existing.entry_price) * units - entry_commission - exit_commission
+    )
     conn = await _connect()
     try:
         await conn.execute("BEGIN IMMEDIATE")
-        entry_commission = await _commission_for_key(conn, existing.open_order_key)
-        realised = (
-            (exit_price - existing.entry_price) * units
-            - entry_commission
-            - exit_commission
-        )
         cursor = await conn.execute(
             """
             UPDATE positions
@@ -296,6 +296,40 @@ async def get(position_id: int) -> Position | None:
         if row is None:
             return None
         return _row_to_position(row)
+    finally:
+        await conn.close()
+
+
+async def recompute_realised(position_id: int) -> Position:
+    """Rewrite realised_pnl for a closed position from current order commissions."""
+    existing = await get(position_id)
+    if existing is None:
+        raise PositionStateError(f"position {position_id} is absent")
+    if existing.status != "CLOSED" or existing.exit_price is None:
+        raise PositionStateError(f"position {position_id} is not closed")
+    units = Decimal(existing.lots * existing.lot_size)
+    realised = (
+        (existing.exit_price - existing.entry_price) * units
+        - await _order_commission(existing.open_order_key)
+        - await _order_commission(existing.close_order_key)
+    )
+    conn = await _connect()
+    try:
+        cursor = await conn.execute(
+            """
+            UPDATE positions
+            SET realised_pnl = ?
+            WHERE id = ? AND status = 'CLOSED'
+            """,
+            (str(realised), position_id),
+        )
+        await conn.commit()
+        if cursor.rowcount != 1:
+            raise PositionStateError(f"position {position_id} is not closed")
+        loaded = await get(position_id)
+        if loaded is None:
+            raise PositionStateError(f"position {position_id} is absent")
+        return loaded
     finally:
         await conn.close()
 

@@ -339,9 +339,7 @@ async def test_external_close_requires_no_order(db: Path) -> None:
     position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
     exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
     with pytest.raises(ValueError):
-        await close(
-            position.id, ExitTrigger.EXTERNAL, PRICE, AWARE, exit_order
-        )
+        await close(position.id, ExitTrigger.EXTERNAL, PRICE, AWARE, exit_order)
     closed = await close(position.id, ExitTrigger.EXTERNAL, PRICE, AWARE, None)
     assert closed.exit_trigger is ExitTrigger.EXTERNAL
     assert closed.close_order_key is None
@@ -423,4 +421,3 @@ async def test_recompute_realised_rejects_open_or_absent(db: Path) -> None:
     position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
     with pytest.raises(PositionStateError):
         await recompute_realised(position.id)
-
