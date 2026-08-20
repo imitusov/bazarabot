@@ -11,6 +11,7 @@ import aiosqlite
 import pytest
 
 from zarabot.db.migrations import apply
+from zarabot.db.orders import record_commission
 from zarabot.db.positions import (
     PositionStateError,
     adopt,
@@ -19,6 +20,7 @@ from zarabot.db.positions import (
     list_closed,
     list_open,
     open,
+    recompute_realised,
     set_stop_protection,
     update_lots,
 )
@@ -362,4 +364,63 @@ async def test_adopt_uses_configured_stop_and_target(
     position = await adopt(_instrument(), 3, PRICE, AWARE)
     assert position.stop_price == Decimal("97.00")
     assert position.target_price == Decimal("112.00")
+
+
+async def test_close_reads_opening_commission_through_orders_get(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def missing(_key: str) -> None:
+        return None
+
+    monkeypatch.setattr("zarabot.db.positions.get_order", missing, raising=False)
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    exit_order = _order(
+        key=EXIT_KEY,
+        side=Side.SELL,
+        intent="EXIT",
+        filled_price=Decimal("110.00"),
+        commission=Decimal("1.50"),
+    )
+    await _insert_order(db, exit_order)
+    closed = await close(
+        position.id,
+        ExitTrigger.TAKE_PROFIT,
+        Decimal("110.00"),
+        AWARE,
+        exit_order,
+    )
+    # Opening row is ignored when get_order returns None → entry commission 0.
+    assert closed.realised_pnl == Decimal("198.50")
+
+
+async def test_recompute_realised_rewrites_closed_pnl(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    exit_order = _order(
+        key=EXIT_KEY,
+        side=Side.SELL,
+        intent="EXIT",
+        filled_price=Decimal("110.00"),
+        commission=Decimal("1.50"),
+    )
+    await _insert_order(db, exit_order)
+    closed = await close(
+        position.id,
+        ExitTrigger.TAKE_PROFIT,
+        Decimal("110.00"),
+        AWARE,
+        exit_order,
+    )
+    assert closed.realised_pnl == Decimal("197.00")
+    await record_commission(KEY, Decimal("3.00"))
+    updated = await recompute_realised(position.id)
+    assert updated.realised_pnl == Decimal("195.50")
+    assert updated.status == "CLOSED"
+
+
+async def test_recompute_realised_rejects_open_or_absent(db: Path) -> None:
+    with pytest.raises(PositionStateError):
+        await recompute_realised(999)
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    with pytest.raises(PositionStateError):
+        await recompute_realised(position.id)
 
