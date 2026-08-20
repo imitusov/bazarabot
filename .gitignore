@@ -1,0 +1,34 @@
+# Secrets — .env holds a full-access brokerage token.
+# Ignored before it exists, deliberately: a credential committed once is
+# committed forever, and the only remedy is revoking it at the broker.
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data — the live trade log and its backups belong on the server,
+# not in version control.
+data/
+*.db
+*.db-wal
+*.db-shm
+backups/
+
+# Research artefacts
+sandbox/cache/
+sandbox/models/
+*.ipynb_checkpoints/
+
+# OS
+.DS_Store
