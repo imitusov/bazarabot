@@ -9,7 +9,10 @@ from typing import Any
 
 import pytest
 from t_tech.invest.constants import INVEST_GRPC_API_SANDBOX
-from t_tech.invest.exceptions import AioRequestError, StatusCode
+from t_tech.invest.exceptions import (  # type: ignore[attr-defined]
+    AioRequestError,
+    StatusCode,
+)
 from t_tech.invest.schemas import (
     CandleInterval,
     OrderDirection,
@@ -50,7 +53,7 @@ from zarabot.models import (
 )
 
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
-TOKEN = "tinvest-secret-token"
+TOKEN = "tinvest-secret-token"  # noqa: S105
 REQUIRED_ENV = {
     "TINVEST_TOKEN": TOKEN,
     "TINVEST_ACCOUNT_ID": "acct-1",
@@ -99,7 +102,9 @@ class _AsyncClient:
                 lot=10,
                 min_price_increment=decimal_to_quotation(Decimal("0.01")),
                 currency="rub",
-                trading_status=SimpleNamespace(name="SECURITY_TRADING_STATUS_NORMAL_TRADING"),
+                trading_status=SimpleNamespace(
+                    name="SECURITY_TRADING_STATUS_NORMAL_TRADING"
+                ),
                 uid="uid-sber",
             )
         )
@@ -123,15 +128,13 @@ class _AsyncClient:
     async def get_last_prices(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_last_prices", kwargs)
         return SimpleNamespace(
-            last_prices=[
-                SimpleNamespace(price=decimal_to_quotation(Decimal("123.45")))
-            ]
+            last_prices=[SimpleNamespace(price=decimal_to_quotation(Decimal("123.45")))]
         )
 
     async def get_portfolio(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_portfolio", kwargs)
         return SimpleNamespace(
-            total_amount_currencies=decimal_to_money(Decimal("50000")),
+            total_amount_currencies=decimal_to_money(Decimal("50000"), "rub"),
             positions=[],
         )
 
@@ -161,9 +164,13 @@ class _AsyncClient:
             order_id="exch-1",
             execution_report_status=status,
             lots_requested=kwargs.get("quantity", 1),
-            lots_executed=1 if status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL else 0,
-            executed_order_price=decimal_to_money(Decimal("100")),
-            executed_commission=decimal_to_money(Decimal("0.5")),
+            lots_executed=(
+                1
+                if status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
+                else 0
+            ),
+            executed_order_price=decimal_to_money(Decimal("100"), "rub"),
+            executed_commission=decimal_to_money(Decimal("0.5"), "rub"),
             message=self._capture.order_message,
             figi=kwargs.get("figi", "BBG000000001"),
             direction=kwargs.get("direction"),
@@ -172,7 +179,10 @@ class _AsyncClient:
 
     async def post_stop_order(self, **kwargs: Any) -> SimpleNamespace:
         self._record("post_stop_order", kwargs)
-        return SimpleNamespace(stop_order_id="stop-1", order_request_id=kwargs.get("order_id", ""))
+        return SimpleNamespace(
+            stop_order_id="stop-1",
+            order_request_id=kwargs.get("order_id", ""),
+        )
 
     async def cancel_stop_order(self, **kwargs: Any) -> SimpleNamespace:
         self._record("cancel_stop_order", kwargs)
@@ -187,7 +197,7 @@ class _AsyncClient:
                     lots_requested=1,
                     figi="BBG000000001",
                     ticker="SBER",
-                    stop_price=decimal_to_money(Decimal("95")),
+                    stop_price=decimal_to_money(Decimal("95"), "rub"),
                     create_date=NOW,
                     order_request_id="k-stop",
                     status=SimpleNamespace(name="STOP_ORDER_STATUS_ACTIVE"),
@@ -209,8 +219,8 @@ class _AsyncClient:
                     id="op-1",
                     figi="BBG000000001",
                     date=NOW,
-                    payment=decimal_to_money(Decimal("-1.25")),
-                    price=decimal_to_money(Decimal("100")),
+                    payment=decimal_to_money(Decimal("-1.25"), "rub"),
+                    price=decimal_to_money(Decimal("100"), "rub"),
                     quantity=10,
                     operation_type=SimpleNamespace(name="OPERATION_TYPE_BROKER_FEE"),
                 )
@@ -224,8 +234,8 @@ class _AsyncClient:
             execution_report_status=OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL,
             lots_requested=1,
             lots_executed=1,
-            executed_order_price=decimal_to_money(Decimal("100")),
-            executed_commission=decimal_to_money(Decimal("0.5")),
+            executed_order_price=decimal_to_money(Decimal("100"), "rub"),
+            executed_commission=decimal_to_money(Decimal("0.5"), "rub"),
             figi="BBG000000001",
             direction=OrderDirection.ORDER_DIRECTION_BUY,
             order_date=NOW,
@@ -400,4 +410,22 @@ async def test_sandbox_mode_uses_sandbox_endpoint(
 async def test_get_candles_rejects_naive_datetimes(capture: _Capture) -> None:
     naive = datetime(2026, 3, 16, 10, 0)  # noqa: DTZ001
     with pytest.raises(ValueError):
-        await get_candles("BBG000000001", CandleInterval.CANDLE_INTERVAL_DAY, naive, NOW)
+        await get_candles(
+            "BBG000000001", CandleInterval.CANDLE_INTERVAL_DAY, naive, NOW
+        )
+
+
+@pytest.mark.asyncio
+async def test_missing_instrument_raises_instrument_not_found(
+    capture: _Capture,
+) -> None:
+    capture.fail = AioRequestError(StatusCode.NOT_FOUND, "no such share", None)
+    with pytest.raises(InstrumentNotFound):
+        await get_instrument("XXXX")
+
+
+@pytest.mark.asyncio
+async def test_missing_order_raises_order_not_found(capture: _Capture) -> None:
+    capture.fail = AioRequestError(StatusCode.NOT_FOUND, "no order", None)
+    with pytest.raises(OrderNotFound):
+        await get_order_state("missing-key")

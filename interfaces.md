@@ -384,4 +384,35 @@ Instantiates the names in `config.enabled_strategies`. Unknown names raise
 `ml_model_path` is `None`; otherwise `ml_model.load` is called and
 `ModelLoadError` / `ModelContractError` propagate.
 
+## `zarabot.broker.client`
+
+The only module that calls the broker. Sandbox is selected by
+`INVEST_GRPC_API_SANDBOX` endpoint, never `post_sandbox_*`. Never passes
+`confirm_margin_trade=True`. Never logs or raises the token. Prices are `Decimal`.
+
+**Exceptions:** `InstrumentNotFound`, `BrokerUnavailable`, `BrokerRateLimited`
+(with `retry_after: Decimal | None`), `OrderRejected` / `StopOrderRejected`
+(with `reason: str`), `OrderNotFound`.
+
+**`async get_instrument(ticker: str) → Instrument`**
+**`async get_candles(figi: str, interval, since: datetime, until: datetime) → list[Candle]`**
+Oldest-first. Empty list when none. `ValueError` on naive datetimes.
+**`async get_last_price(figi: str) → Decimal`**
+**`async get_portfolio() → PortfolioState`**
+Broker-authoritative cash and holdings.
+**`async get_trading_schedule(days: int) → list[SessionInfo]`**
+**`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
+`confirm_margin_trade=False`. Raises `OrderRejected`.
+**`async post_stop_loss(key: str, figi: str, lots: int, stop_price: Decimal) → StopOrderRecord`**
+GTC market stop-loss, `confirm_margin_trade=False`.
+**`async cancel_stop_order(stop_order_id: str) → None`**
+Idempotent; already-cancelled/executed is not an error.
+**`async list_stop_orders() → list[StopOrderRecord]`**
+**`async get_max_lots(figi: str) → int`**
+Buy-side market max lots.
+**`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**
+Actual commission, never estimated.
+**`async get_order_state(key: str) → OrderRecord`**
+Lookup by `order_id_type=ORDER_ID_TYPE_REQUEST`. Raises `OrderNotFound`.
+
 
