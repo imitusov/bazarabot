@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-import joblib
+import joblib  # type: ignore[import-untyped]
 import pytest
 
 from zarabot.models import Candle, Side
@@ -50,7 +50,11 @@ def _candles(closes: Sequence[int | str]) -> list[Candle]:
     return out
 
 
-def _dump(path: Path, buy_proba: float, features: tuple[str, ...] | None = None) -> Path:
+def _dump(
+    path: Path,
+    buy_proba: float,
+    features: tuple[str, ...] | None = None,
+) -> Path:
     joblib.dump(
         {
             "model": _ProbaModel(buy_proba),

@@ -341,4 +341,27 @@ Pure. Breakout above the prior 20-bar high. `lookback` is 21.
 `BUY` when the latest close exceeds the high of the prior 20 bars. `None` when
 short, flat, or not a breakout. Never `SELL`.
 
+## `zarabot.strategies.ml_model`
+
+Load at startup (I/O); `evaluate` is pure. Absent from the registry when
+`ML_MODEL_PATH` is unset.
+
+**`FEATURE_NAMES`** — `("return_1", "return_5", "high_low_range", "close_sma_10")`
+
+**`CONFIDENCE_THRESHOLD`** — `Decimal("0.60")`. Equal or above is a buy.
+
+**`ModelLoadError`** — missing or unreadable model file.
+
+**`ModelContractError`** — manifest names or order differ from `FEATURE_NAMES`.
+
+**`LoadedModel`** — `name = "ml_model"`, `lookback = 11`. Constructed only via `load`.
+
+**`load(path: Path) → LoadedModel`**
+Reads a joblib bundle `{"model", "features"}`. Raises `ModelLoadError` or
+`ModelContractError`. Never called on the trading path.
+
+**`LoadedModel.evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when `predict_proba` buy-class probability ≥ threshold. `None` when short,
+flat, or below threshold. Never `SELL`.
+
 
