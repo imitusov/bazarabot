@@ -234,4 +234,20 @@ The single `PLACING` or `ACTIVE` stop for the position, or `None`. Raises
 **`async list_active() → list[StopOrderRecord]`**
 Every `ACTIVE` stop, oldest first. Empty list when none.
 
+## `zarabot.db.cooldowns`
+
+Sole owner of `cooldowns` rows. Reads `DB_PATH` via `config.load()`.
+
+**`async start(ticker: str, at: datetime) → None`**
+Inserts `started_at`, or overwrites only when `at` is strictly newer. Raises
+`ValueError` on a naive `at`. Write failures are logged at ERROR and not
+propagated (rule 12).
+
+**`async is_active(ticker: str, now: datetime, minutes: int) → bool`**
+True while `now - started_at < minutes`. False when no row exists, and False
+exactly at the boundary. Raises `ValueError` on a naive `now`.
+
+**`async active_until(ticker: str, minutes: int) → datetime | None`**
+`started_at + minutes`, or `None` when no cooldown is recorded.
+
 
