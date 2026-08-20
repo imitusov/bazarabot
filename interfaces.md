@@ -419,7 +419,8 @@ Oldest-first. Empty list when none. `ValueError` on naive datetimes.
 Broker-authoritative cash and holdings.
 **`async get_trading_schedule(days: int) → list[SessionInfo]`**
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
-`confirm_margin_trade=False`. Raises `OrderRejected`.
+`confirm_margin_trade=False`. Raises `OrderRejected`. `commission` is
+`executed_commission` converted with `money_to_decimal`, or `None` until filled.
 **`async post_stop_loss(key: str, figi: str, lots: int, stop_price: Decimal) → StopOrderRecord`**
 GTC market stop-loss, `confirm_margin_trade=False`.
 **`async cancel_stop_order(stop_order_id: str) → None`**
@@ -428,9 +429,11 @@ Idempotent; already-cancelled/executed is not an error.
 **`async get_max_lots(figi: str) → int`**
 Buy-side market max lots.
 **`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**
-Actual commission, never estimated.
+Period cost reconciliation only. Not the per-order commission source —
+`OperationRecord` has no order id.
 **`async get_order_state(key: str) → OrderRecord`**
 Lookup by `order_id_type=ORDER_ID_TYPE_REQUEST`. Raises `OrderNotFound`.
+`commission` is `executed_commission` via `money_to_decimal`, or `None` until filled.
 
 ## `zarabot.market.session`
 

@@ -25,7 +25,7 @@ from t_tech.invest.schemas import (
     StopOrderStatusOption,
     StopOrderType,
 )
-from t_tech.invest.utils import decimal_to_quotation
+from t_tech.invest.utils import decimal_to_quotation, money_to_decimal
 
 from zarabot import clock, config
 from zarabot.models import (
@@ -179,6 +179,12 @@ def _as_decimal(raw: object | None) -> Decimal:
 
 def _decimal_money(raw: object | None) -> Decimal:
     return _as_decimal(raw)
+
+
+def _executed_commission(raw: object | None) -> Decimal | None:
+    if raw is None:
+        return None
+    return money_to_decimal(raw)
 
 
 def _decimal_quote(raw: object | None) -> Decimal:
@@ -391,7 +397,11 @@ async def post_market_order(key: str, figi: str, side: Side, lots: int) -> Order
         raise OrderRejected(reason or "rejected")
     filled = response.lots_executed or None
     price = _decimal_money(response.executed_order_price) if filled else None
-    commission = _decimal_money(response.executed_commission) if filled else None
+    commission = (
+        _executed_commission(getattr(response, "executed_commission", None))
+        if filled
+        else None
+    )
     now = clock.now()
     return _order_record(
         key=key,
@@ -570,7 +580,11 @@ async def get_order_state(key: str) -> OrderRecord:
         status=status,
         filled_lots=filled,
         filled_price=_decimal_money(response.executed_order_price) if filled else None,
-        commission=_decimal_money(response.executed_commission) if filled else None,
+        commission=(
+            _executed_commission(getattr(response, "executed_commission", None))
+            if filled
+            else None
+        ),
         broker_reason=None,
         created_at=created,
         settled_at=created if status is OrderStatus.FILLED else None,
