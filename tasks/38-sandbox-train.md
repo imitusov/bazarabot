@@ -16,7 +16,17 @@ Module **38** of 38 in `dependency-order.md`. Everything before it is complete a
 
 ### `sandbox/` — laptop research (never imported by server code)
 
-**`data.load(ticker, start, end) → list[Candle]`** — from local cache, downloading via `broker.client` when absent.
+**`async load(ticker: str, start: datetime, end: datetime, interval: CandleInterval, cache_dir: Path = Path("sandbox/cache")) → list[Candle]`**
+- Async, because it calls `broker.client` on a cache miss. In a notebook this is
+  awaited directly.
+- `start` and `end` are timezone-aware; a naive value raises `ValueError`.
+- Returns candles oldest-first, empty list when the range holds none.
+- Caches to `<cache_dir>/<ticker>_<interval>.parquet`, writing through after a
+  fetch. `sandbox/cache/` is gitignored: it is derived data, and committing a
+  year of candles would bloat the repository for no benefit.
+- A cached range that does not cover the request is extended by fetching only
+  the missing span, never by refetching the whole range.
+- Must never be imported by `zarabot/`.
 
 **`backtest.run(strategy, candles, config, commission, slippage) → BacktestResult`**
 - Replays candles in order, calling the **same** `strategies`, `risk.sizing` and
@@ -28,11 +38,29 @@ Module **38** of 38 in `dependency-order.md`. Everything before it is complete a
 - Returns trades, P&L, win rate, maximum drawdown, exit-trigger distribution, and
   the buy-and-hold benchmark.
 
-**`train.fit(...) → Path`** and **`train.export(model, features, path) → Path`**
-- Exports the model together with a feature manifest naming the features and
-  their order, which `strategies.ml_model` validates on load.
-- Uses walk-forward validation; a single train/test split is not acceptable for a
-  time series.
+**`fit(candles_by_ticker: dict[str, list[Candle]], horizon_days: int, folds: int, seed: int) → FittedModel`**
+- Trains a buy/no-buy classifier. The label is whether the take-profit level is
+  reached before the stop level within `horizon_days`, so the model is trained on
+  the question the live system actually asks it.
+- `seed` is required and recorded in the export: an unreproducible model cannot
+  be audited after a losing week.
+- Uses **walk-forward** validation across `folds`; a single train/test split on a
+  time series leaks the future into the past and is not acceptable.
+- Returns the fitted model with its validation scores per fold. Reporting one
+  averaged number hides a model that works in one regime and fails in another.
+
+**`export(model: FittedModel, path: Path) → Path`**
+- Writes a joblib bundle `{"model", "features", "seed", "trained_at"}` where
+  `features` is `strategies.ml_model.FEATURE_NAMES` in order, which
+  `strategies.ml_model.load` validates.
+
+**Feature construction has one owner.** `strategies.ml_model.build_features`
+builds the feature vector, and `sandbox.train` **imports it** rather than
+rebuilding the same four features for training. This is the same rule as the
+backtester importing the live strategies, for the same reason: features computed
+one way at training and another way at inference produce a model that scores well
+offline and behaves differently on real money, and nothing in the manifest check
+would catch it — the names would still match.
 
 ---
 

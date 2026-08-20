@@ -98,7 +98,8 @@ historical record is the purpose of the project. Backups are retained 30 days.
 **`async reconcile(now: datetime) → ReconciliationReport`**
 - Compares `broker.client.get_portfolio()` against `db.positions.list_open()`.
 - Locally-open but absent at the broker → closed as `EXTERNAL` at the last known
-  price.
+  price, passing `order = None`. This module records **no** order row: it did not
+  submit one, and inventing one would contradict its own prohibition on trading.
 - Present at the broker but unknown locally → adopted via `db.positions.adopt`.
 - Lot mismatch → the broker's count is written locally.
 - **Stop orders are reconciled too, but this module does not act on them.**
@@ -146,6 +147,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A position present at the broker but absent locally is adopted with the
   broker's average price as entry price, marked adopted, and alerted (proves
   unknown holdings are managed rather than ignored).
+- An externally-closed position is closed with `order = None` and **no row is
+  written to `orders`** (proves reconciliation records only what the bot actually
+  submitted).
 - A lot-count mismatch adopts the broker's count and alerts (proves quantity
   reconciliation).
 - Reconciliation is idempotent: running it twice against an unchanged broker

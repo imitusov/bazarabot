@@ -23,6 +23,14 @@ Module **18** of 38 in `dependency-order.md`. Everything before it is complete a
 - Called once at startup, never on the trading path — a model failure must be
   loud and early, never mid-session.
 
+**`build_features(candles: list[Candle]) → list[float]`**
+- Pure. Builds the feature vector in `FEATURE_NAMES` order from the most recent
+  `lookback` candles.
+- Raises `ValueError` when given fewer candles than `lookback`.
+- **Sole owner of feature construction.** `sandbox.train` imports this function;
+  no other code computes these features. Duplicating it is a critical defect —
+  see the sandbox contract.
+
 **`evaluate(...) → Signal | None`** — as the protocol, returning `None` below the configured confidence threshold. Absent from the registry entirely when `ML_MODEL_PATH` is unset.
 
 ## Relevant error handling rules
@@ -51,6 +59,9 @@ For every strategy, independently:
   contract that the whole exit design rests on).
 
 Additionally, `strategies.ml_model`:
+- `build_features` returns values in `FEATURE_NAMES` order, and raises
+  `ValueError` on fewer candles than `lookback` (proves the shared contract that
+  training depends on).
 - With `ML_MODEL_PATH` unset, the strategy is absent from the registry (proves
   disabled-by-default).
 - A missing or unreadable model file raises `ModelLoadError` at startup, not at

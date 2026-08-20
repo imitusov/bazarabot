@@ -60,6 +60,9 @@ For every strategy, independently:
   contract that the whole exit design rests on).
 
 Additionally, `strategies.ml_model`:
+- `build_features` returns values in `FEATURE_NAMES` order, and raises
+  `ValueError` on fewer candles than `lookback` (proves the shared contract that
+  training depends on).
 - With `ML_MODEL_PATH` unset, the strategy is absent from the registry (proves
   disabled-by-default).
 - A missing or unreadable model file raises `ModelLoadError` at startup, not at

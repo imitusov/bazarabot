@@ -75,9 +75,18 @@ Module **6** of 38 in `dependency-order.md`. Everything before it is complete an
   acting on the same position.
 - Called only by `execution.orders` and by the startup remediation step.
 
-**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord) → Position`**
+**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
   P&L and the closing order.
+- `order` is `None` **only** when `trigger` is `EXTERNAL` — a position that
+  disappeared at the broker was not closed by an order of ours, and there is
+  nothing to record. Any other trigger with `order = None` raises `ValueError`,
+  as does `EXTERNAL` **with** an order.
+- The `orders` table records orders **this bot submitted**. Fabricating a filled
+  order row to satisfy a signature would put an order the bot never placed into
+  its own audit trail, understate commission, and make "what did the bot do"
+  unanswerable. `close_order_key` is nullable in the schema precisely for this
+  case.
 - Raises `PositionStateError` if the position is already closed or absent.
 - The transition is atomic: concurrent calls produce exactly one success.
 - Must never delete a row — history is permanent.

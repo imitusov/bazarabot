@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.10
+**Version:** 1.11
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -57,6 +57,12 @@ module, and no other module writes it:
 broker, and read no clock except a `now` passed as an argument. This is what
 allows the backtester to reuse them unchanged. A pure module gaining an I/O
 dependency is a contract violation.
+
+**SDK types.** Domain types never wrap SDK types, and pure modules never import
+the SDK. The one permitted exception is `CandleInterval`, used as a **parameter**
+in `broker.client`, `market.data` and `sandbox.*` — all of which already depend
+on the SDK. It never appears on a domain dataclass and never reaches
+`strategies.*`, which receive `list[Candle]` and no interval at all.
 
 **Network boundary.** `broker.client` is the only module that makes network
 calls to the broker. `telegram.notifier` and `telegram.commands` are the only
@@ -378,6 +384,9 @@ it proves.
 - A position present at the broker but absent locally is adopted with the
   broker's average price as entry price, marked adopted, and alerted (proves
   unknown holdings are managed rather than ignored).
+- An externally-closed position is closed with `order = None` and **no row is
+  written to `orders`** (proves reconciliation records only what the bot actually
+  submitted).
 - A lot-count mismatch adopts the broker's count and alerts (proves quantity
   reconciliation).
 - Reconciliation is idempotent: running it twice against an unchanged broker
@@ -417,6 +426,9 @@ For every strategy, independently:
   contract that the whole exit design rests on).
 
 Additionally, `strategies.ml_model`:
+- `build_features` returns values in `FEATURE_NAMES` order, and raises
+  `ValueError` on fewer candles than `lookback` (proves the shared contract that
+  training depends on).
 - With `ML_MODEL_PATH` unset, the strategy is absent from the registry (proves
   disabled-by-default).
 - A missing or unreadable model file raises `ModelLoadError` at startup, not at
@@ -755,9 +767,18 @@ Owns schema creation and version tracking.
   acting on the same position.
 - Called only by `execution.orders` and by the startup remediation step.
 
-**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord) → Position`**
+**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
   P&L and the closing order.
+- `order` is `None` **only** when `trigger` is `EXTERNAL` — a position that
+  disappeared at the broker was not closed by an order of ours, and there is
+  nothing to record. Any other trigger with `order = None` raises `ValueError`,
+  as does `EXTERNAL` **with** an order.
+- The `orders` table records orders **this bot submitted**. Fabricating a filled
+  order row to satisfy a signature would put an order the bot never placed into
+  its own audit trail, understate commission, and make "what did the bot do"
+  unanswerable. `close_order_key` is nullable in the schema precisely for this
+  case.
 - Raises `PositionStateError` if the position is already closed or absent.
 - The transition is atomic: concurrent calls produce exactly one success.
 - Must never delete a row — history is permanent.
@@ -871,7 +892,7 @@ else it does.
 - Raises `InstrumentNotFound` when the ticker does not resolve, `BrokerUnavailable`
   on transport failure, `BrokerRateLimited` when throttled.
 
-**`async get_candles(figi: str, interval, since: datetime, until: datetime) → list[Candle]`**
+**`async get_candles(figi: str, interval: CandleInterval, since: datetime, until: datetime) → list[Candle]`**
 - Returns candles ordered oldest-first with timezone-aware timestamps.
 - Returns an empty list when the range contains no trading activity.
 - Raises `ValueError` on naive datetimes.
@@ -953,7 +974,8 @@ above; must never return a `float`.
 **`async reconcile(now: datetime) → ReconciliationReport`**
 - Compares `broker.client.get_portfolio()` against `db.positions.list_open()`.
 - Locally-open but absent at the broker → closed as `EXTERNAL` at the last known
-  price.
+  price, passing `order = None`. This module records **no** order row: it did not
+  submit one, and inventing one would contradict its own prohibition on trading.
 - Present at the broker but unknown locally → adopted via `db.positions.adopt`.
 - Lot mismatch → the broker's count is written locally.
 - **Stop orders are reconciled too, but this module does not act on them.**
@@ -1022,6 +1044,14 @@ unknown name.
   when the manifest's feature names or order differ from those the code builds.
 - Called once at startup, never on the trading path — a model failure must be
   loud and early, never mid-session.
+
+**`build_features(candles: list[Candle]) → list[float]`**
+- Pure. Builds the feature vector in `FEATURE_NAMES` order from the most recent
+  `lookback` candles.
+- Raises `ValueError` when given fewer candles than `lookback`.
+- **Sole owner of feature construction.** `sandbox.train` imports this function;
+  no other code computes these features. Duplicating it is a critical defect —
+  see the sandbox contract.
 
 **`evaluate(...) → Signal | None`** — as the protocol, returning `None` below the configured confidence threshold. Absent from the registry entirely when `ML_MODEL_PATH` is unset.
 
@@ -1284,7 +1314,17 @@ The process entry point, so that `python -m zarabot` is the start command.
 
 ### `sandbox/` — laptop research (never imported by server code)
 
-**`data.load(ticker, start, end) → list[Candle]`** — from local cache, downloading via `broker.client` when absent.
+**`async load(ticker: str, start: datetime, end: datetime, interval: CandleInterval, cache_dir: Path = Path("sandbox/cache")) → list[Candle]`**
+- Async, because it calls `broker.client` on a cache miss. In a notebook this is
+  awaited directly.
+- `start` and `end` are timezone-aware; a naive value raises `ValueError`.
+- Returns candles oldest-first, empty list when the range holds none.
+- Caches to `<cache_dir>/<ticker>_<interval>.parquet`, writing through after a
+  fetch. `sandbox/cache/` is gitignored: it is derived data, and committing a
+  year of candles would bloat the repository for no benefit.
+- A cached range that does not cover the request is extended by fetching only
+  the missing span, never by refetching the whole range.
+- Must never be imported by `zarabot/`.
 
 **`backtest.run(strategy, candles, config, commission, slippage) → BacktestResult`**
 - Replays candles in order, calling the **same** `strategies`, `risk.sizing` and
@@ -1296,11 +1336,29 @@ The process entry point, so that `python -m zarabot` is the start command.
 - Returns trades, P&L, win rate, maximum drawdown, exit-trigger distribution, and
   the buy-and-hold benchmark.
 
-**`train.fit(...) → Path`** and **`train.export(model, features, path) → Path`**
-- Exports the model together with a feature manifest naming the features and
-  their order, which `strategies.ml_model` validates on load.
-- Uses walk-forward validation; a single train/test split is not acceptable for a
-  time series.
+**`fit(candles_by_ticker: dict[str, list[Candle]], horizon_days: int, folds: int, seed: int) → FittedModel`**
+- Trains a buy/no-buy classifier. The label is whether the take-profit level is
+  reached before the stop level within `horizon_days`, so the model is trained on
+  the question the live system actually asks it.
+- `seed` is required and recorded in the export: an unreproducible model cannot
+  be audited after a losing week.
+- Uses **walk-forward** validation across `folds`; a single train/test split on a
+  time series leaks the future into the past and is not acceptable.
+- Returns the fitted model with its validation scores per fold. Reporting one
+  averaged number hides a model that works in one regime and fails in another.
+
+**`export(model: FittedModel, path: Path) → Path`**
+- Writes a joblib bundle `{"model", "features", "seed", "trained_at"}` where
+  `features` is `strategies.ml_model.FEATURE_NAMES` in order, which
+  `strategies.ml_model.load` validates.
+
+**Feature construction has one owner.** `strategies.ml_model.build_features`
+builds the feature vector, and `sandbox.train` **imports it** rather than
+rebuilding the same four features for training. This is the same rule as the
+backtester importing the live strategies, for the same reason: features computed
+one way at training and another way at inference produce a model that scores well
+offline and behaves differently on real money, and nothing in the manifest check
+would catch it — the names would still match.
 
 ---
 
@@ -1676,9 +1734,18 @@ Applies across all modules. Every external failure mode has exactly one rule.
     correct; it is listed here because the failure mode it would produce —
     losses exceeding allocated capital — is the one failure the brief promises
     cannot happen.
-29. **System clock more than 5 seconds from reference** → alert. Beyond 60
-    seconds → halt: session boundaries and candle alignment can no longer be
-    trusted.
+29. **Clock accuracy is a host requirement, verified at deployment, not a
+    runtime rule.** V9 confirms the host clock is NTP-synchronised before the bot
+    is deployed, and `app.startup` logs the observed system time in UTC and MSK
+    so a skewed clock is visible in the first log line after every restart.
+
+    There is deliberately **no runtime skew check**. The broker exposes no server
+    wall-clock: the only timestamp available is `LastPrice.time`, which is the
+    time of the last *trade* and lags arbitrarily when a market is quiet. Halting
+    trading because nobody traded for ninety seconds would be a worse failure
+    than the drift it guards against, and the alternative — shipping a
+    hand-written NTP client into a system that moves money — is more risk than a
+    correctly configured time daemon warrants.
 
 ---
 

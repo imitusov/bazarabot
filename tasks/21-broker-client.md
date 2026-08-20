@@ -46,7 +46,7 @@ else it does.
 - Raises `InstrumentNotFound` when the ticker does not resolve, `BrokerUnavailable`
   on transport failure, `BrokerRateLimited` when throttled.
 
-**`async get_candles(figi: str, interval, since: datetime, until: datetime) → list[Candle]`**
+**`async get_candles(figi: str, interval: CandleInterval, since: datetime, until: datetime) → list[Candle]`**
 - Returns candles ordered oldest-first with timezone-aware timestamps.
 - Returns an empty list when the range contains no trading activity.
 - Raises `ValueError` on naive datetimes.

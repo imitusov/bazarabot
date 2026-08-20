@@ -45,9 +45,18 @@ From `technical-spec.md` §8. Handle each exactly as written.
     restart that task with exponential backoff. One failing task must never
     terminate the process or any other task.
 
-29. **System clock more than 5 seconds from reference** → alert. Beyond 60
-    seconds → halt: session boundaries and candle alignment can no longer be
-    trusted.
+29. **Clock accuracy is a host requirement, verified at deployment, not a
+    runtime rule.** V9 confirms the host clock is NTP-synchronised before the bot
+    is deployed, and `app.startup` logs the observed system time in UTC and MSK
+    so a skewed clock is visible in the first log line after every restart.
+
+    There is deliberately **no runtime skew check**. The broker exposes no server
+    wall-clock: the only timestamp available is `LastPrice.time`, which is the
+    time of the last *trade* and lags arbitrarily when a market is quiet. Halting
+    trading because nobody traded for ninety seconds would be a worse failure
+    than the drift it guards against, and the alternative — shipping a
+    hand-written NTP client into a system that moves money — is more risk than a
+    correctly configured time daemon warrants.
 
 ---
 
