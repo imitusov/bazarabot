@@ -10,10 +10,11 @@ from uuid import UUID
 
 import aiosqlite
 import pytest
-from zarabot.broker.reconcile import reconcile
 
+from zarabot.broker.client import BrokerUnavailable
+from zarabot.broker.reconcile import reconcile
 from zarabot.db.migrations import apply
-from zarabot.db.positions import get, list_open
+from zarabot.db.positions import get, list_open, set_stop_protection
 from zarabot.db.positions import open as open_position
 from zarabot.models import (
     ExitTrigger,
@@ -25,6 +26,7 @@ from zarabot.models import (
     Side,
     Signal,
     StopOrderRecord,
+    StopOrderStatus,
     StopProtection,
 )
 
@@ -273,3 +275,71 @@ async def test_reconcile_is_idempotent(env: _Broker) -> None:
     second = await reconcile(NOW)
     assert second.adjustments == ()
     assert await list_open() == []
+
+
+def _stop(
+    ticker: str = "SBER",
+    price: Decimal = Decimal("95"),
+    stop_id: str = "ex-stop",
+) -> StopOrderRecord:
+    return StopOrderRecord(
+        key=stop_id,
+        stop_order_id=stop_id,
+        position_id=0,
+        ticker=ticker,
+        lots=2,
+        stop_price=price,
+        status=StopOrderStatus.ACTIVE,
+        created_at=NOW,
+        settled_at=None,
+    )
+
+
+async def test_naive_now_is_rejected(env: _Broker) -> None:
+    naive = datetime(2026, 3, 16, 12, 0)  # noqa: DTZ001
+    with pytest.raises(ValueError):
+        await reconcile(naive)
+
+
+async def test_last_price_unavailable_uses_entry(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _open_local()
+    env.holdings = ()
+
+    async def boom(figi: str) -> Decimal:
+        raise BrokerUnavailable("down")
+
+    monkeypatch.setattr("zarabot.broker.reconcile.get_last_price", boom)
+    report = await reconcile(NOW)
+    closed = next(
+        item for item in report.adjustments if item["type"] == "CLOSED_EXTERNALLY"
+    )
+    assert closed["last_price"] == "100.00"
+
+
+async def test_exchange_position_without_broker_stop_is_reported(env: _Broker) -> None:
+    position = await _open_local()
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "stop-key")
+    env.holdings = (_broker_position(),)
+    report = await reconcile(NOW)
+    types = [item["type"] for item in report.adjustments]
+    assert "STOP_MISSING" in types
+
+
+async def test_mispriced_and_orphan_and_adoptable_stops(env: _Broker) -> None:
+    await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("90"))]
+    report = await reconcile(NOW)
+    assert any(item["type"] == "STOP_MISPRICED" for item in report.adjustments)
+
+    env.stops = [_stop(price=Decimal("95"))]
+    report = await reconcile(NOW)
+    assert any(item["type"] == "STOP_ADOPTABLE" for item in report.adjustments)
+
+    env.holdings = ()
+    env.stops = [_stop(ticker="GAZP", stop_id="orphan")]
+    report = await reconcile(NOW)
+    assert any(item["type"] == "STOP_ORPHAN" for item in report.adjustments)
+
