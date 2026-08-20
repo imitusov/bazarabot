@@ -35,6 +35,11 @@ the verification scripts but not the application.
 python3.12 -m venv .venv && .venv/bin/pip install --upgrade pip
 ```
 
+**Verified working on 2026-08-20** with Python 3.12.14 on macOS/arm64: every
+dependency resolves, V10 passes 9/9, `ruff` and `mypy --strict` are clean, and
+pytest runs an async test with no decorator. Reproduce it exactly from
+`requirements.lock` rather than from the floors below.
+
 Install the broker SDK **from the vendored wheel**, not from an index:
 
 ```bash
@@ -51,8 +56,12 @@ The SDK is not on PyPI — see `vendor/README.md`. Everything else installs
 normally:
 
 ```bash
-.venv/bin/pip install -r requirements-server.txt -r requirements-dev.txt
+.venv/bin/pip install -r requirements.lock
 ```
+
+`requirements.lock` is the reproducible set. The `requirements-*.txt` files state
+intent and floors; install from them only when deliberately moving a version, and
+regenerate the lock afterwards.
 
 Activate the venv in every new shell before any `python`/`pip`/`pytest`
 command. A `ModuleNotFoundError` almost always means it is not active.

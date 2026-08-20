@@ -1,0 +1,56 @@
+# Resolved dependency set. Generated, not hand-edited:
+#   .venv/bin/pip freeze --exclude-editable
+#
+# Regenerate deliberately, as its own change, after updating a requirement.
+# The broker SDK is installed from the vendored wheel and is pinned by the
+# wheel file itself plus its checksum in vendor/SHA256SUMS - a local file
+# path is not portable, so it is recorded here as a comment rather than a
+# requirement line.
+
+aiosqlite==0.22.1
+antlr4-python3-runtime==4.13.2
+anyio==4.14.2
+ast_serialize==0.8.0
+astor==0.8.1
+cachetools==5.5.2
+certifi==2026.7.22
+coverage==7.15.4
+deprecation==2.1.0
+grpcio==1.83.0
+grpcio-tools==1.81.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.19
+iniconfig==2.3.0
+iprotopy==0.3.0
+joblib==1.5.3
+librt==0.15.0
+mypy==2.3.1
+mypy-protobuf==5.1.0
+mypy_extensions==1.1.0
+narwhals==2.25.0
+numpy==2.5.2
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+proto-schema-parser==2.1.0
+protobuf==6.33.6
+Pygments==2.21.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+python-dateutil==2.9.0.post0
+python-telegram-bot==22.8
+ruff==0.16.4
+scikit-learn==1.9.0
+scipy==1.18.0
+sentry-sdk==2.68.0
+setuptools==84.0.0
+six==1.17.0
+structlog==26.1.0
+# t-tech-investments==1.49.1  (install: vendor/t_tech_investments-1.49.1-py3-none-any.whl)
+threadpoolctl==3.6.0
+types-protobuf==7.34.1.20260816
+typing_extensions==4.16.0
+urllib3==2.7.0

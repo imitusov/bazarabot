@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.7
+**Version:** 1.8
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -1634,9 +1634,15 @@ Applies across all modules. Every external failure mode has exactly one rule.
 
 ## 9. Dependencies
 
-Versions below were resolved against the package indexes on 2026-08-18. They are
-floors, not pins: exact versions and hashes are written to the lockfile once the
-verification suite in §2 passes, and the application is built from the lockfile.
+Versions below are floors. The **resolved set is pinned in `requirements.lock`**,
+generated from a clean 3.12 environment on 2026-08-20 with every floor satisfied
+and V10 passing: Python 3.12.14, SDK 1.49.1, pytest 9.1.1, pytest-asyncio 1.4.0,
+mypy 2.3.1, ruff 0.16.4, numpy 2.5.2, scikit-learn 1.9.0, aiosqlite 0.22.1,
+structlog 26.1.0, python-telegram-bot 22.8. The application is built from the
+lockfile, not from these floors.
+
+The broker SDK is pinned by the vendored wheel and its checksum rather than by a
+lockfile line, because a local file path is not portable across machines.
 
 **The broker SDK is not on public PyPI.** Both `tinkoff-investments` and
 `t-tech-investments` return HTTP 404 from pypi.org. The official SDK is published
