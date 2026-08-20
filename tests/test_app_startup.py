@@ -106,7 +106,6 @@ async def test_unresolved_order_is_resolved_before_strategy_evaluation(
     env: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from zarabot.app.startup import start
-
     from zarabot.strategies.ma_crossover import MovingAverageCrossover
 
     def _evaluate(self: object, ticker: str, candles: object, now: object) -> None:
@@ -145,3 +144,151 @@ async def test_halted_at_shutdown_starts_halted(env: list[str]) -> None:
     assert ctx.halt.halted is True
     assert ctx.halt.reason is HaltReason.MANUAL
     assert any("halt" in item.lower() for item in env if item.startswith("alert:"))
+
+
+async def test_schema_failure_alerts_and_raises_startup_error(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zarabot.app.startup import StartupError, start
+    from zarabot.db.migrations import MigrationError
+
+    async def _boom(conn: object) -> int:
+        raise MigrationError("schema version 99 is ahead of code version 1")
+
+    monkeypatch.setattr("zarabot.app.startup.apply", _boom)
+    with pytest.raises(StartupError):
+        await start()
+    assert any("aborted" in item.lower() for item in env if item.startswith("alert:"))
+
+
+async def test_startup_applies_reported_stop_remedies(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from decimal import Decimal
+
+    from zarabot.app.startup import start
+    from zarabot.models import (
+        Instrument,
+        Position,
+        StopOrderRecord,
+        StopOrderStatus,
+        StopProtection,
+    )
+
+    position = Position(
+        id=1,
+        ticker="SBER",
+        figi="BBG000000001",
+        strategy="ma_crossover",
+        lots=1,
+        lot_size=10,
+        entry_price=Decimal("100"),
+        entry_at=NOW,
+        stop_price=Decimal("95"),
+        target_price=Decimal("110"),
+        status="OPEN",
+        adopted=False,
+        open_order_key="open-1",
+        close_order_key=None,
+        exit_trigger=None,
+        exit_price=None,
+        exit_at=None,
+        realised_pnl=None,
+        stop_protection=StopProtection.LOCAL,
+        stop_order_key=None,
+    )
+    instrument = Instrument(
+        figi="BBG000000001",
+        ticker="SBER",
+        lot=10,
+        min_price_increment=Decimal("0.01"),
+        currency="RUB",
+        trading_status="NORMAL_TRADING",
+        refreshed_at=NOW,
+    )
+    adopt_stop = StopOrderRecord(
+        key="adopt-k",
+        stop_order_id="s1",
+        position_id=1,
+        ticker="SBER",
+        lots=1,
+        stop_price=Decimal("95"),
+        status=StopOrderStatus.ACTIVE,
+        created_at=NOW,
+        settled_at=None,
+    )
+    orphan_stop = StopOrderRecord(
+        key="k1",
+        stop_order_id="o1",
+        position_id=99,
+        ticker="GAZP",
+        lots=1,
+        stop_price=Decimal("90"),
+        status=StopOrderStatus.ACTIVE,
+        created_at=NOW,
+        settled_at=None,
+    )
+
+    async def _reconcile(moment: datetime) -> ReconciliationReport:
+        env.append("reconcile")
+        return ReconciliationReport(
+            ran_at=moment,
+            adjustments=(
+                {"type": "STOP_MISSING", "position_id": 1, "ticker": "SBER"},
+                {"type": "STOP_MISPRICED", "position_id": 1, "ticker": "SBER"},
+                {
+                    "type": "STOP_ADOPTABLE",
+                    "position_id": 1,
+                    "ticker": "SBER",
+                    "stop_order_id": "s1",
+                },
+                {
+                    "type": "STOP_ORPHAN",
+                    "ticker": "GAZP",
+                    "stop_order_id": "o1",
+                    "key": "k1",
+                },
+                {"type": "STOP_MISSING", "position_id": 999, "ticker": "NONE"},
+                {"type": "STOP_MISSING", "position_id": "1", "ticker": "SBER"},
+                {"type": "STOP_ORPHAN", "ticker": "X", "stop_order_id": "missing"},
+                {"type": "STOP_ADOPTABLE", "position_id": 1, "stop_order_id": "nope"},
+            ),
+        )
+
+    async def _opened() -> list[Position]:
+        return [position]
+
+    async def _stops() -> list[StopOrderRecord]:
+        return [adopt_stop, orphan_stop]
+
+    async def _instrument(ticker: str) -> Instrument:
+        return instrument
+
+    async def _place(pos: Position, inst: Instrument) -> Position:
+        env.append("place")
+        return pos
+
+    async def _replace(pos: Position, inst: Instrument) -> Position:
+        env.append("replace")
+        return pos
+
+    async def _adopt(pos: Position, stop: StopOrderRecord) -> Position:
+        env.append("adopt")
+        return pos
+
+    async def _cancel(stop: StopOrderRecord) -> None:
+        env.append("cancel")
+
+    monkeypatch.setattr("zarabot.app.startup.reconcile", _reconcile)
+    monkeypatch.setattr("zarabot.app.startup.list_open", _opened)
+    monkeypatch.setattr("zarabot.app.startup.list_stop_orders", _stops)
+    monkeypatch.setattr("zarabot.app.startup.get_instrument", _instrument)
+    monkeypatch.setattr("zarabot.app.startup.place_protective_stop", _place)
+    monkeypatch.setattr("zarabot.app.startup.replace_stop", _replace)
+    monkeypatch.setattr("zarabot.app.startup.adopt_existing_stop", _adopt)
+    monkeypatch.setattr("zarabot.app.startup.cancel_orphaned_stop", _cancel)
+    await start()
+    assert "place" in env
+    assert "replace" in env
+    assert "adopt" in env
+    assert "cancel" in env
