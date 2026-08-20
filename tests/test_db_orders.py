@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 from zarabot.db.migrations import apply
@@ -35,8 +36,6 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
-    import aiosqlite
-
     async with aiosqlite.connect(path) as conn:
         await apply(conn)
     return path

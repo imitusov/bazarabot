@@ -184,4 +184,29 @@ Open positions, or `[]`. Never `None`.
 Open LOCAL adopted position, strategy `ADOPTED`, stop/target from average price
 at 5%/10% (brief defaults). `open_order_key` is `ADOPTED-{figi}`.
 
+## `zarabot.db.orders`
+
+Sole owner of `orders` rows and status transitions. Reads `DB_PATH` via
+`config.load()`. `record_submitting` must complete before any broker call with
+the same key. Never resubmit; recover by querying the key.
+
+**`DuplicateOrderError`**
+Raised when the idempotency key already exists.
+
+**`OrderStateError`**
+Raised on a transition out of a terminal status (`FILLED`, `REJECTED`,
+`CANCELLED`) or when settling to a non-terminal status.
+
+**`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str) → OrderRecord`**
+Inserts `SUBMITTING` with `created_at=clock.now()`. `figi` is stored as `''`
+because the contract does not receive a FIGI. Raises `DuplicateOrderError` on a
+repeated key.
+
+**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, broker_reason: str | None) → OrderRecord`**
+Records a terminal outcome and `settled_at`. Raises `OrderStateError` if the row
+is missing, already terminal, or `status` is not terminal.
+
+**`async list_unresolved() → list[OrderRecord]`**
+`SUBMITTING` or `SUBMITTED`, oldest first. Empty list when none.
+
 
