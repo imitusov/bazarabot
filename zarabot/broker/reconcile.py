@@ -6,7 +6,6 @@ import json
 import logging
 from datetime import datetime
 from decimal import Decimal
-from uuid import uuid4
 
 import aiosqlite
 
@@ -19,18 +18,15 @@ from zarabot.broker.client import (
 )
 from zarabot.config import load
 from zarabot.db.cooldowns import start as start_cooldown
-from zarabot.db.orders import record_submitting
-from zarabot.db.orders import settle as settle_order
 from zarabot.db.positions import adopt, close, list_open, update_lots
 from zarabot.models import (
     ExitTrigger,
-    OrderStatus,
     Position,
     ReconciliationReport,
-    Side,
     StopOrderRecord,
     StopProtection,
 )
+from zarabot.telegram.notifier import alert
 
 _LOG = logging.getLogger(__name__)
 
@@ -38,10 +34,6 @@ _LOG = logging.getLogger(__name__)
 def _reject_naive(moment: datetime) -> None:
     if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
         raise ValueError("datetime must be timezone-aware")
-
-
-def _alert(message: str) -> None:
-    _LOG.error(message)
 
 
 def _by_ticker(positions: list[Position] | tuple[Position, ...]) -> dict[str, Position]:
@@ -61,14 +53,9 @@ async def _last_price(position: Position) -> Decimal:
 
 async def _close_externally(position: Position, moment: datetime) -> dict[str, object]:
     price = await _last_price(position)
-    key = str(uuid4())
-    await record_submitting(key, position.ticker, Side.SELL, position.lots, "EXIT")
-    order = await settle_order(
-        key, OrderStatus.FILLED, position.lots, price, "closed externally"
-    )
-    await close(position.id, ExitTrigger.EXTERNAL, price, moment, order)
+    await close(position.id, ExitTrigger.EXTERNAL, price, moment, None)
     await start_cooldown(position.ticker, moment)
-    _alert(
+    await alert(
         f"position {position.ticker} closed externally at {price} (id={position.id})"
     )
     return {
@@ -82,7 +69,7 @@ async def _close_externally(position: Position, moment: datetime) -> dict[str, o
 async def _adopt_holding(holding: Position, moment: datetime) -> dict[str, object]:
     instrument = await get_instrument(holding.ticker)
     await adopt(instrument, holding.lots, holding.entry_price, moment)
-    _alert(
+    await alert(
         f"adopted {holding.ticker} lots={holding.lots} "
         f"average_price={holding.entry_price}"
     )
@@ -97,7 +84,7 @@ async def _adopt_holding(holding: Position, moment: datetime) -> dict[str, objec
 async def _adjust_lots(local: Position, broker_lots: int) -> dict[str, object]:
     previous = local.lots
     await update_lots(local.id, broker_lots)
-    _alert(
+    await alert(
         f"lots adjusted for {local.ticker} id={local.id} "
         f"from {previous} to {broker_lots}"
     )
@@ -110,6 +97,17 @@ async def _adjust_lots(local: Position, broker_lots: int) -> dict[str, object]:
     }
 
 
+def _keep_stop(
+    position: Position, ticker_stops: list[StopOrderRecord]
+) -> StopOrderRecord:
+    key = position.stop_order_key
+    if key:
+        for stop in ticker_stops:
+            if stop.key == key or stop.stop_order_id == key:
+                return stop
+    return min(ticker_stops, key=lambda stop: stop.created_at)
+
+
 def _stop_adjustments(
     opened: list[Position], stops: list[StopOrderRecord]
 ) -> list[dict[str, object]]:
@@ -118,16 +116,28 @@ def _stop_adjustments(
     for position in opened:
         ticker_stops = [stop for stop in stops if stop.ticker == position.ticker]
         if ticker_stops:
-            stop = ticker_stops[0]
-            claimed.add(stop.stop_order_id or stop.key)
-            if stop.stop_price != position.stop_price:
+            kept = _keep_stop(position, ticker_stops)
+            if len(ticker_stops) > 1:
+                adjustments.append(
+                    {
+                        "type": "STOP_DUPLICATE",
+                        "ticker": position.ticker,
+                        "position_id": position.id,
+                        "stop_order_ids": [
+                            stop.stop_order_id or stop.key for stop in ticker_stops
+                        ],
+                    }
+                )
+            for stop in ticker_stops:
+                claimed.add(stop.stop_order_id or stop.key)
+            if kept.stop_price != position.stop_price:
                 adjustments.append(
                     {
                         "type": "STOP_MISPRICED",
                         "ticker": position.ticker,
                         "position_id": position.id,
                         "expected": str(position.stop_price),
-                        "actual": str(stop.stop_price),
+                        "actual": str(kept.stop_price),
                     }
                 )
             elif (
@@ -139,7 +149,7 @@ def _stop_adjustments(
                         "type": "STOP_ADOPTABLE",
                         "ticker": position.ticker,
                         "position_id": position.id,
-                        "stop_order_id": stop.stop_order_id,
+                        "stop_order_id": kept.stop_order_id,
                     }
                 )
         elif position.stop_protection is StopProtection.EXCHANGE:

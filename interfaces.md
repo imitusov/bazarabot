@@ -543,16 +543,16 @@ the cooldown. Never submits a sell.
 ## `zarabot.broker.reconcile`
 
 Observes and records. Never places or cancels an order. SQL for `reconciliations`
-lives here (same ownership pattern as `state.halt` / `halt_state`). Alerts are
-ERROR logs until `telegram.notifier` exists.
+lives here (same ownership pattern as `state.halt` / `halt_state`). Alerts go
+through `telegram.notifier.alert`.
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
 Compares `get_portfolio()` to `list_open()`. Local-only → close `EXTERNAL` at
-last price (record+settle EXIT, no `post_market_order`). Broker-only →
+last price with `order=None` and **no** `orders` row. Broker-only →
 `positions.adopt`. Lot mismatch → `positions.update_lots`. Stop discrepancies
-are reported (`STOP_MISSING`, `STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_ADOPTABLE`)
-and not acted on. Idempotent against an unchanged broker. Raises `ValueError`
-on naive `now`.
+are reported (`STOP_MISSING`, `STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_ADOPTABLE`,
+`STOP_DUPLICATE`) and not acted on. A duplicate names both live stops.
+Idempotent against an unchanged broker. Raises `ValueError` on naive `now`.
 
 ## `zarabot.telegram.notifier`
 

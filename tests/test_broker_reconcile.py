@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from uuid import UUID
 
 import aiosqlite
 import pytest
@@ -148,18 +147,11 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
     monkeypatch.setattr(f"{module}.get_instrument", broker.get_instrument)
     monkeypatch.setattr(f"{module}.list_stop_orders", broker.list_stop_orders)
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
-    counter = {"n": 0}
-
-    def _uuid() -> UUID:
-        counter["n"] += 1
-        return UUID(f"aaaaaaaa-aaaa-4aaa-8aaa-{counter['n']:012d}")
-
-    monkeypatch.setattr(f"{module}.uuid4", _uuid)
 
     async def _alert(text: str, urgent: bool = False) -> None:
         broker.alerts.append(text)
 
-    monkeypatch.setattr(f"{module}.alert", _alert, raising=False)
+    monkeypatch.setattr(f"{module}.alert", _alert)
     return broker
 
 
