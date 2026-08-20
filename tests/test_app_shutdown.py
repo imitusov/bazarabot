@@ -1,0 +1,207 @@
+"""Tests for zarabot.app.shutdown — written from technical-spec.md §3.2."""
+
+from __future__ import annotations
+
+import asyncio
+import signal
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from zarabot.app.startup import AppContext
+from zarabot.config import Config
+from zarabot.models import (
+    OrderRecord,
+    OrderStatus,
+    Position,
+    ReconciliationReport,
+    Side,
+    StopProtection,
+)
+
+NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
+
+
+def _config() -> Config:
+    return Config(
+        tinvest_token="t",  # noqa: S106
+        tinvest_account_id="a",
+        trading_mode="live",
+        telegram_bot_token="tg",  # noqa: S106
+        telegram_chat_id=1,
+        allocated_capital=Decimal("100000"),
+        position_size_pct=Decimal("10"),
+        max_position_pct=Decimal("20"),
+        stop_loss_pct=Decimal("5"),
+        take_profit_pct=Decimal("10"),
+        max_holding_days=3,
+        max_open_positions=10,
+        reentry_cooldown_minutes=120,
+        daily_loss_limit_pct=Decimal("5"),
+        watchlist=("SBER",),
+        enabled_strategies=("ma_crossover",),
+        ml_model_path=None,
+        poll_interval_seconds=60,
+        db_path=Path("zarabot.db"),
+        backup_dir=Path("backups"),
+        log_level="INFO",
+        tz="Europe/Moscow",
+    )
+
+
+def _ctx() -> AppContext:
+    return AppContext(
+        config=_config(),
+        strategies=(),
+        halt=None,
+        reconciliation=ReconciliationReport(ran_at=NOW, adjustments=()),
+    )
+
+
+def _order(status: OrderStatus = OrderStatus.SUBMITTING) -> OrderRecord:
+    return OrderRecord(
+        key="in-flight-key",
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=1,
+        status=status,
+        filled_lots=None,
+        filled_price=None,
+        commission=None,
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=None,
+    )
+
+
+def _position() -> Position:
+    return Position(
+        id=1,
+        ticker="SBER",
+        figi="BBG000000001",
+        strategy="ma_crossover",
+        lots=2,
+        lot_size=10,
+        entry_price=Decimal("100"),
+        entry_at=NOW,
+        stop_price=Decimal("95"),
+        target_price=Decimal("110"),
+        status="OPEN",
+        adopted=False,
+        open_order_key="open-k",
+        close_order_key=None,
+        exit_trigger=None,
+        exit_price=None,
+        exit_at=None,
+        realised_pnl=None,
+        stop_protection=StopProtection.LOCAL,
+        stop_order_key=None,
+    )
+
+
+async def test_shutdown_waits_for_in_flight_order_to_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.shutdown import shutdown
+
+    calls: list[str] = []
+    pending = [_order()]
+    import zarabot.app.shutdown as shutdown_mod
+
+    async def _unresolved() -> list[OrderRecord]:
+        calls.append("unresolved")
+        return list(pending)
+
+    async def _resolve(moment: datetime) -> list[OrderRecord]:
+        calls.append("resolve")
+        pending.clear()
+        return []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        calls.append("alert")
+
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    await shutdown(_ctx(), signal.SIGTERM)
+    assert "resolve" in calls
+    assert calls.index("unresolved") < calls.index("resolve")
+
+
+async def test_shutdown_neither_cancels_nor_liquidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.shutdown import shutdown
+
+    forbidden: list[str] = []
+    opened = [_position()]
+    import zarabot.app.shutdown as shutdown_mod
+
+    async def _unresolved() -> list[OrderRecord]:
+        return []
+
+    async def _resolve(moment: datetime) -> list[OrderRecord]:
+        return []
+
+    async def _open() -> list[Position]:
+        return list(opened)
+
+    async def _cancel(*_a: object, **_k: object) -> None:
+        forbidden.append("cancel")
+
+    async def _close(*_a: object, **_k: object) -> None:
+        forbidden.append("close")
+
+    async def _post(*_a: object, **_k: object) -> None:
+        forbidden.append("post")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    monkeypatch.setattr(shutdown_mod, "cancel_stop_order", _cancel)
+    monkeypatch.setattr(shutdown_mod, "close_position", _close)
+    monkeypatch.setattr(shutdown_mod, "post_market_order", _post)
+    await shutdown(_ctx(), signal.SIGINT)
+    assert forbidden == []
+    assert (await _open())[0].status == "OPEN"
+
+
+async def test_shutdown_leaves_submitting_orders_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.shutdown import shutdown
+
+    resolves = 0
+    import zarabot.app.shutdown as shutdown_mod
+
+    async def _unresolved() -> list[OrderRecord]:
+        return [_order()]
+
+    async def _resolve(moment: datetime) -> list[OrderRecord]:
+        nonlocal resolves
+        resolves += 1
+        return []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    async def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+    await shutdown(_ctx(), signal.SIGTERM)
+    assert resolves >= 1
