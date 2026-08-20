@@ -22,7 +22,12 @@ from zarabot.broker.client import (
 )
 from zarabot.db.migrations import apply
 from zarabot.db.orders import list_unresolved
-from zarabot.db.positions import PositionStateError, list_open, set_stop_protection
+from zarabot.db.positions import (
+    PositionStateError,
+    list_closed,
+    list_open,
+    set_stop_protection,
+)
 from zarabot.db.signals import record
 from zarabot.db.stop_orders import list_active
 from zarabot.execution.orders import (
@@ -639,10 +644,26 @@ async def test_orphan_without_broker_id_still_settles(env: _Broker) -> None:
     del position
 
 
-async def test_close_stop_loss_trigger_is_rejected(env: _Broker) -> None:
+async def test_close_stop_loss_on_local_position_sells(env: _Broker) -> None:
+    env.stop_failures_left = 3
     position = await open_position(_signal(), 2, _instrument())
+    assert position.stop_protection is StopProtection.LOCAL
+    env.calls.clear()
+    closed = await close_position(position, ExitTrigger.STOP_LOSS)
+    assert closed.status == "CLOSED"
+    assert closed.exit_trigger is ExitTrigger.STOP_LOSS
+    assert "post:SELL" in env.calls
+    assert await list_open() == []
+
+
+async def test_close_stop_loss_on_exchange_position_raises(env: _Broker) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    assert position.stop_protection is StopProtection.EXCHANGE
+    env.calls.clear()
     with pytest.raises(ValueError, match="STOP_LOSS"):
         await close_position(position, ExitTrigger.STOP_LOSS)
+    assert "post:SELL" not in env.calls
+    assert await list_open()
 
 
 async def test_close_missing_position(env: _Broker) -> None:
@@ -814,13 +835,96 @@ async def test_resolve_exit_fill_closes_position(env: _Broker) -> None:
     )
     await resolve_unfinished(NOW)
     assert await list_open() == []
+    closed = await list_closed()
+    assert closed[0].exit_trigger is ExitTrigger.TAKE_PROFIT
+
+
+async def test_resolved_exit_fill_uses_order_row_trigger(
+    env: _Broker,
+) -> None:
+    env.stop_failures_left = 3
+    position = await open_position(_signal(), 2, _instrument())
+    env.timeout = True
+    with pytest.raises(ExitFailed):
+        await close_position(position, ExitTrigger.STOP_LOSS)
+    key = (await list_unresolved())[0].key
+    env.state[key] = OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.SELL,
+        intent="EXIT",
+        lots=2,
+        status=OrderStatus.FILLED,
+        filled_lots=2,
+        filled_price=Decimal("95"),
+        commission=Decimal("1"),
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+        exit_trigger=ExitTrigger.STOP_LOSS,
+    )
+    await resolve_unfinished(NOW)
+    assert await list_open() == []
+    closed = await list_closed()
+    assert closed[0].exit_trigger is ExitTrigger.STOP_LOSS
+
+
+async def test_resolved_exit_without_trigger_alerts_and_leaves_position(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.config import load
+
+    position = await open_position(_signal(), 2, _instrument())
+    key = "defective-exit-key-00000000001"
+    async with aiosqlite.connect(load().db_path) as conn:
+        await conn.execute(
+            """
+            INSERT INTO orders (
+                key, ticker, figi, side, intent, lots, status,
+                filled_lots, filled_price, commission, broker_reason,
+                created_at, settled_at, exit_trigger
+            ) VALUES (
+                ?, 'SBER', '', 'SELL', 'EXIT', 2, 'SUBMITTING',
+                NULL, NULL, NULL, NULL, ?, NULL, NULL
+            )
+            """,
+            (key, NOW.isoformat()),
+        )
+        await conn.commit()
+    env.state[key] = OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.SELL,
+        intent="EXIT",
+        lots=2,
+        status=OrderStatus.FILLED,
+        filled_lots=2,
+        filled_price=Decimal("95"),
+        commission=None,
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+        exit_trigger=None,
+    )
+    with caplog.at_level(logging.ERROR):
+        await resolve_unfinished(NOW)
+    assert await list_open()
+    assert await list_open()[0].id == position.id
+    assert caplog.records
 
 
 async def test_resolve_exit_fill_without_position(env: _Broker) -> None:
     from zarabot.db.orders import record_submitting
 
     extra = await record_submitting(
-        "exit-orphan-key-000000000001", "SBER", Side.SELL, 1, "EXIT"
+        "exit-orphan-key-000000000001",
+        "SBER",
+        Side.SELL,
+        1,
+        "EXIT",
+        ExitTrigger.TAKE_PROFIT,
     )
     env.state[extra.key] = OrderRecord(
         key=extra.key,
