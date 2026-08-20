@@ -65,6 +65,7 @@ Module **26** of 38 in `dependency-order.md`. Everything before it is complete a
 | `filled_lots` | INTEGER NULL | |
 | `filled_price` | TEXT NULL | Average fill, decimal string |
 | `commission` | TEXT NULL | |
+| `exit_trigger` | TEXT NULL | CHECK IN (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`). The trigger this exit was submitted for. Non-null exactly when `intent = 'EXIT'` |
 | `broker_reason` | TEXT NULL | Broker's rejection text, verbatim |
 | `created_at` | TEXT NOT NULL | Written **before** submission |
 | `settled_at` | TEXT NULL | |
@@ -72,6 +73,14 @@ Module **26** of 38 in `dependency-order.md`. Everything before it is complete a
 **Invariants.** `FILLED`, `REJECTED` and `CANCELLED` are terminal — no row leaves
 them. A row in `SUBMITTING` means the outcome is unknown and must be resolved by
 querying the broker with `key`, never by resubmitting.
+
+`intent = 'EXIT'` requires `exit_trigger` non-null; `intent = 'ENTRY'` requires it
+null. The trigger is recorded **when the exit is submitted**, before its outcome
+is known, because that is the only moment the reason is in hand. A process that
+dies mid-exit and recovers later has no other way to learn why it was selling,
+and a recovered exit attributed to the wrong trigger corrupts the exit-trigger
+distribution, the per-strategy statistics, and the gap-versus-stop measurement
+permanently — mislabelled history cannot be repaired.
 
 ### `stop_orders`
 
@@ -144,6 +153,8 @@ Owns order submission, the submission locks, and crash recovery.
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
   cancel; submits the market sell directly.
+- Records `trigger` on the order row via `record_submitting`, so that an exit
+  interrupted by a crash can be attributed correctly on recovery.
 - Raises `ValueError` for `STOP_LOSS` **only when the position is `EXCHANGE`**.
   There the exchange owns the trigger and selling here would sell the position
   twice; the exchange's own fill is handled by `close_executed_stop` instead.
@@ -169,7 +180,12 @@ the system must never rest in.
 **`async resolve_unfinished(now: datetime) → list[OrderRecord]`**
 - For every unresolved order, queries `broker.client.get_order_state` by key and
   settles it; `OrderNotFound` settles it as never-placed.
-- Opens or closes the corresponding position when a fill is discovered.
+- Opens or closes the corresponding position when a fill is discovered. A
+  discovered **exit** fill closes the position with the `exit_trigger` recorded
+  on its order row. It must never fall back to a default trigger: a guess here
+  writes a permanent, plausible-looking lie into the trade history. A row with
+  `intent = 'EXIT'` and no trigger is a data defect — alert and leave the
+  position open for the owner to resolve.
 - Ordering constraint: completes before any new order is submitted in the
   process's lifetime.
 - Must never resubmit an order.
@@ -224,6 +240,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A broker timeout followed by a successful state query showing a fill records
   the fill and opens the position (proves an uncertain outcome is resolved by
   asking, not assuming).
+- A recovered exit fill closes the position with the trigger from its order row —
+  a recovered stop-out is recorded as `STOP_LOSS`, not as `TAKE_PROFIT` (proves
+  recovery reads the reason instead of defaulting, the defect that would
+  otherwise silently corrupt every exit statistic in the weekly report).
+- A recovered exit fill whose order row carries no trigger alerts and leaves the
+  position open (proves a data defect is surfaced rather than guessed past).
 - A rejected entry records the rejection and opens no position, and is not
   retried (proves entry rejections are terminal).
 - A rejected **exit** is retried on the following cycle and alerts immediately

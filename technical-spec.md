@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.9
+**Version:** 1.10
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -332,6 +332,9 @@ it proves.
   (proves crash recovery can find them).
 - Recording two orders with the same idempotency key raises `DuplicateOrderError`
   (proves the uniqueness invariant is enforced at the storage layer).
+- Recording an `EXIT` without an `exit_trigger` raises `ValueError`, as does an
+  `ENTRY` with one (proves the pairing, so no exit can be submitted without its
+  reason captured).
 - A terminal order cannot transition back to a non-terminal state (proves the
   status machine is one-way).
 
@@ -477,6 +480,12 @@ Additionally, `strategies.ml_model`:
 - A broker timeout followed by a successful state query showing a fill records
   the fill and opens the position (proves an uncertain outcome is resolved by
   asking, not assuming).
+- A recovered exit fill closes the position with the trigger from its order row —
+  a recovered stop-out is recorded as `STOP_LOSS`, not as `TAKE_PROFIT` (proves
+  recovery reads the reason instead of defaulting, the defect that would
+  otherwise silently corrupt every exit statistic in the weekly report).
+- A recovered exit fill whose order row carries no trigger alerts and leaves the
+  position open (proves a data defect is surfaced rather than guessed past).
 - A rejected entry records the rejection and opens no position, and is not
   retried (proves entry rejections are terminal).
 - A rejected **exit** is retried on the following cycle and alerts immediately
@@ -769,8 +778,12 @@ Owns schema creation and version tracking.
 
 **Sole owner of order rows and of order status transitions.**
 
-**`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str) → OrderRecord`**
+**`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str, exit_trigger: ExitTrigger | None = None) → OrderRecord`**
 - Persists the intent to place an order **before** it is sent.
+- `exit_trigger` is required when `intent` is `EXIT` and must be `None` when it is
+  `ENTRY`; violating either raises `ValueError`. Recording why an exit is being
+  submitted is what allows a recovered fill to be attributed correctly rather
+  than guessed.
 - Raises `DuplicateOrderError` if the idempotency key already exists.
 - Ordering constraint: must complete before `broker.client.post_order` is called
   with the same key. This ordering is what makes a crash mid-submission
@@ -1096,6 +1109,8 @@ Owns order submission, the submission locks, and crash recovery.
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
   cancel; submits the market sell directly.
+- Records `trigger` on the order row via `record_submitting`, so that an exit
+  interrupted by a crash can be attributed correctly on recovery.
 - Raises `ValueError` for `STOP_LOSS` **only when the position is `EXCHANGE`**.
   There the exchange owns the trigger and selling here would sell the position
   twice; the exchange's own fill is handled by `close_executed_stop` instead.
@@ -1121,7 +1136,12 @@ the system must never rest in.
 **`async resolve_unfinished(now: datetime) → list[OrderRecord]`**
 - For every unresolved order, queries `broker.client.get_order_state` by key and
   settles it; `OrderNotFound` settles it as never-placed.
-- Opens or closes the corresponding position when a fill is discovered.
+- Opens or closes the corresponding position when a fill is discovered. A
+  discovered **exit** fill closes the position with the `exit_trigger` recorded
+  on its order row. It must never fall back to a default trigger: a guess here
+  writes a permanent, plausible-looking lie into the trade history. A row with
+  `intent = 'EXIT'` and no trigger is a data defect — alert and leave the
+  position open for the owner to resolve.
 - Ordering constraint: completes before any new order is submitted in the
   process's lifetime.
 - Must never resubmit an order.
@@ -1349,6 +1369,7 @@ explicit UTC offset. Booleans are `INTEGER` 0 or 1.
 | `filled_lots` | INTEGER NULL | |
 | `filled_price` | TEXT NULL | Average fill, decimal string |
 | `commission` | TEXT NULL | |
+| `exit_trigger` | TEXT NULL | CHECK IN (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`). The trigger this exit was submitted for. Non-null exactly when `intent = 'EXIT'` |
 | `broker_reason` | TEXT NULL | Broker's rejection text, verbatim |
 | `created_at` | TEXT NOT NULL | Written **before** submission |
 | `settled_at` | TEXT NULL | |
@@ -1356,6 +1377,14 @@ explicit UTC offset. Booleans are `INTEGER` 0 or 1.
 **Invariants.** `FILLED`, `REJECTED` and `CANCELLED` are terminal — no row leaves
 them. A row in `SUBMITTING` means the outcome is unknown and must be resolved by
 querying the broker with `key`, never by resubmitting.
+
+`intent = 'EXIT'` requires `exit_trigger` non-null; `intent = 'ENTRY'` requires it
+null. The trigger is recorded **when the exit is submitted**, before its outcome
+is known, because that is the only moment the reason is in hand. A process that
+dies mid-exit and recovers later has no other way to learn why it was selling,
+and a recovered exit attributed to the wrong trigger corrupts the exit-trigger
+distribution, the per-strategy statistics, and the gap-versus-stop measurement
+permanently — mislabelled history cannot be repaired.
 
 ### `stop_orders`
 
@@ -1465,6 +1494,10 @@ historical record is the purpose of the project. Backups are retained 30 days.
   file back and aborts startup.
 - `001_initial.sql` creates every table above, the partial unique index on open
   positions, and seeds the single `halt_state` row with `halted = 0`.
+- `002_order_exit_trigger.sql` adds `exit_trigger` to `orders` with its CHECK
+  constraint. It is a separate migration rather than an edit to `001` because
+  `001` has been applied — in tests, and potentially on a developer machine — and
+  the forward-only rule holds without exception.
 - Migrations are forward-only. There are no down-migrations: a bad migration is
   corrected by a new migration, because rolling a schema backwards under a
   database holding real trade history is more dangerous than the defect.

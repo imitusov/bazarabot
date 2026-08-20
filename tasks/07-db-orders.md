@@ -28,6 +28,7 @@ Module **7** of 38 in `dependency-order.md`. Everything before it is complete an
 | `filled_lots` | INTEGER NULL | |
 | `filled_price` | TEXT NULL | Average fill, decimal string |
 | `commission` | TEXT NULL | |
+| `exit_trigger` | TEXT NULL | CHECK IN (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`). The trigger this exit was submitted for. Non-null exactly when `intent = 'EXIT'` |
 | `broker_reason` | TEXT NULL | Broker's rejection text, verbatim |
 | `created_at` | TEXT NOT NULL | Written **before** submission |
 | `settled_at` | TEXT NULL | |
@@ -36,14 +37,26 @@ Module **7** of 38 in `dependency-order.md`. Everything before it is complete an
 them. A row in `SUBMITTING` means the outcome is unknown and must be resolved by
 querying the broker with `key`, never by resubmitting.
 
+`intent = 'EXIT'` requires `exit_trigger` non-null; `intent = 'ENTRY'` requires it
+null. The trigger is recorded **when the exit is submitted**, before its outcome
+is known, because that is the only moment the reason is in hand. A process that
+dies mid-exit and recovers later has no other way to learn why it was selling,
+and a recovered exit attributed to the wrong trigger corrupts the exit-trigger
+distribution, the per-strategy statistics, and the gap-versus-stop measurement
+permanently — mislabelled history cannot be repaired.
+
 ## Module contract
 
 ### `zarabot/db/orders.py`
 
 **Sole owner of order rows and of order status transitions.**
 
-**`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str) → OrderRecord`**
+**`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str, exit_trigger: ExitTrigger | None = None) → OrderRecord`**
 - Persists the intent to place an order **before** it is sent.
+- `exit_trigger` is required when `intent` is `EXIT` and must be `None` when it is
+  `ENTRY`; violating either raises `ValueError`. Recording why an exit is being
+  submitted is what allows a recovered fill to be attributed correctly rather
+  than guessed.
 - Raises `DuplicateOrderError` if the idempotency key already exists.
 - Ordering constraint: must complete before `broker.client.post_order` is called
   with the same key. This ordering is what makes a crash mid-submission
@@ -83,6 +96,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (proves crash recovery can find them).
 - Recording two orders with the same idempotency key raises `DuplicateOrderError`
   (proves the uniqueness invariant is enforced at the storage layer).
+- Recording an `EXIT` without an `exit_trigger` raises `ValueError`, as does an
+  `ENTRY` with one (proves the pairing, so no exit can be submitted without its
+  reason captured).
 - A terminal order cannot transition back to a non-terminal state (proves the
   status machine is one-way).
 
