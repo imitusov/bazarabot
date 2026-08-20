@@ -63,3 +63,14 @@ async def test_rejected_signal_is_stored_with_reason_and_retrievable_by_day(
     assert stored.lots is None
     outside = await list_for_period(date(2026, 3, 17), date(2026, 3, 18))
     assert outside == []
+
+
+async def test_approved_signal_is_stored_with_lots(db: Path) -> None:
+    decision = RiskDecision(approved=True, lots=3, reason=None)
+    await record(_signal(), decision)
+    rows = await list_for_period(date(2026, 3, 16), date(2026, 3, 16))
+    assert len(rows) == 1
+    _, stored = rows[0]
+    assert stored.approved is True
+    assert stored.lots == 3
+    assert stored.reason is None
