@@ -8,7 +8,6 @@ from decimal import Decimal
 from pathlib import Path
 
 from sandbox.backtest import run
-
 from zarabot.config import Config
 from zarabot.lifecycle.exits import evaluate as live_exits
 from zarabot.models import (
@@ -149,9 +148,7 @@ def test_backtester_matches_live_strategy_and_exits() -> None:
         end=trade.exit_at + timedelta(minutes=1),
         is_trading_day=True,
     )
-    trigger = live_exits(
-        opened, trade.exit_price, trade.exit_at, session, 0, _config()
-    )
+    trigger = live_exits(opened, trade.exit_price, trade.exit_at, session, 0, _config())
     assert trigger is ExitTrigger.TAKE_PROFIT
 
 
@@ -172,7 +169,7 @@ def test_commission_and_slippage_apply_to_every_fill() -> None:
 
 def test_ma_crossover_shared_with_live_path() -> None:
     strategy = MovingAverageCrossover()
-    closes = [100] * 30 + [200]
+    closes = [100] * 30 + [200, 200]
     start = datetime(2026, 1, 1, 15, 0, tzinfo=UTC)
     candles = [
         _candle(start + timedelta(days=i), str(price)) for i, price in enumerate(closes)

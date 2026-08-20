@@ -699,3 +699,23 @@ Process entry for `python -m zarabot`. No application logic of its own.
 Installs `SIGTERM`/`SIGINT` handlers that call `app.shutdown.shutdown`, runs
 `app.startup.start` then `app.loops.run`. Returns 0 on a clean shutdown. On
 `StartupError` sleeps 30 seconds and returns non-zero (rule 15).
+
+## `sandbox.data`
+
+Laptop research. Never imported by `zarabot/`. Caches to
+`<cache_dir>/<ticker>_<interval>.parquet` (`sandbox/cache/` is gitignored).
+
+**`async load(ticker: str, start: datetime, end: datetime, interval: CandleInterval, cache_dir: Path = Path("sandbox/cache")) → list[Candle]`**
+Oldest-first. Empty list when the range holds none. Naive `start`/`end` raise
+`ValueError`. A cache miss fetches via `broker.client`; a cached range that does
+not cover the request is extended by fetching only the missing span.
+
+## `sandbox.backtest`
+
+Imports live `strategies`, `risk.sizing` and `lifecycle.exits` unchanged.
+Reimplementing any of them is a defect.
+
+**`run(strategy, candles: list[Candle], config: Config, commission: Decimal, slippage: Decimal) → BacktestResult`**
+Replays candles oldest-first. The strategy never receives a candle at or after
+the decision instant. Commission (per fill) and slippage (fraction of price)
+apply to every simulated fill.
