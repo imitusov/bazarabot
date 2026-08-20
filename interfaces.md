@@ -570,4 +570,19 @@ PTB command handlers.
 **`build_application() → Application`**
 Registers every command on a python-telegram-bot `Application`.
 
+## `zarabot.reporter.weekly`
+
+Undefined metrics are `N/A`, never `0`. Empty weeks are valid. Over 4096
+characters, sections drop in order: exit-trigger distribution, cooldown counts,
+worst trade; the omission is noted.
+
+**`async build(start: date, end: date) → str`**
+P&L vs benchmark, per-strategy, win rate, worst trade, exit-trigger
+distribution, cooldown-blocked signal count, gapped intended-vs-actual exits.
+
+**`async send(now: datetime) → None`**
+Builds the Moscow week containing `now` and sends via `telegram.notifier.alert`.
+Failure alerts and never raises. Raises `ValueError` on naive `now`.
+
+
 
