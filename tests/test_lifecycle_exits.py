@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from zarabot.config import Config
 from zarabot.lifecycle.exits import evaluate
 from zarabot.models import (
@@ -27,10 +29,10 @@ BEFORE_WINDOW = SESSION_END - timedelta(minutes=20)
 
 def _config(max_holding_days: int = 3) -> Config:
     return Config(
-        tinvest_token="t",
+        tinvest_token="t",  # noqa: S106
         tinvest_account_id="a",
         trading_mode="live",
-        telegram_bot_token="tg",
+        telegram_bot_token="tg",  # noqa: S106
         telegram_chat_id=1,
         allocated_capital=Decimal("100000"),
         position_size_pct=Decimal("10"),
@@ -45,8 +47,8 @@ def _config(max_holding_days: int = 3) -> Config:
         enabled_strategies=("ma_crossover",),
         ml_model_path=None,
         poll_interval_seconds=60,
-        db_path=Path("/tmp/zarabot.db"),
-        backup_dir=Path("/tmp/backups"),
+        db_path=Path("zarabot.db"),
+        backup_dir=Path("backups"),
         log_level="INFO",
         tz="Europe/Moscow",
     )
@@ -89,9 +91,7 @@ def test_price_exactly_at_stop_triggers_stop_loss() -> None:
         is ExitTrigger.STOP_LOSS
     )
     assert (
-        evaluate(
-            _position(), STOP + INCREMENT, IN_WINDOW, _session(), 0, _config()
-        )
+        evaluate(_position(), STOP + INCREMENT, IN_WINDOW, _session(), 0, _config())
         is None
     )
 
@@ -102,9 +102,7 @@ def test_price_exactly_at_target_triggers_take_profit() -> None:
         is ExitTrigger.TAKE_PROFIT
     )
     assert (
-        evaluate(
-            _position(), TARGET - INCREMENT, IN_WINDOW, _session(), 0, _config()
-        )
+        evaluate(_position(), TARGET - INCREMENT, IN_WINDOW, _session(), 0, _config())
         is None
     )
 
@@ -115,9 +113,7 @@ def test_max_age_only_in_closing_window() -> None:
         is ExitTrigger.MAX_AGE
     )
     assert (
-        evaluate(
-            _position(), Decimal("100"), BEFORE_WINDOW, _session(), 3, _config()
-        )
+        evaluate(_position(), Decimal("100"), BEFORE_WINDOW, _session(), 3, _config())
         is None
     )
 
@@ -160,3 +156,9 @@ def test_exchange_stop_does_not_return_stop_loss() -> None:
         evaluate(protected, TARGET, IN_WINDOW, _session(), 0, _config())
         is ExitTrigger.TAKE_PROFIT
     )
+
+
+def test_naive_now_raises_value_error() -> None:
+    naive = datetime(2026, 3, 16, 15, 40)  # noqa: DTZ001
+    with pytest.raises(ValueError):
+        evaluate(_position(), Decimal("100"), naive, _session(), 0, _config())
