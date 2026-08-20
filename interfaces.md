@@ -549,3 +549,25 @@ Never raises. Never includes a token. Telegram outages cannot delay trading.
 Sends to `TELEGRAM_CHAT_ID`. Retries on failure, then logs and returns. A body
 containing either token is dropped and replaced with an incident notice.
 
+## `zarabot.telegram.commands`
+
+One handler per brief command. Authorised `TELEGRAM_CHAT_ID` only; a mismatch
+logs at INFO with the chat id and neither replies nor changes state. Replies
+over 4096 characters are truncated with an omission count. No command mutates a
+risk limit. `/halt` and `/resume` delegate to `state.halt` only. `/report` calls
+an injected `async (start: date, end: date) → str` matching
+`reporter.weekly.build`; when unset it replies `report unavailable`. `/status`
+reads today's P&L and `orders_placed` from `daily_snapshots` (both 0 if none).
+Send failures retry then log and never raise.
+
+**`set_report_builder(builder: ReportBuilder | None) → None`**
+Installs or clears the `/report` callable. Wired by `app.startup` once
+`reporter.weekly` exists.
+
+**`async status/positions/history/pnl/halt/resume/strategies/report/help(update, context) → None`**
+PTB command handlers.
+
+**`build_application() → Application`**
+Registers every command on a python-telegram-bot `Application`.
+
+

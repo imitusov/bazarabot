@@ -10,6 +10,17 @@ from typing import Any
 
 import aiosqlite
 import pytest
+
+from zarabot.config import load
+from zarabot.db.migrations import apply
+from zarabot.db.snapshots import DailySnapshot, write_daily
+from zarabot.models import (
+    ExitTrigger,
+    Position,
+    SessionInfo,
+    StopProtection,
+)
+from zarabot.state.halt import is_halted
 from zarabot.telegram.commands import (
     halt,
     help,
@@ -22,17 +33,6 @@ from zarabot.telegram.commands import (
     status,
     strategies,
 )
-
-from zarabot.config import load
-from zarabot.db.migrations import apply
-from zarabot.db.snapshots import DailySnapshot, write_daily
-from zarabot.models import (
-    ExitTrigger,
-    Position,
-    SessionInfo,
-    StopProtection,
-)
-from zarabot.state.halt import is_halted
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
 SESSION_END = datetime(2026, 3, 16, 16, 0, tzinfo=UTC)
@@ -149,7 +149,11 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     async def _price(figi: str) -> Decimal:
         return Decimal("105")
 
+    async def _benchmark(start: date, end: date) -> Decimal:
+        return Decimal("1.25")
+
     monkeypatch.setattr("zarabot.telegram.commands.get_last_price", _price)
+    monkeypatch.setattr("zarabot.telegram.commands.benchmark_return", _benchmark)
     set_report_builder(None)
     return path
 
@@ -265,10 +269,20 @@ async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
     env: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     update = _FakeUpdate(99)
+    handlers = (
+        status,
+        positions,
+        history,
+        pnl,
+        halt,
+        resume,
+        strategies,
+        report,
+        help,
+    )
     with caplog.at_level(logging.INFO):
-        await halt(update, None)
-        await status(update, None)
-        await resume(update, None)
+        for handler in handlers:
+            await handler(update, None)
     assert update.message.replies == []
     assert await is_halted() is False
     assert "99" in caplog.text
