@@ -263,7 +263,7 @@ async def test_duplicate_open_raises(db: Path) -> None:
 async def test_close_absent_raises(db: Path) -> None:
     exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
     with pytest.raises(PositionStateError):
-        await close(999, ExitTrigger.EXTERNAL, PRICE, AWARE, exit_order)
+        await close(999, ExitTrigger.TAKE_PROFIT, PRICE, AWARE, exit_order)
 
 
 async def test_update_lots_writes_broker_count(db: Path) -> None:
@@ -282,7 +282,7 @@ async def test_update_lots_absent_or_closed_raises(db: Path) -> None:
     position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
     exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
     await _insert_order(db, exit_order)
-    await close(position.id, ExitTrigger.EXTERNAL, PRICE, AWARE, exit_order)
+    await close(position.id, ExitTrigger.TAKE_PROFIT, PRICE, AWARE, exit_order)
     with pytest.raises(PositionStateError):
         await update_lots(position.id, 1)
 
@@ -308,3 +308,58 @@ async def test_list_closed_returns_closed_newest_first(db: Path) -> None:
     assert found[0].status == "CLOSED"
     assert found[0].exit_trigger is ExitTrigger.TAKE_PROFIT
     assert await list_open() == []
+
+
+async def test_close_nets_commission_on_both_legs(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    exit_order = _order(
+        key=EXIT_KEY,
+        side=Side.SELL,
+        intent="EXIT",
+        filled_price=Decimal("110.00"),
+        commission=Decimal("1.50"),
+    )
+    await _insert_order(db, exit_order)
+    closed = await close(
+        position.id,
+        ExitTrigger.TAKE_PROFIT,
+        Decimal("110.00"),
+        AWARE,
+        exit_order,
+    )
+    # Gross 200 minus entry 1.50 minus exit 1.50.
+    assert closed.realised_pnl == Decimal("197.00")
+    assert closed.stop_protection is StopProtection.LOCAL
+    assert closed.stop_order_key is None
+
+
+async def test_external_close_requires_no_order(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
+    with pytest.raises(ValueError):
+        await close(
+            position.id, ExitTrigger.EXTERNAL, PRICE, AWARE, exit_order
+        )
+    closed = await close(position.id, ExitTrigger.EXTERNAL, PRICE, AWARE, None)
+    assert closed.exit_trigger is ExitTrigger.EXTERNAL
+    assert closed.close_order_key is None
+    assert closed.status == "CLOSED"
+
+
+async def test_non_external_close_requires_an_order(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    with pytest.raises(ValueError):
+        await close(
+            position.id, ExitTrigger.TAKE_PROFIT, Decimal("110.00"), AWARE, None
+        )
+
+
+async def test_adopt_uses_configured_stop_and_target(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STOP_LOSS_PCT", "3")
+    monkeypatch.setenv("TAKE_PROFIT_PCT", "12")
+    position = await adopt(_instrument(), 3, PRICE, AWARE)
+    assert position.stop_price == Decimal("97.00")
+    assert position.target_price == Decimal("112.00")
+
