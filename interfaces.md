@@ -584,5 +584,19 @@ distribution, cooldown-blocked signal count, gapped intended-vs-actual exits.
 Builds the Moscow week containing `now` and sends via `telegram.notifier.alert`.
 Failure alerts and never raises. Raises `ValueError` on naive `now`.
 
+## `zarabot.ops.backup`
+
+SQLite backup API only, never a raw copy of a live file. Failure alerts and
+never raises; trading continues.
+
+**`async run(db_path: Path, backup_dir: Path) → Path`**
+Writes `zarabot-<UTC stamp>.db` into `backup_dir` via `sqlite3.Connection.backup`.
+On failure, alerts and still returns the intended path.
+
+**`async prune(backup_dir: Path, retention_days: int) → int`**
+Deletes `zarabot-*.db` files whose mtime is strictly older than `retention_days`.
+Returns how many were removed. Missing directory → `0`.
+
+
 
 
