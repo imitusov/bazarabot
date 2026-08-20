@@ -1,0 +1,35 @@
+[project]
+name = "zarabot"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["zarabot"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "DTZ", "S", "RET", "SIM"]
+# DTZ bans naive datetimes; S catches common security slips; ASYNC catches
+# blocking calls on the event loop. All three enforce project rules mechanically
+# rather than by review.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]   # assert is the point of a test
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true

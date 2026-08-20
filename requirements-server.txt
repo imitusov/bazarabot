@@ -1,0 +1,9 @@
+# Installed on the VPS and in the image.
+# The broker SDK is NOT on PyPI - install from the vendored wheel:
+#   pip install vendor/t_tech_investments-1.49.1-py3-none-any.whl
+python-telegram-bot>=22.8
+aiosqlite>=0.22
+structlog>=26
+scikit-learn>=1.9
+joblib>=1.5
+numpy>=2.5

@@ -1,0 +1,6 @@
+# Test and lint toolchain. Never installed on the server or in the image.
+pytest>=9.1
+pytest-asyncio>=1.4
+pytest-cov>=7.1
+ruff>=0.16
+mypy>=2.3

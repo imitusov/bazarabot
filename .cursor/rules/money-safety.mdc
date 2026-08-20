@@ -1,0 +1,32 @@
+---
+alwaysApply: true
+---
+
+# This project trades real money on a live brokerage account
+
+A bug here does not produce a stack trace, it produces a loss. Read `AGENTS.md`
+before every task, and the `AGENTS.md` in the directory you are editing.
+
+## The rules that cost money if broken
+
+- Never pass `confirm_margin_trade=True` to any order call.
+- Never call the broker before the intent is written to the database.
+- Never resubmit an entry order; recover by querying the idempotency key.
+- Never sell before cancelling that position's standing stop order.
+- Never let both the exchange and the bot own one position's stop-loss.
+- Never use `float` for money — `Decimal` end to end.
+- Never call `datetime.now()` outside `clock`.
+
+## Scope discipline
+
+Implement **one module per task**. Never modify another module to make yours
+work — if you need to, the contract is wrong: stop and ask. Never guess a
+signature; read it from `interfaces.md`. Never reimplement something already
+recorded there.
+
+## When to stop
+
+Ambiguous contract, conflict with `interfaces.md`, a test that cannot pass
+within the contract, an uncovered failure mode, or anything requiring a
+**Must NEVER** rule to be relaxed. Stop and explain. A wrong guess costs more
+than a question, and here some wrong guesses cost money.

@@ -1,0 +1,4 @@
+# Laptop research only. Never installed on the server.
+pandas>=3.0
+matplotlib>=3.11
+jupyterlab>=4.6

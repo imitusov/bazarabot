@@ -1,0 +1,31 @@
+---
+description: Test-first workflow for every module in this project
+globs: ["tests/**/*.py", "zarabot/**/*.py", "sandbox/**/*.py"]
+alwaysApply: false
+---
+
+# Test-first, always
+
+Tests are written **before** implementation, from the test contracts in
+`technical-spec.md` §3.2 — not from the implementation, and not invented.
+
+1. Write `tests/test_<module>.py` from the spec's test cases for that module.
+2. Run it. Confirm it **fails**. Nothing is implemented yet.
+3. Write the implementation to satisfy the contract.
+4. Run again. Iterate until all pass and coverage meets the threshold.
+5. Append the module's public signatures to `interfaces.md`.
+
+Never weaken, skip, comment out, or delete a test to make a suite pass. If a
+test cannot pass without violating the contract, **stop and ask** — that is a
+spec defect, and writing around it hides the defect in code.
+
+## Determinism
+
+No wall-clock reliance — `clock` is injected. No unseeded randomness. No `sleep`
+to advance time. No real network: mock at `broker.client`, `telegram.notifier`
+and `telegram.commands`.
+
+## Coverage
+
+80% overall, 70% for `app.*`, and **95% for `risk.gate`, `risk.sizing`,
+`lifecycle.exits` and `execution.orders`**.

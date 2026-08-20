@@ -1,0 +1,109 @@
+# Task 7/38: Implement `zarabot/db/orders.py`
+
+## Product context
+
+Sole owner of order rows. Records intent BEFORE the broker is called, which is what makes a crash mid-submission recoverable.
+
+## Build order position
+
+Module **7** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+
+## Already-implemented interfaces
+
+**Read `interfaces.md` now.** It lists the exact, tested signatures of every completed module. Call those; never guess a signature and never reimplement something recorded there.
+
+## Database tables used
+
+### `orders`
+
+| Column | Type | Notes |
+|---|---|---|
+| `key` | TEXT | Primary key. Client-generated idempotency key. UUID4 in canonical form — the broker specifies a UID of at most 36 characters, which the canonical form occupies exactly |
+| `ticker` | TEXT NOT NULL | |
+| `figi` | TEXT NOT NULL | |
+| `side` | TEXT NOT NULL | CHECK IN (`BUY`, `SELL`) |
+| `intent` | TEXT NOT NULL | CHECK IN (`ENTRY`, `EXIT`) |
+| `lots` | INTEGER NOT NULL | Requested |
+| `status` | TEXT NOT NULL | CHECK IN (`SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED`, `UNKNOWN`) |
+| `filled_lots` | INTEGER NULL | |
+| `filled_price` | TEXT NULL | Average fill, decimal string |
+| `commission` | TEXT NULL | |
+| `broker_reason` | TEXT NULL | Broker's rejection text, verbatim |
+| `created_at` | TEXT NOT NULL | Written **before** submission |
+| `settled_at` | TEXT NULL | |
+
+**Invariants.** `FILLED`, `REJECTED` and `CANCELLED` are terminal — no row leaves
+them. A row in `SUBMITTING` means the outcome is unknown and must be resolved by
+querying the broker with `key`, never by resubmitting.
+
+## Module contract
+
+### `zarabot/db/orders.py`
+
+**Sole owner of order rows and of order status transitions.**
+
+**`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str) → OrderRecord`**
+- Persists the intent to place an order **before** it is sent.
+- Raises `DuplicateOrderError` if the idempotency key already exists.
+- Ordering constraint: must complete before `broker.client.post_order` is called
+  with the same key. This ordering is what makes a crash mid-submission
+  recoverable, and reversing it is a critical defect.
+
+**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, broker_reason: str | None) → OrderRecord`**
+- Records a terminal outcome.
+- Raises `OrderStateError` on a transition out of a terminal status.
+
+**`async list_unresolved() → list[OrderRecord]`**
+- Returns orders left in `SUBMITTING` or `SUBMITTED`, oldest first.
+- Consumed by `app.startup` before trading begins.
+
+## Relevant error handling rules
+
+From `technical-spec.md` §8. Handle each exactly as written.
+
+5. **Order submission times out or the outcome is unknown** → leave the row
+   `SUBMITTING`, resolve by querying with the idempotency key on the next cycle
+   or at next startup. **Never resubmit.**
+
+11. **Database write failure on a trading-critical path** (orders, positions,
+    halt state) → hard error: halt trading, alert, stop opening anything. The bot
+    must never trade what it cannot record.
+
+12. **Database write failure on a non-critical path** (signals, snapshots,
+    instruments cache) → ERROR to stdout only, never propagated. Losing an
+    analytics row must not stop trading.
+
+## Test cases
+
+From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
+
+- An order recorded as `SUBMITTING` then confirmed as `FILLED` reports the
+  terminal state (happy path).
+- Orders left in `SUBMITTING` are returned by the unresolved-orders query
+  (proves crash recovery can find them).
+- Recording two orders with the same idempotency key raises `DuplicateOrderError`
+  (proves the uniqueness invariant is enforced at the storage layer).
+- A terminal order cannot transition back to a non-terminal state (proves the
+  status machine is one-way).
+
+## Expected output
+
+- `zarabot/db/orders.py` implementing the contract exactly
+- `tests/test_db_orders.py` implementing every test case above
+- All tests passing, coverage threshold met
+- This module's public signatures appended to `interfaces.md`
+
+## Agent instructions
+
+1. Write `tests/test_db_orders.py` FIRST, from the test cases above. No implementation yet.
+2. Run it. Confirm it **fails** — nothing is implemented.
+3. Write `zarabot/db/orders.py` to satisfy the contract.
+4. Run again. Iterate until all pass.
+5. Match contract signatures EXACTLY, including `| None`.
+6. Call interfaces as recorded; do not reimplement them.
+7. Handle every error rule above as written.
+8. Add no dependency outside `requirements-*.txt`.
+9. Modify no module other than this one.
+10. Append public signatures to `interfaces.md` once green.
+11. If the contract is ambiguous, conflicts with `interfaces.md`, or a test
+    cannot pass without violating it — **STOP and ask**. Do not guess.

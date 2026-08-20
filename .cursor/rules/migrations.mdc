@@ -1,0 +1,17 @@
+---
+description: Rules for database migration files
+globs: ["migrations/**/*.sql"]
+alwaysApply: false
+---
+
+# Migrations are forward-only
+
+Named `NNN_description.sql`, applied in ascending numeric order, each inside its
+own transaction.
+
+- **Never write a down-migration.** A bad migration is corrected by a new
+  migration. Rolling a schema backwards under a database holding real trade
+  history is more dangerous than the defect being fixed.
+- **Never edit a migration that has been applied anywhere.** Add a new one.
+- Money columns are `TEXT`, never `REAL`. Timestamps are `TEXT` ISO-8601 UTC.
+- Schema changes must be reflected in `technical-spec.md` §5 in the same change.
