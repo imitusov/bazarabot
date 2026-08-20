@@ -124,10 +124,14 @@ async def test_shutdown_waits_for_in_flight_order_to_settle(
     async def _alert(text: str, urgent: bool = False) -> None:
         calls.append("alert")
 
+    async def _open() -> list[object]:
+        return []
+
     monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
     monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
     monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
     monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
     await shutdown(_ctx(), signal.SIGTERM)
     assert "resolve" in calls
     assert calls.index("unresolved") < calls.index("resolve")
@@ -168,9 +172,9 @@ async def test_shutdown_neither_cancels_nor_liquidates(
     monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
     monkeypatch.setattr(shutdown_mod, "list_open", _open)
     monkeypatch.setattr(shutdown_mod, "alert", _alert)
-    monkeypatch.setattr(shutdown_mod, "cancel_stop_order", _cancel)
-    monkeypatch.setattr(shutdown_mod, "close_position", _close)
-    monkeypatch.setattr(shutdown_mod, "post_market_order", _post)
+    monkeypatch.setattr("zarabot.broker.client.cancel_stop_order", _cancel)
+    monkeypatch.setattr("zarabot.execution.orders.close_position", _close)
+    monkeypatch.setattr("zarabot.broker.client.post_market_order", _post)
     await shutdown(_ctx(), signal.SIGINT)
     assert forbidden == []
     assert (await _open())[0].status == "OPEN"
@@ -195,6 +199,9 @@ async def test_shutdown_leaves_submitting_orders_after_timeout(
     async def _alert(text: str, urgent: bool = False) -> None:
         return None
 
+    async def _open() -> list[object]:
+        return []
+
     async def _noop_sleep(_seconds: float) -> None:
         return None
 
@@ -202,6 +209,7 @@ async def test_shutdown_leaves_submitting_orders_after_timeout(
     monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
     monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
     monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
     monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
     await shutdown(_ctx(), signal.SIGTERM)
     assert resolves >= 1

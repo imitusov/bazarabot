@@ -639,3 +639,13 @@ approved entries.
 Schedules the trading cycle, daily rollover at session open, nightly backup
 with 30-day prune, Sunday 12:00 Moscow weekly report, and a daily heartbeat.
 Each task is restarted with exponential backoff after an unhandled exception.
+
+## `zarabot.app.shutdown`
+
+Graceful shutdown. Restarts have no financial consequence: in-flight orders are
+settled or left `SUBMITTING`; positions are neither cancelled nor liquidated.
+
+**`async shutdown(ctx: AppContext, signal: int) → None`**
+Waits up to 30 seconds for unresolved orders to reach a known state via
+`resolve_unfinished`. Remaining `SUBMITTING` rows are left for the next startup.
+Never cancels a stop or submits a sell. Alerts, then returns.
