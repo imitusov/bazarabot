@@ -79,7 +79,10 @@ Module **6** of 38 in `dependency-order.md`. Everything before it is complete an
 - Transitions a position to closed, recording the trigger, exit price, realised
   P&L and the closing order.
 - Realised P&L is `(exit − entry) × lots × lot_size` **minus commission on both
-  legs** — the opening order's and the closing order's. Netting only the closing
+  legs** — the opening order's and the closing order's. The opening commission is
+  obtained by calling `db.orders.get(open_order_key)`, never by querying the
+  `orders` table. A missing row, or a row whose commission is not yet known,
+  contributes zero. Netting only the closing
   leg overstates every realised result by the entry commission, permanently and
   invisibly. On an account this size, commission on a round trip is a meaningful
   fraction of a 10% move.
@@ -104,6 +107,15 @@ Module **6** of 38 in `dependency-order.md`. Everything before it is complete an
 
 **`async get(position_id: int) → Position | None`**
 - Returns `None` when absent rather than raising.
+
+**`async recompute_realised(position_id: int) → Position`**
+- Recalculates and rewrites `realised_pnl` for a **closed** position from the
+  commissions currently recorded on its two orders. Called only by the commission
+  backfill, after a late commission lands.
+- Raises `PositionStateError` when the position is absent or still open.
+- This is the only mutation permitted on a closed position, and it exists because
+  a stored figure that silently disagrees with its inputs is worse than one
+  corrected once and logged.
 
 **`async list_closed() → list[Position]`**
 - Closed positions, newest exit first. Empty list when none. Consumed by

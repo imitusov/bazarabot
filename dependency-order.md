@@ -1,6 +1,6 @@
 # Dependency Order — Zarabot
 
-**Version:** 1.1
+**Version:** 1.2
 **Derived from:** `technical-spec.md` v1.5
 **Versioning:** new version when a module is added, removed, or its dependencies
 change.
@@ -94,6 +94,8 @@ remedies through the executor. Building it second keeps that separation obvious.
 30. **reporter.weekly** — depends on: pnl, db.positions, db.signals,
     db.snapshots, telegram.notifier
 31. **ops.backup** — depends on: config, telegram.notifier
+31b. **ops.commissions** — depends on: broker.client, db.orders, db.positions,
+    telegram.notifier, clock
 
 ## Layer 8 — Orchestration (depends on everything)
 

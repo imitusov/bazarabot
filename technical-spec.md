@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.12
+**Version:** 1.14
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -336,6 +336,12 @@ it proves.
   terminal state (happy path).
 - Orders left in `SUBMITTING` are returned by the unresolved-orders query
   (proves crash recovery can find them).
+- `settle` with a commission persists it; with `None` leaves it unknown, which
+  reads back distinctly from zero (proves "not yet reported" and "free" are not
+  conflated — they produce different P&L).
+- `record_commission` succeeds on a terminal row, and `list_missing_commission`
+  stops returning that order afterwards (proves the backfill terminates rather
+  than revisiting the same orders forever).
 - Recording two orders with the same idempotency key raises `DuplicateOrderError`
   (proves the uniqueness invariant is enforced at the storage layer).
 - Recording an `EXIT` without an `exit_trigger` raises `ValueError`, as does an
@@ -777,7 +783,10 @@ Owns schema creation and version tracking.
 - Transitions a position to closed, recording the trigger, exit price, realised
   P&L and the closing order.
 - Realised P&L is `(exit − entry) × lots × lot_size` **minus commission on both
-  legs** — the opening order's and the closing order's. Netting only the closing
+  legs** — the opening order's and the closing order's. The opening commission is
+  obtained by calling `db.orders.get(open_order_key)`, never by querying the
+  `orders` table. A missing row, or a row whose commission is not yet known,
+  contributes zero. Netting only the closing
   leg overstates every realised result by the entry commission, permanently and
   invisibly. On an account this size, commission on a round trip is a meaningful
   fraction of a 10% move.
@@ -802,6 +811,15 @@ Owns schema creation and version tracking.
 
 **`async get(position_id: int) → Position | None`**
 - Returns `None` when absent rather than raising.
+
+**`async recompute_realised(position_id: int) → Position`**
+- Recalculates and rewrites `realised_pnl` for a **closed** position from the
+  commissions currently recorded on its two orders. Called only by the commission
+  backfill, after a late commission lands.
+- Raises `PositionStateError` when the position is absent or still open.
+- This is the only mutation permitted on a closed position, and it exists because
+  a stored figure that silently disagrees with its inputs is worse than one
+  corrected once and logged.
 
 **`async list_closed() → list[Position]`**
 - Closed positions, newest exit first. Empty list when none. Consumed by
@@ -835,9 +853,26 @@ Owns schema creation and version tracking.
   with the same key. This ordering is what makes a crash mid-submission
   recoverable, and reversing it is a critical defect.
 
-**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, broker_reason: str | None) → OrderRecord`**
-- Records a terminal outcome.
+**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None) → OrderRecord`**
+- Records a terminal outcome, including the commission the broker reported on the
+  order. `None` means not yet known, which is distinct from zero.
 - Raises `OrderStateError` on a transition out of a terminal status.
+
+**`async record_commission(key: str, commission: Decimal) → OrderRecord`**
+- Writes commission onto an already-terminal order. This is the one field that
+  may be set after a row reaches a terminal status, because the broker can report
+  it later than the fill. Raises `OrderStateError` when the row is absent.
+
+**`async list_missing_commission(since: datetime, until: datetime) → list[OrderRecord]`**
+- `FILLED` orders in the period whose commission is still unknown. Drives the
+  daily backfill. Empty list when none.
+
+**`async get(key: str) → OrderRecord | None`**
+- Returns the order or `None` when absent. `None` is expected and not an error:
+  an adopted position's synthetic open key has no order row, because the bot
+  never placed one.
+- This is how another repository obtains an order. `db.positions` calls it to
+  read the opening commission; it must never query the `orders` table directly.
 
 **`async list_unresolved() → list[OrderRecord]`**
 - Returns orders left in `SUBMITTING` or `SUBMITTED`, oldest first.
@@ -961,9 +996,17 @@ else it does.
   instrument-specific restrictions.
 
 **`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**
-- Executed operations including **actual commission charged**. Commission is read
-  from here, never estimated: an estimated commission makes every realised P&L
-  figure quietly wrong, and P&L is the number this project exists to produce.
+- Executed operations including actual commission charged. Used for independent
+  reconciliation of costs over a period — **not** as the per-order commission
+  source: `OperationRecord` carries no order identifier, so attributing an
+  operation to an order would mean matching on instrument, time and quantity,
+  which is ambiguous exactly when two similar orders are close together.
+
+**Commission comes back on the order itself.** Both `PostOrderResponse` and
+`OrderState` carry `executed_commission`, keyed by our own idempotency key.
+`post_market_order` and `get_order_state` therefore populate
+`OrderRecord.commission` directly, with no matching and no ambiguity. Commission
+is never estimated, and never inferred from an operations feed.
 
 **`async get_order_state(key: str) → OrderRecord`**
 - Retrieves an order **by the client idempotency key alone**, so a restarted
@@ -1320,7 +1363,7 @@ Fixed ordering; each step completes before the next begins:
 Steps 3 and 4 running before step 5 is what implements the brief's
 halt-blocks-entries-only rule, and their order is binding.
 
-**`async run(ctx) → None`** — schedules the trading cycle, the daily rollover, the nightly backup, the weekly report, and the heartbeat. A failure in one task must never terminate another.
+**`async run(ctx) → None`** — schedules the trading cycle, the daily rollover, the commission backfill (at rollover, and immediately before the weekly report so the report is never composed from figures a pending commission would move), the nightly backup, the weekly report, and the heartbeat. A failure in one task must never terminate another.
 
 ### `zarabot/app/shutdown.py`
 
@@ -1344,6 +1387,21 @@ The process entry point, so that `python -m zarabot` is the start command.
   `app.*`; this module exists only to be the thing Python executes.
 - On `StartupError` it sleeps 30 seconds before returning, so the container
   restart policy cannot produce an alert loop (rule 15).
+
+### `zarabot/ops/commissions.py`
+
+Fills in commissions the broker reported after the fill, and corrects the P&L
+that depended on them.
+
+**`async backfill(since: datetime, until: datetime) → int`**
+- For every order from `db.orders.list_missing_commission`, re-queries
+  `broker.client.get_order_state(key)` — by our own key, so there is no matching
+  step — and records any commission now present.
+- Recomputes `realised_pnl` via `db.positions.recompute_realised` for every
+  closed position whose orders changed, and returns the number of orders updated.
+- Alerts only when an order's commission is still unknown more than 24 hours
+  after its fill: that is a broker or integration problem, not ordinary lag.
+- Must never place, cancel or modify an order.
 
 ### `zarabot/ops/backup.py`
 

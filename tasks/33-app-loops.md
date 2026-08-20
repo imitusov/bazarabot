@@ -31,7 +31,7 @@ Module **33** of 38 in `dependency-order.md`. Everything before it is complete a
 Steps 3 and 4 running before step 5 is what implements the brief's
 halt-blocks-entries-only rule, and their order is binding.
 
-**`async run(ctx) → None`** — schedules the trading cycle, the daily rollover, the nightly backup, the weekly report, and the heartbeat. A failure in one task must never terminate another.
+**`async run(ctx) → None`** — schedules the trading cycle, the daily rollover, the commission backfill (at rollover, and immediately before the weekly report so the report is never composed from figures a pending commission would move), the nightly backup, the weekly report, and the heartbeat. A failure in one task must never terminate another.
 
 ## Relevant error handling rules
 

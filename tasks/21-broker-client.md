@@ -90,9 +90,17 @@ else it does.
   instrument-specific restrictions.
 
 **`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**
-- Executed operations including **actual commission charged**. Commission is read
-  from here, never estimated: an estimated commission makes every realised P&L
-  figure quietly wrong, and P&L is the number this project exists to produce.
+- Executed operations including actual commission charged. Used for independent
+  reconciliation of costs over a period — **not** as the per-order commission
+  source: `OperationRecord` carries no order identifier, so attributing an
+  operation to an order would mean matching on instrument, time and quantity,
+  which is ambiguous exactly when two similar orders are close together.
+
+**Commission comes back on the order itself.** Both `PostOrderResponse` and
+`OrderState` carry `executed_commission`, keyed by our own idempotency key.
+`post_market_order` and `get_order_state` therefore populate
+`OrderRecord.commission` directly, with no matching and no ambiguity. Commission
+is never estimated, and never inferred from an operations feed.
 
 **`async get_order_state(key: str) → OrderRecord`**
 - Retrieves an order **by the client idempotency key alone**, so a restarted

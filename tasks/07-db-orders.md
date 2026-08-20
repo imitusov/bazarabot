@@ -62,9 +62,26 @@ permanently — mislabelled history cannot be repaired.
   with the same key. This ordering is what makes a crash mid-submission
   recoverable, and reversing it is a critical defect.
 
-**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, broker_reason: str | None) → OrderRecord`**
-- Records a terminal outcome.
+**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None) → OrderRecord`**
+- Records a terminal outcome, including the commission the broker reported on the
+  order. `None` means not yet known, which is distinct from zero.
 - Raises `OrderStateError` on a transition out of a terminal status.
+
+**`async record_commission(key: str, commission: Decimal) → OrderRecord`**
+- Writes commission onto an already-terminal order. This is the one field that
+  may be set after a row reaches a terminal status, because the broker can report
+  it later than the fill. Raises `OrderStateError` when the row is absent.
+
+**`async list_missing_commission(since: datetime, until: datetime) → list[OrderRecord]`**
+- `FILLED` orders in the period whose commission is still unknown. Drives the
+  daily backfill. Empty list when none.
+
+**`async get(key: str) → OrderRecord | None`**
+- Returns the order or `None` when absent. `None` is expected and not an error:
+  an adopted position's synthetic open key has no order row, because the bot
+  never placed one.
+- This is how another repository obtains an order. `db.positions` calls it to
+  read the opening commission; it must never query the `orders` table directly.
 
 **`async list_unresolved() → list[OrderRecord]`**
 - Returns orders left in `SUBMITTING` or `SUBMITTED`, oldest first.
@@ -94,6 +111,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   terminal state (happy path).
 - Orders left in `SUBMITTING` are returned by the unresolved-orders query
   (proves crash recovery can find them).
+- `settle` with a commission persists it; with `None` leaves it unknown, which
+  reads back distinctly from zero (proves "not yet reported" and "free" are not
+  conflated — they produce different P&L).
+- `record_commission` succeeds on a terminal row, and `list_missing_commission`
+  stops returning that order afterwards (proves the backfill terminates rather
+  than revisiting the same orders forever).
 - Recording two orders with the same idempotency key raises `DuplicateOrderError`
   (proves the uniqueness invariant is enforced at the storage layer).
 - Recording an `EXIT` without an `exit_trigger` raises `ValueError`, as does an
