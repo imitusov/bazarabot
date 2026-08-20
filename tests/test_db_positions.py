@@ -11,7 +11,15 @@ import aiosqlite
 import pytest
 
 from zarabot.db.migrations import apply
-from zarabot.db.positions import PositionStateError, close, get, list_open, open
+from zarabot.db.positions import (
+    PositionStateError,
+    adopt,
+    close,
+    get,
+    list_open,
+    open,
+    set_stop_protection,
+)
 from zarabot.models import (
     ExitTrigger,
     Instrument,
@@ -219,3 +227,38 @@ async def test_concurrent_close_exactly_one_success(db: Path) -> None:
     stored = await get(position.id)
     assert stored is not None
     assert stored.status == "CLOSED"
+
+
+async def test_set_stop_protection_pairing(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    with pytest.raises(PositionStateError):
+        await set_stop_protection(position.id, StopProtection.EXCHANGE, None)
+    with pytest.raises(PositionStateError):
+        await set_stop_protection(position.id, StopProtection.LOCAL, "stop-key")
+    promoted = await set_stop_protection(
+        position.id, StopProtection.EXCHANGE, "stop-key"
+    )
+    assert promoted.stop_protection is StopProtection.EXCHANGE
+    demoted = await set_stop_protection(position.id, StopProtection.LOCAL, None)
+    assert demoted.stop_order_key is None
+
+
+async def test_adopt_creates_local_adopted_position(db: Path) -> None:
+    position = await adopt(_instrument(), 3, PRICE, AWARE)
+    assert position.adopted is True
+    assert position.strategy == "ADOPTED"
+    assert position.stop_protection is StopProtection.LOCAL
+    assert position.lots == 3
+    assert position.entry_price == PRICE
+
+
+async def test_duplicate_open_raises(db: Path) -> None:
+    await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    with pytest.raises(PositionStateError):
+        await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+
+
+async def test_close_absent_raises(db: Path) -> None:
+    exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
+    with pytest.raises(PositionStateError):
+        await close(999, ExitTrigger.EXTERNAL, PRICE, AWARE, exit_order)

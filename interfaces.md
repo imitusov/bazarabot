@@ -152,4 +152,36 @@ Applies every migration whose version exceeds the recorded version, in
 ascending order, each in its own transaction. Returns the resulting schema
 version. Idempotent. `applied_at` is written via `clock.now()`.
 
+## `zarabot.db.positions`
+
+Sole owner of `positions` rows. Never deletes. Reads `DB_PATH` via `config.load()`.
+
+**`PositionStateError`**
+Illegal transition, pairing violation, or duplicate open ticker.
+
+**`async open(signal: Signal, order: OrderRecord, instrument: Instrument, stop: Decimal, target: Decimal, opened_at: datetime) → Position`**
+Inserts an open position with `stop_protection=LOCAL` and `stop_order_key=None`.
+Raises `PositionStateError` if an open row for the ticker exists. Raises
+`ValueError` on a naive `opened_at`.
+
+**`async set_stop_protection(position_id: int, protection: StopProtection, stop_order_key: str | None) → Position`**
+EXCHANGE requires a key; LOCAL forbids one. Raises `PositionStateError` on a
+pairing violation or missing row.
+
+**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord) → Position`**
+Atomic OPEN→CLOSED. Concurrent callers: exactly one succeeds. Realised P&L is
+`(exit-entry)×lots×lot_size` minus the closing order's commission (or 0 if
+unset). Never deletes. Raises `PositionStateError` if already closed or absent.
+Raises `ValueError` on a naive `closed_at`.
+
+**`async list_open() → list[Position]`**
+Open positions, or `[]`. Never `None`.
+
+**`async get(position_id: int) → Position | None`**
+`None` when absent.
+
+**`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime) → Position`**
+Open LOCAL adopted position, strategy `ADOPTED`, stop/target from average price
+at 5%/10% (brief defaults). `open_order_key` is `ADOPTED-{figi}`.
+
 
