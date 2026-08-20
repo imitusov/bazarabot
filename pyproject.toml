@@ -28,6 +28,13 @@ select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "DTZ", "S", "RET", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]   # assert is the point of a test
+# The verification suite runs BEFORE the 3.12 environment exists, on whatever
+# interpreter the machine has (3.9 on macOS). UP rules would rewrite it to
+# syntax that interpreter cannot run - UP017 wants datetime.UTC, which is 3.11+.
+# S is ignored because driving subprocesses and urllib is what these scripts are
+# for. They are pre-development tooling, not application code.
+"scripts/verify/**" = ["UP", "S", "E501"]
+"scripts/make_tasks.py" = ["UP", "E501"]
 
 [tool.mypy]
 python_version = "3.12"

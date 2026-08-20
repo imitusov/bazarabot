@@ -63,7 +63,27 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-No dedicated test block in §3.2. Derive cases from the contract above: happy path, every early return, every boundary, and every documented exception.
+- A dataclass constructed with a naive datetime raises `ValueError`, for every
+  type carrying a timestamp (proves the timezone invariant is enforced at the
+  boundary rather than trusted).
+- A negative lot count, a negative price, or a non-positive lot size raises
+  `ValueError` (proves the domain rejects impossible values before they can
+  reach an order).
+- A monetary field given a `float` raises `TypeError` (proves the Decimal rule
+  is enforced by the type, not by discipline — this is the test that stops a
+  float leaking in from the SDK or a JSON payload).
+- Every dataclass is frozen: assigning to a field raises (proves domain objects
+  cannot be mutated in place behind a caller's back).
+- `RiskDecision` cannot be constructed both approved and rejected, nor neither
+  (proves the decision is total — every signal gets exactly one outcome).
+- An approved `RiskDecision` with a lot count of zero raises (proves approval
+  always means a placeable order).
+- Every enum member round-trips through its string value unchanged (proves the
+  values written to the database and read back are stable, since the schema
+  stores them as TEXT with CHECK constraints naming them).
+- A `Position` with `stop_protection = EXCHANGE` and no stop order key raises,
+  as does `LOCAL` with one (proves the ownership pairing at the type level, not
+  only in the repository).
 
 ## Expected output
 

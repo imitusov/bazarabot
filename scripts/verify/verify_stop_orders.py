@@ -27,9 +27,15 @@ v = Verifier("V11", "standing stop-loss orders (sandbox)")
 
 async def body():
     from t_tech.invest.schemas import (
-        ExchangeOrderType, InstrumentIdType, MoneyValue, OrderDirection,
-        OrderType, StopOrderDirection, StopOrderExpirationType,
-        StopOrderStatusOption, StopOrderType,
+        ExchangeOrderType,
+        InstrumentIdType,
+        MoneyValue,
+        OrderDirection,
+        OrderType,
+        StopOrderDirection,
+        StopOrderExpirationType,
+        StopOrderStatusOption,
+        StopOrderType,
     )
     from t_tech.invest.utils import decimal_to_quotation, quotation_to_decimal
 

@@ -43,7 +43,9 @@ async def sandbox_account(c):
 async def phase_one():
     """Place an order, persist only the key, then exit — as a crash would."""
     from t_tech.invest.schemas import (
-        InstrumentIdType, OrderDirection, OrderType,
+        InstrumentIdType,
+        OrderDirection,
+        OrderType,
     )
     from t_tech.invest.utils import decimal_to_quotation, quotation_to_decimal
 
@@ -81,7 +83,9 @@ async def phase_one():
 async def phase_two():
     """Start cold. Recover the order knowing only the key."""
     from t_tech.invest.schemas import (
-        OrderDirection, OrderIdType, OrderType,
+        OrderDirection,
+        OrderIdType,
+        OrderType,
     )
     from t_tech.invest.utils import decimal_to_quotation
 

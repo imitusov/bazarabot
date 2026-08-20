@@ -16,7 +16,7 @@ OUT = ROOT / "tasks"
 
 # (order, module, spec heading fragment, test-contract key, tables, error rules, context)
 M = [
- (1,"models","zarabot/models.py",None,[],[22],"Shared domain types. Every other module's signatures are written in these types, so this is the vocabulary the whole system speaks."),
+ (1,"models","zarabot/models.py","`models`",[],[22],"Shared domain types. Every other module's signatures are written in these types, so this is the vocabulary the whole system speaks."),
  (2,"clock","zarabot/clock.py","`clock`",[],[22],"Sole owner of 'now' and of trading-day arithmetic. Everything else receives time rather than reading it, which is what makes the system testable and backtestable."),
  (3,"config","zarabot/config.py",None,[],[15],"Loads and validates every setting once at startup. The bot refuses to start rather than trade on an assumed risk limit."),
  (4,"logging_setup","zarabot/logging_setup.py","`logging_setup`",[],[19],"Structured logging with secret redaction. A leaked token in a log file is equivalent to a leaked brokerage password."),

@@ -32,7 +32,10 @@ async def ensure_sandbox_account(c, v):
 
 async def body():
     from t_tech.invest.schemas import (
-        InstrumentIdType, MoneyValue, OrderDirection, OrderType,
+        InstrumentIdType,
+        MoneyValue,
+        OrderDirection,
+        OrderType,
     )
     from t_tech.invest.utils import decimal_to_quotation, quotation_to_decimal
 
