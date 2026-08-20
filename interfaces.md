@@ -527,6 +527,7 @@ Records `SUBMITTING` before `post_market_order`. Clamps lots to
 `get_max_lots`; a maximum of 0 records a rejection and raises `OrderRejected`.
 Opens LOCAL from the fill, then places the stop (3 attempts). Stop failure
 leaves the position LOCAL and open. Partial entry opens filled lots only.
+Broker-reported `commission` is passed through to `db.orders.settle`.
 
 **`async close_position(position: Position, trigger: ExitTrigger) → Position`**
 Bot-initiated exit for any trigger. Cancels the standing stop first only when

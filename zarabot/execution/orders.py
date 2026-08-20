@@ -276,7 +276,7 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
                 record_submitting(key, signal.ticker, Side.BUY, requested, "ENTRY")
             )
             await _write(
-                settle_order(key, OrderStatus.REJECTED, 0, None, "max lots is 0")
+                settle_order(key, OrderStatus.REJECTED, 0, None, None, "max lots is 0")
             )
             raise OrderRejected("max lots is 0")
         key = str(uuid4())
@@ -284,7 +284,9 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
         try:
             posted = await post_market_order(key, instrument.figi, Side.BUY, lots)
         except OrderRejected as exc:
-            await _write(settle_order(key, OrderStatus.REJECTED, 0, None, exc.reason))
+            await _write(
+                settle_order(key, OrderStatus.REJECTED, 0, None, None, exc.reason)
+            )
             await alert(f"entry rejected for {signal.ticker}: {exc.reason}")
             raise
         except (BrokerUnavailable, BrokerRateLimited):
@@ -303,6 +305,7 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
                 OrderStatus.FILLED,
                 filled_lots,
                 fill_price,
+                posted.commission,
                 posted.broker_reason,
             )
         )
@@ -353,7 +356,7 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
                 )
             except OrderRejected as exc:
                 await _write(
-                    settle_order(key, OrderStatus.REJECTED, 0, None, exc.reason)
+                    settle_order(key, OrderStatus.REJECTED, 0, None, None, exc.reason)
                 )
                 await alert(f"exit rejected for {current.ticker}: {exc.reason}")
                 raise ExitFailed(exc.reason) from exc
@@ -367,7 +370,12 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
                 raise ExitFailed("exit outcome unknown")
             last_order = await _write(
                 settle_order(
-                    key, OrderStatus.FILLED, filled, price, posted.broker_reason
+                    key,
+                    OrderStatus.FILLED,
+                    filled,
+                    price,
+                    posted.commission,
+                    posted.broker_reason,
                 )
             )
             remaining -= filled
@@ -408,6 +416,7 @@ async def close_executed_stop(position: Position, fill_price: Decimal) -> Positi
                 OrderStatus.FILLED,
                 current.lots,
                 fill_price,
+                None,
                 "stop executed",
             )
         )
@@ -432,7 +441,7 @@ async def _resolve_one(order: OrderRecord, now: datetime) -> OrderRecord | None:
         state = await get_order_state(order.key)
     except OrderNotFound:
         return await _write(
-            settle_order(order.key, OrderStatus.REJECTED, 0, None, "never placed")
+            settle_order(order.key, OrderStatus.REJECTED, 0, None, None, "never placed")
         )
     except (BrokerUnavailable, BrokerRateLimited):
         return None
@@ -444,6 +453,7 @@ async def _resolve_one(order: OrderRecord, now: datetime) -> OrderRecord | None:
                 OrderStatus.FILLED,
                 filled,
                 state.filled_price,
+                state.commission,
                 state.broker_reason,
             )
         )
@@ -457,6 +467,7 @@ async def _resolve_one(order: OrderRecord, now: datetime) -> OrderRecord | None:
                 state.status,
                 filled,
                 state.filled_price,
+                state.commission,
                 state.broker_reason,
             )
         )

@@ -249,6 +249,9 @@ async def test_filled_entry_and_exit_persist_broker_commission(env: _Broker) -> 
     assert exit_order is not None
     assert exit_order.commission == Decimal("1")
     assert closed.realised_pnl == Decimal("0") - Decimal("1") - Decimal("1")
+
+
+async def test_crash_before_broker_is_resolved_by_key_lookup(env: _Broker) -> None:
     env.timeout = True
     with pytest.raises(BrokerUnavailable):
         await open_position(_signal(), 2, _instrument())
