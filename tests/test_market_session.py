@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import zarabot.market.session as session_mod
 from zarabot.market.session import (
     current_session,
     in_closing_window,
@@ -36,6 +37,12 @@ def _holiday() -> SessionInfo:
     start = datetime(2026, 3, 9, 6, 50, tzinfo=UTC)
     end = datetime(2026, 3, 9, 15, 50, tzinfo=UTC)
     return SessionInfo(start=start, end=end, is_trading_day=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_cache() -> None:
+    session_mod._cache = None
+    session_mod._alerted = False
 
 
 @pytest.fixture

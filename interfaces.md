@@ -415,4 +415,27 @@ Actual commission, never estimated.
 **`async get_order_state(key: str) → OrderRecord`**
 Lookup by `order_id_type=ORDER_ID_TYPE_REQUEST`. Raises `OrderNotFound`.
 
+## `zarabot.market.session`
+
+Cached broker calendar. Closed when the schedule is missing. Never hardcodes
+weekdays.
+
+**`async refresh(days: int) → None`**
+Loads `broker.client.get_trading_schedule`. On `BrokerUnavailable` /
+`BrokerRateLimited`, caches nothing, logs WARNING once (rule 10).
+
+**`is_open(now: datetime) → bool`**
+True iff `now` is in a trading session, inclusive of `start`, exclusive of
+`end`. `False` when uncached. Raises `ValueError` on naive `now`.
+
+**`current_session(now: datetime) → SessionInfo | None`**
+The trading session containing `now`, or `None`.
+
+**`in_closing_window(now: datetime, minutes: int) → bool`**
+Delegates to `SessionInfo.in_closing_window` for the current session.
+
+**`next_open(now: datetime) → datetime`**
+Earliest future trading `start` after `now`. Returns `now` when none is cached
+(caller should refresh).
+
 
