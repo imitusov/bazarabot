@@ -136,4 +136,20 @@ exception text. Recurses into nested dicts and sequences to depth 10; deeper
 structures are replaced wholesale. A record that contains no secret is left
 unmodified.
 
+## `zarabot.db.migrations`
+
+Owns schema creation and `schema_version`. Forward-only.
+
+**`MigrationError`**
+Raised when the recorded schema version exceeds the highest known migration.
+No modification is made in that case.
+
+**`MIGRATIONS_DIR: Path`**
+Directory of `NNN_description.sql` files. Defaults to repo `migrations/`.
+
+**`async apply(conn: aiosqlite.Connection) → int`**
+Applies every migration whose version exceeds the recorded version, in
+ascending order, each in its own transaction. Returns the resulting schema
+version. Idempotent. `applied_at` is written via `clock.now()`.
+
 

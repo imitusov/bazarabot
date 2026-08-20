@@ -47,7 +47,7 @@ async def test_apply_to_empty_database_creates_every_table(db_path: Path) -> Non
     async with aiosqlite.connect(db_path) as conn:
         version = await apply(conn)
         tables = await _tables(conn)
-    assert EXPECTED_TABLES <= tables
+    assert tables >= EXPECTED_TABLES
     assert version >= 1
 
 
