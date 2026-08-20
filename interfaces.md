@@ -169,11 +169,13 @@ Raises `PositionStateError` if an open row for the ticker exists. Raises
 EXCHANGE requires a key; LOCAL forbids one. Raises `PositionStateError` on a
 pairing violation or missing row.
 
-**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord) → Position`**
+**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
 Atomic OPEN→CLOSED. Concurrent callers: exactly one succeeds. Realised P&L is
-`(exit-entry)×lots×lot_size` minus the closing order's commission (or 0 if
-unset). Never deletes. Raises `PositionStateError` if already closed or absent.
-Raises `ValueError` on a naive `closed_at`.
+`(exit-entry)×lots×lot_size` minus commission on both legs (opening order and
+closing order; 0 when unset). `order` is `None` only for `EXTERNAL`; any other
+pairing raises `ValueError`. Clears `stop_protection` to LOCAL and
+`stop_order_key`. Never deletes. Raises `PositionStateError` if already closed
+or absent. Raises `ValueError` on a naive `closed_at`.
 
 **`async list_open() → list[Position]`**
 Open positions, or `[]`. Never `None`.
@@ -186,7 +188,8 @@ Closed positions, newest `exit_at` first, or `[]`. Never `None`.
 
 **`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime) → Position`**
 Open LOCAL adopted position, strategy `ADOPTED`, stop/target from average price
-at 5%/10% (brief defaults). `open_order_key` is `ADOPTED-{figi}`.
+at configured `stop_loss_pct` / `take_profit_pct`. `open_order_key` is
+`ADOPTED-{figi}`.
 
 **`async update_lots(position_id: int, lots: int) → Position`**
 Writes the broker's lot count onto an open row. Raises `PositionStateError` if

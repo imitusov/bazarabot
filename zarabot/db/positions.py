@@ -17,8 +17,6 @@ from zarabot.models import (
     StopProtection,
 )
 
-_ADOPT_STOP_PCT = Decimal("5")
-_ADOPT_TARGET_PCT = Decimal("10")
 _HUNDRED = Decimal("100")
 
 
@@ -174,26 +172,48 @@ async def set_stop_protection(
         await conn.close()
 
 
+async def _commission_for_key(conn: aiosqlite.Connection, key: str) -> Decimal:
+    cursor = await conn.execute("SELECT commission FROM orders WHERE key = ?", (key,))
+    row = await cursor.fetchone()
+    if row is None or row["commission"] is None:
+        return Decimal("0")
+    return Decimal(str(row["commission"]))
+
+
 async def close(
     position_id: int,
     trigger: ExitTrigger,
     exit_price: Decimal,
     closed_at: datetime,
-    order: OrderRecord,
+    order: OrderRecord | None,
 ) -> Position:
     """Atomically close an open position. Never deletes the row."""
     _reject_naive(closed_at)
+    if trigger is ExitTrigger.EXTERNAL:
+        if order is not None:
+            raise ValueError("EXTERNAL close forbids an order")
+    elif order is None:
+        raise ValueError("non-EXTERNAL close requires an order")
     existing = await get(position_id)
     if existing is None:
         raise PositionStateError(f"position {position_id} is absent")
     if existing.status != "OPEN":
         raise PositionStateError(f"position {position_id} is already closed")
     units = Decimal(existing.lots * existing.lot_size)
-    commission = order.commission if order.commission is not None else Decimal("0")
-    realised = (exit_price - existing.entry_price) * units - commission
+    exit_commission = (
+        order.commission
+        if order is not None and order.commission is not None
+        else Decimal("0")
+    )
     conn = await _connect()
     try:
         await conn.execute("BEGIN IMMEDIATE")
+        entry_commission = await _commission_for_key(conn, existing.open_order_key)
+        realised = (
+            (exit_price - existing.entry_price) * units
+            - entry_commission
+            - exit_commission
+        )
         cursor = await conn.execute(
             """
             UPDATE positions
@@ -212,7 +232,7 @@ async def close(
                 str(exit_price),
                 closed_at.isoformat(),
                 str(realised),
-                order.key,
+                order.key if order is not None else None,
                 position_id,
             ),
         )
@@ -288,8 +308,9 @@ async def adopt(
 ) -> Position:
     """Open a LOCAL position for a broker holding unknown locally."""
     _reject_naive(adopted_at)
-    stop = average_price * (_HUNDRED - _ADOPT_STOP_PCT) / _HUNDRED
-    target = average_price * (_HUNDRED + _ADOPT_TARGET_PCT) / _HUNDRED
+    cfg = load()
+    stop = average_price * (_HUNDRED - cfg.stop_loss_pct) / _HUNDRED
+    target = average_price * (_HUNDRED + cfg.take_profit_pct) / _HUNDRED
     conn = await _connect()
     try:
         try:
