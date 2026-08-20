@@ -68,6 +68,25 @@ Observational broker-vs-local comparison. Empty `adjustments` means agreement.
 **`TradingCalendar(sessions: tuple[SessionInfo, ...])`**
 Queried exchange schedule consumed by `clock.trading_days_between` and `market.session`.
 
-**`BacktestResult(trades: tuple[Position, ...], pnl: Decimal, win_rate: Decimal, max_drawdown: Decimal, exit_trigger_distribution: tuple[tuple[ExitTrigger, int], ...], benchmark_return: Decimal | None)`**
-Sandbox backtest summary. `benchmark_return` is `None` when unavailable, never zero-filled.
+## `zarabot.clock`
+
+Sole owner of "now" and of trading-day arithmetic. No other module may call
+`datetime.now()`.
+
+**`now() → datetime`**
+Current instant, timezone-aware, UTC. The only permitted reader of the system clock.
+
+**`to_moscow(moment: datetime) → datetime`**
+Converts a timezone-aware instant to `Europe/Moscow` via the IANA zone, never a
+fixed offset. Raises `ValueError` on a naive input.
+
+**`moscow_date(moment: datetime) → date`**
+Moscow calendar date of an instant. Raises `ValueError` on a naive input.
+
+**`trading_days_between(start: datetime, end: datetime, calendar: TradingCalendar) → int`**
+Count of exchange trading days elapsed after `start`'s Moscow date through
+`end`'s Moscow date, using `calendar` sessions with `is_trading_day=True`.
+Returns 0 when both instants fall on the same trading day. Raises `ValueError`
+on a naive input or when `end` precedes `start`.
+
 
