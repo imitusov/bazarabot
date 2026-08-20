@@ -67,7 +67,9 @@ def broker(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     return state
 
 
-async def test_watchlist_candles_are_oldest_first_and_aware(broker: dict[str, object]) -> None:
+async def test_watchlist_candles_are_oldest_first_and_aware(
+    broker: dict[str, object],
+) -> None:
     result = await candles_for_watchlist(["SBER"], 20, NOW)
     candles = result["SBER"]
     assert candles

@@ -438,4 +438,11 @@ Delegates to `SessionInfo.in_closing_window` for the current session.
 Earliest future trading `start` after `now`. Returns `now` when none is cached
 (caller should refresh).
 
+## `zarabot.market.data`
+
+**`async candles_for_watchlist(tickers: list[str], lookback: int, now: datetime) → dict[str, list[Candle]]`**
+Daily candles per ticker, oldest-first. A failing ticker is omitted and logged
+at WARNING; the rest of the batch returns. Never pads. Raises `ValueError` on
+naive `now`.
+
 
