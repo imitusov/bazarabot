@@ -538,3 +538,11 @@ are reported (`STOP_MISSING`, `STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_ADOPTABLE`)
 and not acted on. Idempotent against an unchanged broker. Raises `ValueError`
 on naive `now`.
 
+## `zarabot.telegram.notifier`
+
+Never raises. Never includes a token. Telegram outages cannot delay trading.
+
+**`async alert(text: str, urgent: bool = False) → None`**
+Sends to `TELEGRAM_CHAT_ID`. Retries on failure, then logs and returns. A body
+containing either token is dropped and replaced with an incident notice.
+
