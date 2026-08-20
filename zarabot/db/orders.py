@@ -9,7 +9,7 @@ import aiosqlite
 
 from zarabot.clock import now
 from zarabot.config import load
-from zarabot.models import OrderRecord, OrderStatus, Side
+from zarabot.models import ExitTrigger, OrderRecord, OrderStatus, Side
 
 _TERMINAL = frozenset(
     {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED}
@@ -49,6 +49,7 @@ def _dt_opt(value: object) -> datetime | None:
 
 
 def _row_to_order(row: aiosqlite.Row) -> OrderRecord:
+    trigger_raw = row["exit_trigger"]
     return OrderRecord(
         key=row["key"],
         ticker=row["ticker"],
@@ -63,13 +64,26 @@ def _row_to_order(row: aiosqlite.Row) -> OrderRecord:
         broker_reason=row["broker_reason"],
         created_at=_dt(row["created_at"]),
         settled_at=_dt_opt(row["settled_at"]),
+        exit_trigger=ExitTrigger(trigger_raw) if trigger_raw else None,
     )
 
 
 async def record_submitting(
-    key: str, ticker: str, side: Side, lots: int, intent: str
+    key: str,
+    ticker: str,
+    side: Side,
+    lots: int,
+    intent: str,
+    exit_trigger: ExitTrigger | None = None,
 ) -> OrderRecord:
     """Persist intent before the broker is called. Must complete before post_order."""
+    if intent == "EXIT":
+        if exit_trigger is None:
+            raise ValueError("EXIT requires exit_trigger")
+        if exit_trigger is ExitTrigger.EXTERNAL:
+            raise ValueError("EXIT exit_trigger cannot be EXTERNAL")
+    elif exit_trigger is not None:
+        raise ValueError("ENTRY forbids exit_trigger")
     conn = await _connect()
     try:
         try:
@@ -78,13 +92,21 @@ async def record_submitting(
                 INSERT INTO orders (
                     key, ticker, figi, side, intent, lots, status,
                     filled_lots, filled_price, commission, broker_reason,
-                    created_at, settled_at
+                    created_at, settled_at, exit_trigger
                 ) VALUES (
                     ?, ?, '', ?, ?, ?, 'SUBMITTING',
-                    NULL, NULL, NULL, NULL, ?, NULL
+                    NULL, NULL, NULL, NULL, ?, NULL, ?
                 )
                 """,
-                (key, ticker, side.value, intent, lots, now().isoformat()),
+                (
+                    key,
+                    ticker,
+                    side.value,
+                    intent,
+                    lots,
+                    now().isoformat(),
+                    exit_trigger.value if exit_trigger is not None else None,
+                ),
             )
             await conn.commit()
         except aiosqlite.IntegrityError as exc:

@@ -235,6 +235,7 @@ class OrderRecord:
     broker_reason: str | None
     created_at: datetime
     settled_at: datetime | None
+    exit_trigger: ExitTrigger | None = None
 
     def __post_init__(self) -> None:
         _validate_common(self)

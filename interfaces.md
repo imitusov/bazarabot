@@ -41,8 +41,9 @@ Entry signal produced by a strategy.
 **`Position(id: int, ticker: str, figi: str, strategy: str, lots: int, lot_size: int, entry_price: Decimal, entry_at: datetime, stop_price: Decimal, target_price: Decimal, status: str, adopted: bool, open_order_key: str, close_order_key: str | None, exit_trigger: ExitTrigger | None, exit_price: Decimal | None, exit_at: datetime | None, realised_pnl: Decimal | None, stop_protection: StopProtection, stop_order_key: str | None)`**
 Open or closed holding. `lots` must be positive. `stop_protection=EXCHANGE` requires `stop_order_key`; `LOCAL` forbids one. Raises `ValueError` on a pairing violation.
 
-**`OrderRecord(key: str, ticker: str, figi: str, side: Side, intent: str, lots: int, status: OrderStatus, filled_lots: int | None, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, created_at: datetime, settled_at: datetime | None)`**
-Client-keyed order. `intent` is `ENTRY` or `EXIT`.
+**`OrderRecord(key: str, ticker: str, figi: str, side: Side, intent: str, lots: int, status: OrderStatus, filled_lots: int | None, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, created_at: datetime, settled_at: datetime | None, exit_trigger: ExitTrigger | None = None)`**
+Client-keyed order. `intent` is `ENTRY` or `EXIT`. `exit_trigger` is non-null
+exactly when `intent` is `EXIT` (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`).
 
 **`StopOrderRecord(key: str, stop_order_id: str | None, position_id: int, ticker: str, lots: int, stop_price: Decimal, status: StopOrderStatus, created_at: datetime, settled_at: datetime | None)`**
 Standing stop-loss tracked locally.
@@ -204,10 +205,11 @@ Raised when the idempotency key already exists.
 Raised on a transition out of a terminal status (`FILLED`, `REJECTED`,
 `CANCELLED`) or when settling to a non-terminal status.
 
-**`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str) → OrderRecord`**
+**`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str, exit_trigger: ExitTrigger | None = None) → OrderRecord`**
 Inserts `SUBMITTING` with `created_at=clock.now()`. `figi` is stored as `''`
-because the contract does not receive a FIGI. Raises `DuplicateOrderError` on a
-repeated key.
+because the contract does not receive a FIGI. `exit_trigger` is required for
+`EXIT` and forbidden for `ENTRY`; either violation raises `ValueError`. Raises
+`DuplicateOrderError` on a repeated key.
 
 **`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, broker_reason: str | None) → OrderRecord`**
 Records a terminal outcome and `settled_at`. Raises `OrderStateError` if the row
