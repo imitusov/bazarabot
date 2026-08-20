@@ -290,4 +290,25 @@ allocated, cash) / (lot × price)`. Returns 0 when one lot exceeds the cap or
 cash, or when lot cost is not positive. Never negative. Satisfies
 `lots × lot × price ≤ cap_pct% × allocated` and `≤ cash`.
 
+## `zarabot.lifecycle.exits`
+
+Pure. No I/O. 95% coverage required. Never consults halt.
+
+**`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int, config: Config) → ExitTrigger | None`**
+`STOP_LOSS` iff `price ≤ stop_price` and `stop_protection is LOCAL`.
+`TAKE_PROFIT` iff `price ≥ target_price`. `MAX_AGE` iff
+`trading_days_open >= max_holding_days` and `session.in_closing_window(now)`.
+Precedence: stop, then target, then age. Inclusive at stop and target. Raises
+`ValueError` on naive `now`.
+
+## `zarabot.strategies.base`
+
+Pure protocol. Strategies enter only; `lifecycle.exits` exits.
+
+**`Strategy` protocol** — `name: str`, `lookback: int`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` or `None`. Never `SELL`. `None` when `len(candles) < lookback` or the
+series is degenerate. Deterministic. Runtime-checkable.
+
 
