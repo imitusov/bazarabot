@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -12,7 +13,7 @@ NOW = datetime(2026, 3, 16, 15, 0, tzinfo=UTC)
 STRATEGY = MovingAverageCrossover()
 
 
-def _candles(closes: list[int | str]) -> list[Candle]:
+def _candles(closes: Sequence[int | str]) -> list[Candle]:
     start = NOW - timedelta(days=len(closes))
     out: list[Candle] = []
     for i, close in enumerate(closes):

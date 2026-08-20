@@ -311,4 +311,14 @@ Pure protocol. Strategies enter only; `lifecycle.exits` exits.
 `BUY` or `None`. Never `SELL`. `None` when `len(candles) < lookback` or the
 series is degenerate. Deterministic. Runtime-checkable.
 
+## `zarabot.strategies.ma_crossover`
+
+Pure. Fast SMA 10 vs slow SMA 30. `lookback` is 31.
+
+**`MovingAverageCrossover`** — `name = "ma_crossover"`, `lookback = 31`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when the fast SMA crosses above the slow SMA on the latest bar. `None`
+when short, flat, or no golden cross. Never `SELL`.
+
 
