@@ -68,6 +68,9 @@ Observational broker-vs-local comparison. Empty `adjustments` means agreement.
 **`TradingCalendar(sessions: tuple[SessionInfo, ...])`**
 Queried exchange schedule consumed by `clock.trading_days_between` and `market.session`.
 
+**`BacktestResult(trades: tuple[Position, ...], pnl: Decimal, win_rate: Decimal, max_drawdown: Decimal, exit_trigger_distribution: tuple[tuple[ExitTrigger, int], ...], benchmark_return: Decimal | None)`**
+Sandbox backtest summary. `benchmark_return` is `None` when unavailable, never zero-filled.
+
 ## `zarabot.clock`
 
 Sole owner of "now" and of trading-day arithmetic. No other module may call
@@ -88,5 +91,34 @@ Count of exchange trading days elapsed after `start`'s Moscow date through
 `end`'s Moscow date, using `calendar` sessions with `is_trading_day=True`.
 Returns 0 when both instants fall on the same trading day. Raises `ValueError`
 on a naive input or when `end` precedes `start`.
+
+## `zarabot.config`
+
+Loads and validates every setting once at startup. Tokens never appear in
+`ConfigError` messages or in `Config`'s `__repr__` / `__str__`.
+
+**`ConfigError`**
+Raised when a required variable is missing or empty, a numeric value is out of
+range, or a cross-field rule fails. The message names the offending variable.
+
+**`Config`** (frozen)
+`tinvest_token: str`, `tinvest_account_id: str`, `trading_mode: str`,
+`telegram_bot_token: str`, `telegram_chat_id: int`, `allocated_capital: Decimal`,
+`position_size_pct: Decimal`, `max_position_pct: Decimal`, `stop_loss_pct: Decimal`,
+`take_profit_pct: Decimal`, `max_holding_days: int`, `max_open_positions: int`,
+`reentry_cooldown_minutes: int`, `daily_loss_limit_pct: Decimal`,
+`watchlist: tuple[str, ...]`, `enabled_strategies: tuple[str, ...]`,
+`ml_model_path: Path | None`, `poll_interval_seconds: int`, `db_path: Path`,
+`backup_dir: Path`, `log_level: str`, `tz: str`.
+
+**`load() → Config`**
+Reads the brief's environment-variable table. Applies documented defaults to
+non-risk optional variables. Never substitutes a default for missing
+`ALLOCATED_CAPITAL`. Raises `ConfigError` naming the variable when: a required
+variable is missing or empty; a percentage is `<= 0` or `> 100`;
+`POSITION_SIZE_PCT` exceeds `MAX_POSITION_PCT`;
+`MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `TAKE_PROFIT_PCT` is not
+greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty; `TRADING_MODE` is not
+`live` or `sandbox`; or `ML_MODEL_PATH` is set but unreadable.
 
 
