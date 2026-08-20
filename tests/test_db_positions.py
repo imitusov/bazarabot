@@ -19,6 +19,7 @@ from zarabot.db.positions import (
     list_open,
     open,
     set_stop_protection,
+    update_lots,
 )
 from zarabot.models import (
     ExitTrigger,
@@ -262,3 +263,30 @@ async def test_close_absent_raises(db: Path) -> None:
     exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
     with pytest.raises(PositionStateError):
         await close(999, ExitTrigger.EXTERNAL, PRICE, AWARE, exit_order)
+
+
+async def test_update_lots_writes_broker_count(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    updated = await update_lots(position.id, 1)
+    assert updated.lots == 1
+    stored = await get(position.id)
+    assert stored is not None
+    assert stored.lots == 1
+    assert stored.status == "OPEN"
+
+
+async def test_update_lots_absent_or_closed_raises(db: Path) -> None:
+    with pytest.raises(PositionStateError):
+        await update_lots(999, 1)
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
+    await _insert_order(db, exit_order)
+    await close(position.id, ExitTrigger.EXTERNAL, PRICE, AWARE, exit_order)
+    with pytest.raises(PositionStateError):
+        await update_lots(position.id, 1)
+
+
+async def test_update_lots_rejects_non_positive(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    with pytest.raises(PositionStateError):
+        await update_lots(position.id, 0)
