@@ -81,3 +81,10 @@ def test_returned_lots_never_exceed_cap_of_allocated() -> None:
         cap = allocated * cap_pct / Decimal("100")
         assert cost <= cap
         assert cost <= cash
+
+
+def test_zero_price_returns_zero_lots() -> None:
+    lots = size_position(
+        Decimal("0"), _instrument(), ALLOCATED, Decimal("100000"), SIZE_PCT, CAP_PCT
+    )
+    assert lots == 0

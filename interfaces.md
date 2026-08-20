@@ -280,4 +280,14 @@ Never raises.
 **`async list_for_period(start: date, end: date) → list[DailySnapshot]`**
 Rows with `trade_date` in `[start, end]`, oldest first. Empty list when none.
 
+## `zarabot.risk.sizing`
+
+Pure. No I/O. 95% coverage required.
+
+**`size_position(price: Decimal, instrument: Instrument, allocated: Decimal, cash: Decimal, size_pct: Decimal, cap_pct: Decimal) → int`**
+Whole lots to buy, rounded down. `min(size_pct% × allocated, cap_pct% ×
+allocated, cash) / (lot × price)`. Returns 0 when one lot exceeds the cap or
+cash, or when lot cost is not positive. Never negative. Satisfies
+`lots × lot × price ≤ cap_pct% × allocated` and `≤ cash`.
+
 
