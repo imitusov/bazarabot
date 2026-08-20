@@ -502,15 +502,18 @@ Opens LOCAL from the fill, then places the stop (3 attempts). Stop failure
 leaves the position LOCAL and open. Partial entry opens filled lots only.
 
 **`async close_position(position: Position, trigger: ExitTrigger) → Position`**
-Cancels the standing stop and demotes to LOCAL, then market-sells until flat.
-Raises `ValueError` if `trigger` is `STOP_LOSS`. Raises `ExitFailed` on reject
-or unavailability. Never blocked by halt, cooldown, or risk limits.
+Bot-initiated exit for any trigger. Cancels the standing stop first only when
+`EXCHANGE`, then market-sells until flat. Records `trigger` on the order row.
+Raises `ValueError` for `STOP_LOSS` only when the position is `EXCHANGE`.
+Raises `ExitFailed` on reject or unavailability. Never blocked by halt,
+cooldown, or risk limits.
 
 **`async resolve_unfinished(now: datetime) → list[OrderRecord]`**
 Queries `get_order_state` by key; never resubmits. `OrderNotFound` settles as
 `REJECTED` / never-placed. A discovered entry fill opens via `get_instrument`
 and today's `db.signals` row (else strategy `ma_crossover`). A discovered exit
-fill closes as `TAKE_PROFIT`. Raises `ValueError` on naive `now`.
+fill closes with the order row's `exit_trigger`. A missing trigger is a data
+defect: alert and leave the position open. Raises `ValueError` on naive `now`.
 
 **`async place_protective_stop(position: Position, instrument: Instrument) → Position`**
 Places a standing stop on an unprotected position. Idempotent when already
@@ -618,8 +621,3 @@ Frozen: `config`, `strategies`, `halt`, `reconciliation`. Lives here, not in
 `strategies.registry.enabled` → `market.session.refresh` →
 `execution.orders.resolve_unfinished` → `broker.reconcile.reconcile` plus stop
 remedies → restore halt → ready `alert`.
-
-
-
-
-

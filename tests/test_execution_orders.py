@@ -910,8 +910,9 @@ async def test_resolved_exit_without_trigger_alerts_and_leaves_position(
     )
     with caplog.at_level(logging.ERROR):
         await resolve_unfinished(NOW)
-    assert await list_open()
-    assert await list_open()[0].id == position.id
+    opened = await list_open()
+    assert opened
+    assert opened[0].id == position.id
     assert caplog.records
 
 

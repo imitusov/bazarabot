@@ -327,20 +327,26 @@ async def _open_from_fill(
 
 
 async def close_position(position: Position, trigger: ExitTrigger) -> Position:
-    """Cancel the stop, demote to LOCAL, then market-sell until flat."""
-    if trigger is ExitTrigger.STOP_LOSS:
-        raise ValueError("STOP_LOSS exits are closed from the exchange fill")
+    """Bot-initiated exit. STOP_LOSS is legal only while the bot owns the stop."""
     async with _locks(position.ticker):
         current = await get_position(position.id)
         if current is None:
             raise PositionStateError(f"position {position.id} is absent")
-        current = await _cancel_stop_to_local(current)
+        if (
+            trigger is ExitTrigger.STOP_LOSS
+            and current.stop_protection is StopProtection.EXCHANGE
+        ):
+            raise ValueError("STOP_LOSS on EXCHANGE is closed from the exchange fill")
+        if current.stop_protection is StopProtection.EXCHANGE:
+            current = await _cancel_stop_to_local(current)
         remaining = current.lots
         last_order: OrderRecord | None = None
         while remaining > 0:
             key = str(uuid4())
             await _write(
-                record_submitting(key, current.ticker, Side.SELL, remaining, "EXIT")
+                record_submitting(
+                    key, current.ticker, Side.SELL, remaining, "EXIT", trigger
+                )
             )
             try:
                 posted = await post_market_order(
@@ -388,7 +394,14 @@ async def close_executed_stop(position: Position, fill_price: Decimal) -> Positi
             )
         key = str(uuid4())
         await _write(
-            record_submitting(key, current.ticker, Side.SELL, current.lots, "EXIT")
+            record_submitting(
+                key,
+                current.ticker,
+                Side.SELL,
+                current.lots,
+                "EXIT",
+                ExitTrigger.STOP_LOSS,
+            )
         )
         order = await _write(
             settle_order(
@@ -468,5 +481,10 @@ async def _apply_discovered_fill(order: OrderRecord, now: datetime) -> None:
         open_pos = await _already_open(order.ticker)
         if open_pos is None:
             return
+        if order.exit_trigger is None:
+            _alert(
+                f"exit order {order.key} has no trigger; leaving {order.ticker} open"
+            )
+            return
         await _cancel_stop_to_local(open_pos)
-        await _finish_close(open_pos, order, ExitTrigger.TAKE_PROFIT, now)
+        await _finish_close(open_pos, order, order.exit_trigger, now)
