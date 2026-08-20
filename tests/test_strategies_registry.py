@@ -9,7 +9,11 @@ import joblib  # type: ignore[import-untyped]
 import pytest
 
 from zarabot.config import Config, ConfigError
-from zarabot.strategies.ml_model import FEATURE_NAMES, ModelContractError, ModelLoadError
+from zarabot.strategies.ml_model import (
+    FEATURE_NAMES,
+    ModelContractError,
+    ModelLoadError,
+)
 from zarabot.strategies.registry import enabled
 
 

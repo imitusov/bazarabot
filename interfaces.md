@@ -364,4 +364,12 @@ Reads a joblib bundle `{"model", "features"}`. Raises `ModelLoadError` or
 `BUY` when `predict_proba` buy-class probability ≥ threshold. `None` when short,
 flat, or below threshold. Never `SELL`.
 
+## `zarabot.strategies.registry`
+
+**`enabled(config: Config) → list[Strategy]`**
+Instantiates the names in `config.enabled_strategies`. Unknown names raise
+`ConfigError` naming `ENABLED_STRATEGIES`. `ml_model` is omitted when
+`ml_model_path` is `None`; otherwise `ml_model.load` is called and
+`ModelLoadError` / `ModelContractError` propagate.
+
 
