@@ -121,4 +121,19 @@ variable is missing or empty; a percentage is `<= 0` or `> 100`;
 greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty; `TRADING_MODE` is not
 `live` or `sandbox`; or `ML_MODEL_PATH` is set but unreadable.
 
+## `zarabot.logging_setup`
+
+JSON logs to stdout only. Never a file, never stderr. Tokens are replaced by
+`MASK` (`"***"`).
+
+**`MASK: str`**
+Fixed redaction mask.
+
+**`configure(level: str, secrets: list[str]) → None`**
+Installs a JSON formatter on stdout and a filter that replaces every occurrence
+of every value in `secrets` in the message, structured fields, and formatted
+exception text. Recurses into nested dicts and sequences to depth 10; deeper
+structures are replaced wholesale. A record that contains no secret is left
+unmodified.
+
 

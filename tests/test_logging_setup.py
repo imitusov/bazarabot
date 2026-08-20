@@ -9,7 +9,7 @@ import pytest
 
 from zarabot.logging_setup import MASK, configure
 
-TOKEN = "tinvest-secret-token-value"
+TOKEN = "tinvest-secret-token-value"  # noqa: S105
 LOGGER_NAME = "zarabot.test_logging"
 
 
@@ -31,7 +31,15 @@ def test_token_in_structured_field_is_redacted(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     configure("INFO", [TOKEN])
-    _logger().info("order accepted", extra={"broker_token": TOKEN, "order": "abc"})
+    _logger().info(
+        "order accepted",
+        extra={
+            "broker_token": TOKEN,
+            "order": "abc",
+            "nested": {"secret": TOKEN},
+            "items": [TOKEN],
+        },
+    )
     out = capsys.readouterr().out
     assert TOKEN not in out
     payload = json.loads(out.strip().splitlines()[-1])
