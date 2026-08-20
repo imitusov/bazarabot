@@ -445,4 +445,18 @@ Daily candles per ticker, oldest-first. A failing ticker is omitted and logged
 at WARNING; the rest of the batch returns. Never pads. Raises `ValueError` on
 naive `now`.
 
+## `zarabot.state.halt`
+
+Sole owner of `halt_state`. A halt suspends entries only.
+
+**`async is_halted() → bool`**
+**`async current() → HaltState | None`**
+The singleton row, or `None` if missing.
+
+**`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
+Persists halt. No-op when already halted. Raises `ValueError` on naive `at`.
+
+**`async resume(actor: str, at: datetime) → bool`**
+Clears the halt and records `actor`. `False` when not halted.
+
 
