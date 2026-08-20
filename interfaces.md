@@ -719,3 +719,17 @@ Reimplementing any of them is a defect.
 Replays candles oldest-first. The strategy never receives a candle at or after
 the decision instant. Commission (per fill) and slippage (fraction of price)
 apply to every simulated fill.
+
+## `sandbox.train`
+
+Walk-forward only. Imports `strategies.ml_model.build_features`; does not rebuild
+features. `export` writes a joblib bundle loadable by `strategies.ml_model.load`.
+
+**`fit(candles_by_ticker: dict[str, list[Candle]], horizon_days: int, folds: int, seed: int) → FittedModel`**
+Buy/no-buy classifier. Label is whether take-profit is reached before stop
+within `horizon_days`. `seed` is required and stored. Returns per-fold
+validation scores.
+
+**`export(model: FittedModel, path: Path) → Path`**
+Writes `{"model", "features", "seed", "trained_at"}` with `features` equal to
+`FEATURE_NAMES` in order.

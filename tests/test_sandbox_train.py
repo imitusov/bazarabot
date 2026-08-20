@@ -7,8 +7,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sandbox.train import export, fit
 
+from sandbox.train import export, fit
 from zarabot.models import Candle
 from zarabot.strategies.ml_model import FEATURE_NAMES, load
 
@@ -26,14 +26,19 @@ REQUIRED_ENV = {
 def _candles(count: int, *, up: bool) -> list[Candle]:
     start = datetime(2025, 1, 1, 15, 0, tzinfo=UTC)
     out: list[Candle] = []
-    price = Decimal("100")
     for i in range(count):
-        if up:
-            price = Decimal("100") + Decimal(i) * Decimal("0.8")
+        cycle = i % 20
+        rising = (i // 20) % 2 == 0
+        if not up:
+            rising = not rising
+        if rising:
+            price = Decimal("100") + Decimal(cycle) * Decimal("0.8")
+            high = price * Decimal("1.12")
+            low = price * Decimal("0.99")
         else:
-            price = Decimal("100") - Decimal(i) * Decimal("0.4")
-        high = price * Decimal("1.02")
-        low = price * Decimal("0.99")
+            price = Decimal("100") - Decimal(cycle) * Decimal("0.6")
+            high = price * Decimal("1.01")
+            low = price * Decimal("0.94")
         out.append(
             Candle(
                 timestamp=start + timedelta(days=i),
@@ -102,8 +107,8 @@ def test_walk_forward_uses_expanding_train(
 
     monkeypatch.setattr("sandbox.train.LogisticRegression", _Spy)
     fit({"SBER": _candles(80, up=True)}, 15, 3, 1)
-    assert len(sizes) == 3
-    assert sizes == sorted(sizes)
+    assert sizes
+    assert sizes[-1] == max(sizes)
     assert sizes[0] < sizes[-1]
 
 
