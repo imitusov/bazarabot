@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -110,6 +109,7 @@ class _Broker:
         self.posted_status = OrderStatus.FILLED
         self.partial_fill_lots: int | None = None
         self.state: dict[str, OrderRecord] = {}
+        self.alerts: list[str] = []
 
     async def get_max_lots(self, figi: str) -> int:
         return self.max_lots
@@ -205,6 +205,11 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
         return UUID(f"11111111-1111-4111-8111-{counter['n']:012d}")
 
     monkeypatch.setattr("zarabot.execution.orders.uuid4", _uuid)
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        broker.alerts.append(text)
+
+    monkeypatch.setattr(f"{module}.alert", _alert, raising=False)
     return broker
 
 
@@ -306,15 +311,13 @@ async def test_order_not_found_settles_as_never_placed(env: _Broker) -> None:
     assert await list_unresolved() == []
 
 
-async def test_rejected_exit_raises_exit_failed_and_alerts(
-    env: _Broker, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_rejected_exit_raises_exit_failed_and_alerts(env: _Broker) -> None:
     position = await open_position(_signal(), 2, _instrument())
     env.reject_exit = True
-    with caplog.at_level(logging.ERROR), pytest.raises(ExitFailed):
+    with pytest.raises(ExitFailed):
         await close_position(position, ExitTrigger.TAKE_PROFIT)
     assert await list_open()
-    assert caplog.records
+    assert env.alerts
     await close_position((await list_open())[0], ExitTrigger.TAKE_PROFIT)
     assert await list_open() == []
 
@@ -340,16 +343,13 @@ async def test_cancel_of_already_executed_stop_is_not_an_error(env: _Broker) -> 
     assert closed.status == "CLOSED"
 
 
-async def test_stop_rejected_three_times_leaves_local_open(
-    env: _Broker, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_stop_rejected_three_times_leaves_local_open(env: _Broker) -> None:
     env.stop_failures_left = 3
-    with caplog.at_level(logging.ERROR):
-        position = await open_position(_signal(), 2, _instrument())
+    position = await open_position(_signal(), 2, _instrument())
     assert position.stop_protection is StopProtection.LOCAL
     assert position.status == "OPEN"
     assert await list_active() == []
-    assert caplog.records
+    assert env.alerts
 
 
 async def test_position_is_local_until_stop_confirmed(env: _Broker) -> None:
@@ -871,7 +871,7 @@ async def test_resolved_exit_fill_uses_order_row_trigger(
 
 
 async def test_resolved_exit_without_trigger_alerts_and_leaves_position(
-    env: _Broker, caplog: pytest.LogCaptureFixture
+    env: _Broker,
 ) -> None:
     from zarabot.config import load
 
@@ -908,12 +908,11 @@ async def test_resolved_exit_without_trigger_alerts_and_leaves_position(
         settled_at=NOW,
         exit_trigger=None,
     )
-    with caplog.at_level(logging.ERROR):
-        await resolve_unfinished(NOW)
+    await resolve_unfinished(NOW)
     opened = await list_open()
     assert opened
     assert opened[0].id == position.id
-    assert caplog.records
+    assert env.alerts
 
 
 async def test_resolve_exit_fill_without_position(env: _Broker) -> None:
