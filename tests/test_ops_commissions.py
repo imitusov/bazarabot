@@ -190,6 +190,11 @@ async def test_backfill_alerts_only_after_24h(env: dict[str, object]) -> None:
     assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 0
     assert env["alerts"] == []
     monkeypatch.setattr(
+        "zarabot.ops.commissions.now", lambda: NOW + timedelta(hours=24)
+    )
+    assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 0
+    assert env["alerts"] == []
+    monkeypatch.setattr(
         "zarabot.ops.commissions.now", lambda: NOW + timedelta(hours=25)
     )
     assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 0

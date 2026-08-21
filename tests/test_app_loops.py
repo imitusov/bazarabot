@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -193,6 +193,10 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
         calls.append("resolve")
         return []
 
+    async def _backfill(since: datetime, until: datetime) -> int:
+        calls.append("backfill")
+        return 0
+
     async def _cooldown(*_a: object, **_k: object) -> bool:
         return False
 
@@ -212,6 +216,7 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr(loops, "open_position", _none)
     monkeypatch.setattr(loops, "close_position", _none)
     monkeypatch.setattr(loops, "close_executed_stop", _none)
+    monkeypatch.setattr(loops, "backfill", _backfill)
 
 
 async def test_session_closed_makes_no_market_data_call(
@@ -555,6 +560,7 @@ async def test_run_one_task_failure_does_not_kill_others(
     assert "trade" in calls
     assert "backup" in calls
     assert "weekly" in calls
+    assert calls.index("backfill") < calls.index("weekly")
     assert any(item.startswith("alert:") for item in calls)
 
 
@@ -735,3 +741,99 @@ async def test_exit_failure_is_retried_next_cycle(
     monkeypatch.setattr(loops, "get_last_price", _price)
     monkeypatch.setattr(loops, "close_position", _close)
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+
+
+async def test_rollover_backfills_after_daily_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import run
+
+    calls: list[str] = []
+    windows: list[tuple[datetime, datetime]] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _trade(_ctx: AppContext) -> None:
+        return None
+
+    async def _loss(moment: datetime) -> Decimal:
+        calls.append("rollover_loss")
+        return Decimal("0")
+
+    async def _bf(since: datetime, until: datetime) -> int:
+        calls.append("backfill")
+        windows.append((since, until))
+        return 0
+
+    monkeypatch.setattr(loops, "trading_cycle", _trade)
+    monkeypatch.setattr(loops, "daily_loss_pct", _loss)
+    monkeypatch.setattr(loops, "backfill", _bf)
+    monkeypatch.setattr(loops, "is_open", lambda moment: True)
+    monkeypatch.setattr(loops, "now", lambda: NOW)
+    loops._rolled_on = None
+    loops._backed_up_on = NOW.date()
+    loops._heartbeat_on = NOW.date()
+    loops._weekly_on = NOW.date()
+
+    real_sleep = asyncio.sleep
+
+    async def _yield(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _yield)
+    task = asyncio.create_task(run(_ctx()))
+    for _ in range(50):
+        await real_sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert "rollover_loss" in calls
+    assert "backfill" in calls
+    assert calls.index("rollover_loss") < calls.index("backfill")
+    assert windows
+    assert windows[0] == (NOW - timedelta(days=7), NOW)
+
+
+async def test_weekly_backfills_immediately_before_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import run
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _trade(_ctx: AppContext) -> None:
+        return None
+
+    async def _bf(since: datetime, until: datetime) -> int:
+        calls.append("backfill")
+        return 0
+
+    async def _send(moment: datetime) -> None:
+        calls.append("weekly")
+
+    sunday_noon = datetime(2026, 3, 22, 9, 0, tzinfo=UTC)
+    monkeypatch.setattr(loops, "trading_cycle", _trade)
+    monkeypatch.setattr(loops, "backfill", _bf)
+    monkeypatch.setattr(loops, "send_report", _send)
+    monkeypatch.setattr(loops, "is_open", lambda moment: False)
+    monkeypatch.setattr(loops, "now", lambda: sunday_noon)
+    loops._backed_up_on = sunday_noon.date()
+    loops._heartbeat_on = sunday_noon.date()
+    loops._weekly_on = None
+    loops._rolled_on = sunday_noon.date()
+
+    real_sleep = asyncio.sleep
+
+    async def _yield(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _yield)
+    task = asyncio.create_task(run(_ctx()))
+    for _ in range(50):
+        await real_sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls.index("backfill") < calls.index("weekly")

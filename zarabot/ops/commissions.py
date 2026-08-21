@@ -44,7 +44,7 @@ async def backfill(since: datetime, until: datetime) -> int:
             updated.append(order.key)
             continue
         fill_at = order.settled_at if order.settled_at is not None else order.created_at
-        if moment - fill_at >= _STALE:
+        if moment - fill_at > _STALE:
             await alert(
                 f"commission still unknown for order {order.key} "
                 "more than 24h after fill"

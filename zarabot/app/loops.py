@@ -43,6 +43,7 @@ from zarabot.models import (
 )
 from zarabot.ops.backup import prune
 from zarabot.ops.backup import run as backup_run
+from zarabot.ops.commissions import backfill
 from zarabot.pnl import daily_loss_pct
 from zarabot.reporter.weekly import send as send_report
 from zarabot.risk.gate import check
@@ -52,6 +53,7 @@ from zarabot.telegram.notifier import alert
 _LOG = logging.getLogger(__name__)
 _SCHEDULE_DAYS = 14
 _BACKUP_RETENTION_DAYS = 30
+_BACKFILL_LOOKBACK = timedelta(days=7)
 _MAX_BACKOFF = 3600
 
 _market_failures = 0
@@ -254,6 +256,7 @@ async def _rollover_loop(ctx: AppContext) -> None:
         day = moscow_date(moment)
         if is_open(moment) and _rolled_on != day:
             await daily_loss_pct(moment)
+            await backfill(moment - _BACKFILL_LOOKBACK, moment)
             _rolled_on = day
         await asyncio.sleep(_poll_seconds(ctx))
 
@@ -277,6 +280,7 @@ async def _weekly_loop(ctx: AppContext) -> None:
         local = to_moscow(moment)
         week_start = local.date() - timedelta(days=local.weekday())
         if local.weekday() == 6 and local.hour == 12 and _weekly_on != week_start:
+            await backfill(moment - _BACKFILL_LOOKBACK, moment)
             await send_report(moment)
             _weekly_on = week_start
         await asyncio.sleep(_poll_seconds(ctx))
@@ -323,7 +327,7 @@ async def _supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
 
 
 async def run(ctx: AppContext) -> None:
-    """Schedule trading, rollover, backup, weekly report, and heartbeat."""
+    """Schedule trading, rollover, backfill, backup, weekly report, and heartbeat."""
     global _started_at
     _started_at = now()
     await asyncio.gather(
