@@ -1,4 +1,4 @@
-# Task 11/38: Implement `zarabot/db/snapshots.py`
+# Task 11/39: Implement `zarabot/db/snapshots.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Daily equity snapshots. The opening baseline is what the daily loss limit measur
 
 ## Build order position
 
-Module **11** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **11** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

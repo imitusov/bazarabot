@@ -1,4 +1,4 @@
-# Task 3/38: Implement `zarabot/config.py`
+# Task 3/39: Implement `zarabot/config.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Loads and validates every setting once at startup. The bot refuses to start rath
 
 ## Build order position
 
-Module **3** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **3** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

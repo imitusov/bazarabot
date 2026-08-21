@@ -1,4 +1,4 @@
-# Task 20/38: Implement `zarabot/risk/gate.py`
+# Task 20/39: Implement `zarabot/risk/gate.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Pure. Every entry check, with a fixed rejection priority so the recorded reason 
 
 ## Build order position
 
-Module **20** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **20** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

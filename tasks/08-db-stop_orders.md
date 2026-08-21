@@ -1,4 +1,4 @@
-# Task 8/38: Implement `zarabot/db/stop_orders.py`
+# Task 8/39: Implement `zarabot/db/stop_orders.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of stop-order rows. Tracks the standing stop the exchange holds for e
 
 ## Build order position
 
-Module **8** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **8** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

@@ -1,4 +1,4 @@
-# Task 24/38: Implement `zarabot/state/halt.py`
+# Task 24/39: Implement `zarabot/state/halt.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of the halt flag. A halt suspends ENTRIES ONLY - exits keep running, 
 
 ## Build order position
 
-Module **24** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **24** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

@@ -1,4 +1,4 @@
-# Task 34/38: Implement `zarabot/app/shutdown.py`
+# Task 34/39: Implement `zarabot/app/shutdown.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Graceful shutdown. Never cancels or liquidates positions - restarts must have no
 
 ## Build order position
 
-Module **34** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **34** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

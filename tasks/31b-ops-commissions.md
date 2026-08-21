@@ -1,12 +1,12 @@
-# Task 25/39: Implement `zarabot/pnl.py`
+# Task 31b/39: Implement `zarabot/ops/commissions.py`
 
 ## Product context
 
-Realised and unrealised P&L, the daily loss percentage, and the buy-and-hold benchmark. Commission is read from the broker, never estimated.
+Records commissions the broker reported after the fill and corrects the profit figures that depended on them. Without it a trade's cost stays permanently understated.
 
 ## Build order position
 
-Module **25** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **31b** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -51,41 +51,22 @@ Module **25** of 39 in `dependency-order.md`. Everything before it is complete a
   in configuration must never move the stop of an already-open position.
 - Rows are never deleted.
 
-### `daily_snapshots`
-
-| Column | Type | Notes |
-|---|---|---|
-| `trade_date` | TEXT | Primary key. **Moscow** calendar date |
-| `opening_equity` | TEXT NOT NULL | Baseline for the daily loss limit |
-| `closing_equity` | TEXT NULL | Null until the session closes |
-| `cash` | TEXT NOT NULL | |
-| `realised_pnl` | TEXT NOT NULL | For the day |
-| `unrealised_pnl` | TEXT NOT NULL | At snapshot time |
-| `open_positions` | INTEGER NOT NULL | |
-| `orders_placed` | INTEGER NOT NULL | Observational only — there is no daily cap |
-| `benchmark_value` | TEXT NULL | Null when unavailable, never 0 |
-
 ## Module contract
 
-### `zarabot/pnl.py`
+### `zarabot/ops/commissions.py`
 
-**`realised(position: Position) → Decimal`** · **`unrealised(position: Position, price: Decimal) → Decimal`** — both net of commission.
+Fills in commissions the broker reported after the fill, and corrects the P&L
+that depended on them.
 
-Commission is the **actual figure reported by the broker** via
-`broker.client.get_operations`, recorded on the order row when the order settles.
-It is never estimated from a rate. On a small account, commission is a
-material fraction of a 10% move, and an estimated figure would make every
-realised P&L slightly and permanently wrong.
-
-**`async daily_loss_pct(now: datetime) → Decimal`**
-- Current equity against the day's opening baseline, as a percentage. Positive
-  means a loss. The baseline is the snapshot written at session open, never
-  allocated capital.
-
-**`async benchmark_return(start: date, end: date) → Decimal | None`**
-- Buy-and-hold return over the watchlist for the period.
-- Returns `None` when any constituent price is missing — an unavailable benchmark
-  is reported as unavailable, never as zero.
+**`async backfill(since: datetime, until: datetime) → int`**
+- For every order from `db.orders.list_missing_commission`, re-queries
+  `broker.client.get_order_state(key)` — by our own key, so there is no matching
+  step — and records any commission now present.
+- Recomputes `realised_pnl` via `db.positions.recompute_realised` for every
+  closed position whose orders changed, and returns the number of orders updated.
+- Alerts only when an order's commission is still unknown more than 24 hours
+  after its fill: that is a broker or integration problem, not ordinary lag.
+- Must never place, cancel or modify an order.
 
 ## Relevant error handling rules
 
@@ -99,29 +80,20 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-- Realised P&L for a closed position matches the arithmetic including commission
-  (happy path).
-- Unrealised P&L for an open position uses the current price (happy path).
-- The daily loss percentage is computed against the day's opening baseline, not
-  against allocated capital drift (proves the baseline definition).
-- With no positions and no trades, all figures are zero rather than `None`
-  (proves the empty-portfolio path).
-- The buy-and-hold benchmark over a window with a missing price for one
-  instrument reports the benchmark as unavailable rather than as zero (proves
-  missing data is not silently treated as no return).
+No dedicated test block in §3.2. Derive cases from the contract above: happy path, every early return, every boundary, and every documented exception.
 
 ## Expected output
 
-- `zarabot/pnl.py` implementing the contract exactly
-- `tests/test_pnl.py` implementing every test case above
+- `zarabot/ops/commissions.py` implementing the contract exactly
+- `tests/test_ops_commissions.py` implementing every test case above
 - All tests passing, coverage threshold met
 - This module's public signatures appended to `interfaces.md`
 
 ## Agent instructions
 
-1. Write `tests/test_pnl.py` FIRST, from the test cases above. No implementation yet.
+1. Write `tests/test_ops_commissions.py` FIRST, from the test cases above. No implementation yet.
 2. Run it. Confirm it **fails** — nothing is implemented.
-3. Write `zarabot/pnl.py` to satisfy the contract.
+3. Write `zarabot/ops/commissions.py` to satisfy the contract.
 4. Run again. Iterate until all pass.
 5. Match contract signatures EXACTLY, including `| None`.
 6. Call interfaces as recorded; do not reimplement them.

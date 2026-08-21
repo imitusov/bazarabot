@@ -1,4 +1,4 @@
-# Task 32/38: Implement `zarabot/app/startup.py`
+# Task 32/39: Implement `zarabot/app/startup.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Fixed startup ordering: config, logging, migrations, strategies, session, order 
 
 ## Build order position
 
-Module **32** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **32** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

@@ -1,4 +1,4 @@
-# Task 31/38: Implement `zarabot/ops/backup.py`
+# Task 31/39: Implement `zarabot/ops/backup.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Nightly database backup. A failure alerts but never stops trading.
 
 ## Build order position
 
-Module **31** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **31** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

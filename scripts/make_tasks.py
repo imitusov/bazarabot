@@ -47,6 +47,7 @@ M = [
  (29,"telegram.commands","zarabot/telegram/commands.py","`telegram.commands`",["positions"],[13,14],"The entire user interface. One authorised chat id; everything else is ignored and logged."),
  (30,"reporter.weekly","zarabot/reporter/weekly.py","`reporter.weekly`",["positions","signals","daily_snapshots"],[12,13],"The Sunday report. Undefined metrics are reported as not applicable, never as zero."),
  (31,"ops.backup","zarabot/ops/backup.py","`ops.backup`",[],[18],"Nightly database backup. A failure alerts but never stops trading."),
+ ("31b","ops.commissions","zarabot/ops/commissions.py",None,["positions"],[12],"Records commissions the broker reported after the fill and corrects the profit figures that depended on them. Without it a trade's cost stays permanently understated."),
  (32,"app.startup","zarabot/app/startup.py","`app.startup`",[],[15,16,17,21],"Fixed startup ordering: config, logging, migrations, strategies, session, order recovery, reconciliation, halt state, ready alert. 70% coverage."),
  (33,"app.loops","zarabot/app/loops.py","`app.loops` / `app.shutdown`",[],[1,21,29],"The trading cycle. Exits run before the halt check, which is what implements halt-blocks-entries-only. 70% coverage."),
  (34,"app.shutdown","zarabot/app/shutdown.py","`app.loops` / `app.shutdown`",[],[21],"Graceful shutdown. Never cancels or liquidates positions - restarts must have no financial consequence. 70% coverage."),
@@ -112,10 +113,10 @@ for order, name, spec_key, tkey, tables, rules, context in M:
     testfile = "tests/test_{}.py".format(name.replace(".", "_"))
     contract = section(spec_key) or "SPEC SECTION NOT FOUND — read `{}` in technical-spec.md §4 yourself.".format(spec_key)
     tests = test_block(tkey) or "No dedicated test block in §3.2. Derive cases from the contract above: happy path, every early return, every boundary, and every documented exception."
-    body = ["# Task {}/38: Implement `{}`".format(order, path), ""]
+    body = ["# Task {}/{}: Implement `{}`".format(order, len(M), path), ""]
     body += ["## Product context", "", context, ""]
     body += ["## Build order position", "",
-             "Module **{}** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.".format(order), ""]
+             "Module **{}** of {} in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.".format(order, len(M)), ""]
     body += ["## Already-implemented interfaces", "",
              "**Read `interfaces.md` now.** It lists the exact, tested signatures of every completed module. Call those; never guess a signature and never reimplement something recorded there.", ""]
     if tables:
@@ -148,7 +149,8 @@ for order, name, spec_key, tkey, tables, rules, context in M:
              "10. Append public signatures to `interfaces.md` once green.",
              "11. If the contract is ambiguous, conflicts with `interfaces.md`, or a test",
              "    cannot pass without violating it — **STOP and ask**. Do not guess.", ""]
-    (OUT / "{:02d}-{}.md".format(order, name.replace(".", "-"))).write_text(
+    stem = order if isinstance(order, str) else "{:02d}".format(order)
+    (OUT / "{}-{}.md".format(stem, name.replace(".", "-"))).write_text(
         "\n".join(body), encoding="utf-8")
 
 print("generated {} task files in tasks/".format(len(M)))

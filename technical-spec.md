@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.14
+**Version:** 1.15
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -1873,6 +1873,11 @@ This has consequences the deployment section must handle: the image build depend
 on a single third-party index that is not PyPI, cannot be assumed to be as
 available or as long-lived, and complicates hash-pinning. See §10.
 
+`requirements.lock` pins the **server and development** sets, which is what the
+image is built from. The sandbox set is deliberately unpinned: it is a research
+environment on one laptop, where a newer pandas is a convenience rather than a
+risk, and nothing in it can reach the trading path.
+
 Three dependency sets: `requirements-server.txt` runs on the VPS;
 `requirements-sandbox.txt` adds research tooling and is never installed on the
 server; `requirements-dev.txt` adds the test and lint toolchain and is installed
@@ -1896,6 +1901,7 @@ neither on the server nor in the image.
 | Package | Constraint | Reason |
 |---|---|---|
 | `pandas` | ≥ 3.0 | Backtest analysis and report prototyping |
+| `pyarrow` | ≥ 25.0 | Parquet engine for the candle cache. pandas 3.0 does **not** require it — verified, `Required-by` is empty — so it is a genuine addition, permitted because the sandbox is laptop-only and never installed on the server. Parquet is chosen over CSV because it round-trips decimal and timezone-aware timestamp types, which a candle cache of `Decimal` prices needs |
 | `matplotlib` | ≥ 3.11 | Equity curves and drawdown plots |
 | `jupyterlab` | ≥ 4.6 | The research surface described in the brief |
 

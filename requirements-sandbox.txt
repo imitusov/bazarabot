@@ -1,4 +1,5 @@
 # Laptop research only. Never installed on the server.
 pandas>=3.0
+pyarrow>=25.0        # parquet engine for the candle cache; pandas 3.0 does not pull it in
 matplotlib>=3.11
 jupyterlab>=4.6

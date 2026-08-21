@@ -1,4 +1,4 @@
-# Task 30/38: Implement `zarabot/reporter/weekly.py`
+# Task 30/39: Implement `zarabot/reporter/weekly.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The Sunday report. Undefined metrics are reported as not applicable, never as ze
 
 ## Build order position
 
-Module **30** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **30** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

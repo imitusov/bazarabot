@@ -1,4 +1,4 @@
-# Task 5/38: Implement `zarabot/db/migrations.py`
+# Task 5/39: Implement `zarabot/db/migrations.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Schema creation and version tracking. Forward-only: a bad migration is fixed by 
 
 ## Build order position
 
-Module **5** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **5** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

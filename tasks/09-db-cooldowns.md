@@ -1,4 +1,4 @@
-# Task 9/38: Implement `zarabot/db/cooldowns.py`
+# Task 9/39: Implement `zarabot/db/cooldowns.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of per-instrument re-entry cooldowns, which replace a daily order cap
 
 ## Build order position
 
-Module **9** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **9** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

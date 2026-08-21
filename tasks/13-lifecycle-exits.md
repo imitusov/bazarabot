@@ -1,4 +1,4 @@
-# Task 13/38: Implement `zarabot/lifecycle/exits.py`
+# Task 13/39: Implement `zarabot/lifecycle/exits.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Pure. Decides which of the three exit triggers fires. Returns STOP_LOSS only for
 
 ## Build order position
 
-Module **13** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **13** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

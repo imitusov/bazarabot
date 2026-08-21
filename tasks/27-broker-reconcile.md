@@ -1,4 +1,4 @@
-# Task 27/38: Implement `zarabot/broker/reconcile.py`
+# Task 27/39: Implement `zarabot/broker/reconcile.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Compares broker truth against local belief on startup. Observes and reports only
 
 ## Build order position
 
-Module **27** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **27** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

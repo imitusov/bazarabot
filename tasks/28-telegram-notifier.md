@@ -1,4 +1,4 @@
-# Task 28/38: Implement `zarabot/telegram/notifier.py`
+# Task 28/39: Implement `zarabot/telegram/notifier.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Pushes alerts. Never raises: Telegram being down must never delay a trading deci
 
 ## Build order position
 
-Module **28** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **28** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

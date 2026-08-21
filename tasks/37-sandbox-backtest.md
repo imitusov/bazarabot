@@ -1,4 +1,4 @@
-# Task 37/38: Implement `sandbox/backtest.py`
+# Task 37/39: Implement `sandbox/backtest.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The backtester. Imports the live strategy, sizing and exit modules UNCHANGED - r
 
 ## Build order position
 
-Module **37** of 38 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **37** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
