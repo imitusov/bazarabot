@@ -22,6 +22,9 @@ def _name(value: object) -> str:
 
 
 async def main() -> int:
+    # See _harness.client() — without this the TLS handshake fails.
+    os.environ.setdefault("SSL_TBANK_VERIFY", "true")
+
     from t_tech.invest import AsyncClient
     from t_tech.invest.utils import money_to_decimal
 

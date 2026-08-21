@@ -20,6 +20,9 @@ Module **32** of 39 in `dependency-order.md`. Everything before it is complete a
 
 Fixed ordering; each step completes before the next begins:
 1. `config.load()` — abort on failure before anything else, including any network call.
+1b. Write `SSL_TBANK_VERIFY` into the process environment from
+   `config.ssl_tbank_verify`. This must precede every broker call; a channel
+   created before it is set fails its TLS handshake.
 2. `logging_setup.configure()`.
 3. Open the database and `db.migrations.apply()`.
 4. `strategies.registry.enabled()`, including model load if configured.
@@ -62,6 +65,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   and reports ready (happy path).
 - Invalid config aborts before any broker call is made (proves fail-fast
   ordering).
+- `SSL_TBANK_VERIFY` is present in the environment before the first broker call
+  (proves the TLS root is available when the channel is built — the failure this
+  guards against is a handshake error that looks like a network fault rather
+  than a configuration one).
 - An unresolved order from a previous run is resolved before the first strategy
   evaluation (proves recovery precedes trading — the ordering that prevents a
   duplicate order).

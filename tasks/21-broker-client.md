@@ -96,6 +96,22 @@ else it does.
   operation to an order would mean matching on instrument, time and quantity,
   which is ambiguous exactly when two similar orders are close together.
 
+**TLS requires the broker's own root certificate.** T-Bank's endpoint presents a
+certificate chaining to the Russian Trusted Root CA, which gRPC's built-in trust
+store does not contain. The SDK ships that root at
+`t_tech/invest/certs/RussianTrustedRootCA.pem` but loads it **only** when the
+environment variable `SSL_TBANK_VERIFY` is `true`; its default is `false`, so
+every call otherwise dies in the TLS handshake with
+`CERTIFICATE_VERIFY_FAILED: self signed certificate in certificate chain`.
+
+This is not a property of any particular network — it was reproduced from a
+clean machine, and would fail identically on the VPS. `config` therefore exposes
+`ssl_tbank_verify`, defaulting to **true**, and `app.startup` writes it into the
+process environment immediately after `config.load()` and before any broker call.
+`broker.client` must not read the variable itself: the SDK reads it from the
+environment when a channel is created, so the only requirement is that it is set
+before the first client is constructed.
+
 **Commission comes back on the order itself.** Both `PostOrderResponse` and
 `OrderState` carry `executed_commission`, keyed by our own idempotency key.
 `post_market_order` and `get_order_state` therefore populate

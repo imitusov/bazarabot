@@ -99,6 +99,12 @@ def client(token, sandbox=False):
     post_sandbox_* family instead would mean sandbox testing proves nothing
     about the live path.
     """
+    # T-Bank's certificate chains to the Russian Trusted Root CA, which is not
+    # in gRPC's built-in trust store. The SDK ships that root and loads it only
+    # when this variable is true; without it every call dies in the TLS
+    # handshake with CERTIFICATE_VERIFY_FAILED, on any machine.
+    os.environ.setdefault("SSL_TBANK_VERIFY", "true")
+
     from t_tech.invest import AsyncClient
     from t_tech.invest.constants import INVEST_GRPC_API_SANDBOX
 

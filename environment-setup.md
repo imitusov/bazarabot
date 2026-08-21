@@ -95,6 +95,11 @@ Only five variables are required to run the verification suite:
 `TINVEST_TOKEN`, `TINVEST_ACCOUNT_ID`, `WATCHLIST`, `TELEGRAM_BOT_TOKEN`,
 `TELEGRAM_CHAT_ID`. Everything else has a working default.
 
+**`SSL_TBANK_VERIFY=true` is required**, not optional. Without it every broker
+call fails in the TLS handshake with `CERTIFICATE_VERIFY_FAILED`, which reads
+like a network or proxy problem and is not. See `technical-spec.md` §4,
+`broker.client`.
+
 **Start in sandbox.** Set `TRADING_MODE=sandbox` while developing. It selects the
 sandbox endpoint only — every call afterwards is identical, so sandbox behaviour
 is evidence about live behaviour.

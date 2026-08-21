@@ -1,6 +1,6 @@
 # Zarabot — Business Brief
 
-**Version:** 1.5
+**Version:** 1.6
 **Date:** 2026-08-18
 **Status:** Ready for technical spec
 
@@ -700,6 +700,7 @@ of its own behaviour.
 |---|---|---|---|
 | `TINVEST_TOKEN` | Yes | — | Full-access T-Invest API token. Grants trading rights over real money. |
 | `TINVEST_ACCOUNT_ID` | Yes | — | The specific brokerage account the bot may trade. Must hold only the allocated capital. |
+| `SSL_TBANK_VERIFY` | No | `true` | Makes the broker SDK use the Russian Trusted Root certificate it ships. Required in practice: the broker's certificate is not signed by an authority the networking library trusts by default, so leaving this off makes every connection fail. |
 | `TRADING_MODE` | No | `live` | `live` or `sandbox`. Selects the broker environment; the code path is otherwise identical. |
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Credential for the Telegram bot. |
 | `TELEGRAM_CHAT_ID` | Yes | — | The single chat authorised to command the bot. All others are refused. |
