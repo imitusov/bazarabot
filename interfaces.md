@@ -110,17 +110,19 @@ range, or a cross-field rule fails. The message names the offending variable.
 `reentry_cooldown_minutes: int`, `daily_loss_limit_pct: Decimal`,
 `watchlist: tuple[str, ...]`, `enabled_strategies: tuple[str, ...]`,
 `ml_model_path: Path | None`, `poll_interval_seconds: int`, `db_path: Path`,
-`backup_dir: Path`, `log_level: str`, `tz: str`.
+`backup_dir: Path`, `log_level: str`, `tz: str`, `ssl_tbank_verify: bool = True`.
 
 **`load() → Config`**
 Reads the brief's environment-variable table. Applies documented defaults to
-non-risk optional variables. Never substitutes a default for missing
+non-risk optional variables. `SSL_TBANK_VERIFY` defaults to `true`; only the
+strings `true` and `false` are accepted. Never substitutes a default for missing
 `ALLOCATED_CAPITAL`. Raises `ConfigError` naming the variable when: a required
 variable is missing or empty; a percentage is `<= 0` or `> 100`;
 `POSITION_SIZE_PCT` exceeds `MAX_POSITION_PCT`;
 `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `TAKE_PROFIT_PCT` is not
 greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty; `TRADING_MODE` is not
-`live` or `sandbox`; or `ML_MODEL_PATH` is set but unreadable.
+`live` or `sandbox`; `SSL_TBANK_VERIFY` is not `true` or `false`; or
+`ML_MODEL_PATH` is set but unreadable.
 
 ## `zarabot.logging_setup`
 
@@ -658,10 +660,12 @@ Frozen: `config`, `strategies`, `halt`, `reconciliation`. Lives here, not in
 `models`.
 
 **`async start() → AppContext`**
-`config.load` → `logging_setup.configure` → `db.migrations.apply` →
-`strategies.registry.enabled` → `market.session.refresh` →
-`execution.orders.resolve_unfinished` → `broker.reconcile.reconcile` plus stop
-remedies → restore halt → ready `alert`.
+`config.load` → write `SSL_TBANK_VERIFY` from `config.ssl_tbank_verify` into
+`os.environ` (`"true"` / `"false"`) → `logging_setup.configure` →
+`db.migrations.apply` → `strategies.registry.enabled` →
+`market.session.refresh` → `execution.orders.resolve_unfinished` →
+`broker.reconcile.reconcile` plus stop remedies → restore halt → ready `alert`.
+The TLS env write precedes every broker call.
 
 ## `zarabot.app.loops`
 

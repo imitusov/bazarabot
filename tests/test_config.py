@@ -43,6 +43,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None = None) -
         "BACKUP_DIR",
         "LOG_LEVEL",
         "TZ",
+        "SSL_TBANK_VERIFY",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in REQUIRED.items():
@@ -61,6 +62,7 @@ def test_complete_environment_produces_populated_config(
     assert cfg.watchlist == ("SBER", "GAZP", "LKOH")
     assert cfg.position_size_pct == Decimal("10")
     assert cfg.trading_mode == "live"
+    assert cfg.ssl_tbank_verify is True
 
 
 def test_missing_tinvest_token_raises_naming_the_variable(
@@ -135,6 +137,28 @@ def test_config_string_form_contains_neither_token(
     text = str(cfg) + repr(cfg)
     assert "tinvest-secret-token" not in text
     assert "telegram-secret-token" not in text
+
+
+def test_ssl_tbank_verify_defaults_true_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch)
+    assert load().ssl_tbank_verify is True
+
+
+def test_ssl_tbank_verify_true_and_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"SSL_TBANK_VERIFY": "true"})
+    assert load().ssl_tbank_verify is True
+    _env(monkeypatch, {"SSL_TBANK_VERIFY": "false"})
+    assert load().ssl_tbank_verify is False
+
+
+def test_ssl_tbank_verify_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch, {"SSL_TBANK_VERIFY": "maybe"})
+    with pytest.raises(ConfigError, match="SSL_TBANK_VERIFY"):
+        load()
 
 
 def test_unreadable_ml_model_path_raises(

@@ -139,6 +139,8 @@ async def start() -> AppContext:
     except ConfigError as exc:
         await _abort(f"Startup aborted: {exc}", exc)
 
+    os.environ["SSL_TBANK_VERIFY"] = "true" if cfg.ssl_tbank_verify else "false"
+
     configure(cfg.log_level, [cfg.tinvest_token, cfg.telegram_bot_token])
     try:
         async with aiosqlite.connect(cfg.db_path) as conn:

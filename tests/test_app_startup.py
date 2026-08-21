@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -100,6 +101,31 @@ async def test_invalid_config_aborts_before_any_broker_call(
         await start()
     assert broker_calls == []
     assert alerts
+
+
+async def test_ssl_tbank_verify_is_present_before_first_broker_call(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zarabot.app.startup import start
+    from zarabot.config import load as real_load
+
+    monkeypatch.delenv("SSL_TBANK_VERIFY", raising=False)
+    cfg = real_load()
+    assert cfg.ssl_tbank_verify is True
+
+    def _load() -> object:
+        return cfg
+
+    broker_env: list[str | None] = []
+
+    async def _refresh(days: int) -> None:
+        broker_env.append(os.environ.get("SSL_TBANK_VERIFY"))
+        env.append("refresh")
+
+    monkeypatch.setattr("zarabot.app.startup.load", _load)
+    monkeypatch.setattr("zarabot.app.startup.refresh", _refresh)
+    await start()
+    assert broker_env == ["true"]
 
 
 async def test_unresolved_order_is_resolved_before_strategy_evaluation(

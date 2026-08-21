@@ -23,6 +23,7 @@ _DEFAULTS: dict[str, str] = {
     "BACKUP_DIR": "/data/backups",
     "LOG_LEVEL": "INFO",
     "TZ": "Europe/Moscow",
+    "SSL_TBANK_VERIFY": "true",
 }
 
 _REQUIRED = (
@@ -112,6 +113,14 @@ def _csv(raw: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
+def _bool(name: str, raw: str) -> bool:
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    raise ConfigError(f"{name} is out of range")
+
+
 @dataclass(frozen=True)
 class Config:
     tinvest_token: str
@@ -136,6 +145,7 @@ class Config:
     backup_dir: Path
     log_level: str
     tz: str
+    ssl_tbank_verify: bool = True
 
     def __repr__(self) -> str:
         return (
@@ -161,7 +171,8 @@ class Config:
             f"db_path={self.db_path!r}, "
             f"backup_dir={self.backup_dir!r}, "
             f"log_level={self.log_level!r}, "
-            f"tz={self.tz!r})"
+            f"tz={self.tz!r}, "
+            f"ssl_tbank_verify={self.ssl_tbank_verify!r})"
         )
 
     __str__ = __repr__
@@ -239,4 +250,5 @@ def load() -> Config:
         backup_dir=Path(_optional("BACKUP_DIR")),
         log_level=_optional("LOG_LEVEL"),
         tz=_optional("TZ"),
+        ssl_tbank_verify=_bool("SSL_TBANK_VERIFY", _optional("SSL_TBANK_VERIFY")),
     )
