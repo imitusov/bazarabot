@@ -1,6 +1,6 @@
 # Environment Setup — Zarabot
 
-**Version:** 1.0
+**Version:** 1.1
 **Derived from:** `technical-spec.md` v1.5
 **Versioning:** new version when a prerequisite, variable, or setup step changes.
 
@@ -129,8 +129,9 @@ set -a && source .env && set +a && PYTHON=.venv/bin/python ./scripts/verify/run_
 Twelve scripts, each printing one `PASS`/`FAIL` line and exiting 0 or 1. The
 runner stops at the first failure. Notes:
 
-- **V9 fails on macOS** by design — it checks `timedatectl` and `/opt/zarabot/data`.
-  Run it on the VPS, or set `ZARABOT_DATA_DIR` to skip past it locally.
+- **V9 fails on macOS** by design — it checks `timedatectl`, which does not
+  exist there. Run it on the VPS. Its data-directory check defaults to `data/`
+  inside the clone; `ZARABOT_DATA_DIR` overrides that path.
 - **V2, V6 and V11 place real orders on the sandbox account** at prices that
   cannot fill, and clean up after themselves.
 - **V8 asks you to reply `/status`** within 45 seconds.
@@ -190,3 +191,70 @@ adjustments, a Telegram message confirming version, mode and halt state. Then
 Ctrl-C — a clean shutdown with no orphaned orders confirms graceful shutdown
 works. **A start that produces no Telegram message has failed**, whatever the
 process status says.
+
+---
+
+## 9. Deployment
+
+The bot runs as a Compose service on the VPS. Every path in
+`docker-compose.yml` is relative to that file, so the clone can live anywhere —
+`/opt/zarabot` and `~/projects/bazarabot` work equally well. Run every command
+below from the clone.
+
+**Prerequisites.** Docker Engine with the Compose plugin, and a checkout of the
+repository including `vendor/` — the broker SDK is installed from the vendored
+wheel, not from PyPI.
+
+**1. The data directory, owned by uid 1000.** This is the step that is easy to
+skip and expensive to debug:
+
+```bash
+mkdir -p data/backups && sudo chown -R 1000:1000 data
+```
+
+The container runs as a non-root user with uid 1000 (see `Dockerfile`). A bind
+mount does not translate ownership — the container sees the host directory's
+uid exactly — and if the directory is missing, Docker creates it owned by
+`root`. Get this wrong and `docker compose up -d` reports success, the
+container starts, and the first database call fails with `unable to open
+database file`, which reads like a corrupt database rather than a permission
+problem.
+
+**2. The environment file**, beside `docker-compose.yml`, mode `600`. It is
+gitignored, so it does not arrive with a `git pull` and must be written on the
+host:
+
+```bash
+cp .env.example .env && chmod 600 .env
+```
+
+Fill in both tokens, the account id, and set `DB_PATH=/data/zarabot.db` and
+`BACKUP_DIR=/data/backups` — those are container paths, under the mount, not
+host paths. `SSL_TBANK_VERIFY=true` is required (§4); without it every broker
+call dies in the TLS handshake. Set `TRADING_MODE=sandbox` until the §6
+verification suite has passed against the live-shaped path.
+
+**3. Build and start.**
+
+```bash
+docker compose up -d --build
+```
+
+`--build` matters on every deploy that changes code, dependencies or
+migrations: a plain `docker compose restart` reuses the existing image and
+changes nothing.
+
+**4. Confirm the start.**
+
+```bash
+docker compose logs -f
+```
+
+Expect migrations applied, reconciliation reporting no adjustments, and the
+Telegram ready alert. As in §8, **a deploy that produces no Telegram message
+has failed**, whatever `docker compose ps` says.
+
+**Redeploying.** `git pull && docker compose up -d --build`. `.env` and `data/`
+are gitignored and survive it. They do not survive `git clean -xfd` — that
+command deletes the live database and every backup in `data/backups`, so keep
+it away from the deploy directory.

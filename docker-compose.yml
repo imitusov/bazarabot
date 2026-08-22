@@ -1,21 +1,27 @@
-# VPS deploy (spec §10). Clone the repo to /opt/zarabot, write /opt/zarabot/.env
-# (mode 600), then from this directory:
+# VPS deploy (spec §10). Clone the repo anywhere and run from that directory:
+#   mkdir -p data/backups && sudo chown -R 1000:1000 data
 #   docker compose up -d --build
 # Confirm the Telegram ready alert. No published ports.
 #
-# Host paths: /opt/zarabot/.env and /opt/zarabot/data → /data in the container.
+# Paths are relative to this file: ./.env and ./data → /data in the container.
 # DB_PATH=/data/zarabot.db BACKUP_DIR=/data/backups in that env file.
+#
+# ./data must be owned by uid 1000 before the first start: the container runs as
+# a non-root user with that id, a bind mount keeps the host's ownership, and a
+# missing source directory is created by Docker owned by root. Getting this
+# wrong starts the container cleanly and then fails on the first query with
+# "unable to open database file".
 
 services:
   zarabot:
     build: .
     image: zarabot:latest
     restart: unless-stopped
-    env_file: /opt/zarabot/.env
+    env_file: .env
     environment:
       TZ: Europe/Moscow
     volumes:
-      - /opt/zarabot/data:/data
+      - ./data:/data
     stop_grace_period: 60s
     logging:
       driver: json-file

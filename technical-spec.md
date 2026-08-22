@@ -102,10 +102,13 @@ Referenced from **§10 Deployment**.
 7. **Create the Telegram bot** through BotFather and record its token.
 8. **Obtain the owner's Telegram chat identifier** by messaging the bot once and
    reading the update. This value goes in `TELEGRAM_CHAT_ID`.
-9. **Create the data directory** on the host — `/opt/zarabot/data` and
-   `/opt/zarabot/data/backups` — owned by the user the container runs as.
-10. **Write the environment file** `/opt/zarabot/.env` from `.env.example`, with
-    file mode `600`. It contains both tokens and is never committed.
+9. **Create the data directory** inside the clone — `data/` and
+   `data/backups/` — owned by the user the container runs as, uid 1000. The
+   bind mount keeps the host's ownership, so a root-owned directory here starts
+   the container and then fails on the first query.
+10. **Write the environment file** `.env`, beside `docker-compose.yml` in the
+    clone, from `.env.example`, with file mode `600`. It contains both tokens
+    and is never committed.
 
 ---
 
@@ -178,7 +181,8 @@ by sending a maximum-length message. FAIL otherwise.
 
 **V9 — `verify_environment.py`.** Runs on the VPS. PASS requires: Docker and
 Compose present, system clock synchronised and within two seconds of a public
-NTP source, `/opt/zarabot/data` writable, and outbound connectivity to both the
+NTP source, the deploy's data directory writable, and outbound connectivity to
+both the
 broker API and Telegram. FAIL otherwise.
 
 **V11 — `verify_stop_orders.py`.** On the sandbox account: buys one lot, places
@@ -1969,8 +1973,10 @@ container.
 
 **Compose service.**
 - `restart: unless-stopped` — survives crashes and host reboots.
-- `env_file: /opt/zarabot/.env`, mode `600`, never baked into the image.
-- Volume `/opt/zarabot/data` → `/data`, holding the database and backups.
+- `env_file: .env`, beside the compose file, mode `600`, never baked into the
+  image.
+- Volume `./data` → `/data`, holding the database and backups. Relative to the
+  compose file, so the deploy is not pinned to one host path.
 - `stop_grace_period: 60s` — long enough for `app.shutdown` to settle an in-flight
   order rather than being killed mid-submission.
 - Log driver with size-based rotation, capped so logs cannot fill the disk.

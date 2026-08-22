@@ -16,7 +16,9 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from _harness import Verifier, env  # noqa: E402
 
-DATA_DIR = pathlib.Path(env("ZARABOT_DATA_DIR", required=False, default="/opt/zarabot/data"))
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
+DATA_DIR = pathlib.Path(env("ZARABOT_DATA_DIR", required=False,
+                            default=str(_REPO_ROOT / "data")))
 
 v = Verifier("V9", "host environment")
 
