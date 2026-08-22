@@ -22,6 +22,11 @@ RUN cd /tmp/vendor && sha256sum -c SHA256SUMS \
     && rm -rf /tmp/vendor
 
 COPY zarabot ./zarabot
+# db.migrations resolves MIGRATIONS_DIR to /app/migrations. Without this the
+# container starts, finds no migrations, reports schema version 0, and then
+# fails on the first query with "no such table" - a confusing runtime error
+# rather than a clear startup one.
+COPY migrations ./migrations
 
 USER zarabot
 CMD ["python", "-m", "zarabot"]
