@@ -1,25 +1,27 @@
+# Spec §10: python -m zarabot as a non-root user. SDK from the vendored wheel.
 FROM python:3.12-slim-bookworm
 
-WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Europe/Moscow \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
 
-RUN useradd --system --uid 1000 --create-home zarabot \
+RUN adduser --disabled-password --gecos "" --uid 1000 zarabot \
     && mkdir -p /data/backups \
     && chown -R zarabot:zarabot /data
 
-COPY vendor/t_tech_investments-1.49.1-py3-none-any.whl /tmp/
-COPY requirements.lock pyproject.toml ./
-COPY zarabot/ zarabot/
-COPY migrations/ migrations/
+WORKDIR /app
 
-RUN pip install --no-cache-dir /tmp/t_tech_investments-1.49.1-py3-none-any.whl \
-    && pip install --no-cache-dir -r requirements.lock \
-    && rm -f /tmp/t_tech_investments-1.49.1-py3-none-any.whl
+COPY vendor/SHA256SUMS vendor/t_tech_investments-1.49.1-py3-none-any.whl /tmp/vendor/
+COPY requirements-image.txt .
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    TZ=Europe/Moscow \
-    PYTHONPATH=/app
+RUN cd /tmp/vendor && sha256sum -c SHA256SUMS \
+    && pip install /tmp/vendor/t_tech_investments-1.49.1-py3-none-any.whl \
+    && pip install -r /app/requirements-image.txt \
+    && rm -rf /tmp/vendor
+
+COPY zarabot ./zarabot
 
 USER zarabot
-
 CMD ["python", "-m", "zarabot"]

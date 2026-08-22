@@ -1,15 +1,25 @@
+# VPS deploy (spec §10). Clone the repo to /opt/zarabot, write /opt/zarabot/.env
+# (mode 600), then from this directory:
+#   docker compose up -d --build
+# Confirm the Telegram ready alert. No published ports.
+#
+# Host paths: /opt/zarabot/.env and /opt/zarabot/data → /data in the container.
+# DB_PATH=/data/zarabot.db BACKUP_DIR=/data/backups in that env file.
+
 services:
   zarabot:
     build: .
+    image: zarabot:latest
     restart: unless-stopped
-    env_file: .env
+    env_file: /opt/zarabot/.env
     environment:
       TZ: Europe/Moscow
     volumes:
-      - ./data:/data
+      - /opt/zarabot/data:/data
     stop_grace_period: 60s
     logging:
       driver: json-file
       options:
         max-size: "10m"
-        max-file: "3"
+        max-file: "5"
+    # No ports: the container listens on nothing.

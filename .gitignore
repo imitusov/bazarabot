@@ -28,6 +28,7 @@ backups/
 # Research artefacts
 sandbox/cache/
 sandbox/models/
+*.ipynb
 *.ipynb_checkpoints/
 
 # OS
