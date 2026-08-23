@@ -36,6 +36,22 @@ Order below is `dependency-order.md` order. Fix downward, never sideways.
 | 12 | `app.*` | `32`, `33`, `34` | F-02, F-03, F-17, F-21, F-24, F-27 | Composition, scheduling and shutdown ordering |
 | 13 | `sandbox.*` | `37`, `38` | F-12, F-13, F-14 | Research only — no effect on live trading |
 
+## A spec amendment touching N modules means N task re-runs
+
+In dependency order, lowest first. This is not bookkeeping — it is the rule that
+keeps the one-module discipline workable.
+
+v1.17 amended two modules for F-03: `market.session` gained `cache_exhausted`,
+and `app.loops` gained the obligation to call it. Re-running only task 33 left
+the agent needing a function the spec promised and no code provided. Its three
+options were to guess the signature, reimplement it inside `app.loops`, or stop.
+Only stopping is correct, and it cost a full task cycle to discover.
+
+`scripts/ci/check_docs.py` now fails when the spec specifies a function that
+`interfaces.md` does not record, and names the task to re-run. **After every
+spec amendment, run `make check` before dispatching any agent.** The failure is
+free; the blocked task cycle is not.
+
 ## Sequencing rules
 
 **Blocking first, and by hand.** F-02 and F-03 are two-line wiring fixes with
