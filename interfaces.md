@@ -472,6 +472,11 @@ Loads `broker.client.get_trading_schedule`. On `BrokerUnavailable` /
 True iff `now` is in a trading session, inclusive of `start`, exclusive of
 `end`. `False` when uncached. Raises `ValueError` on naive `now`.
 
+**`cache_exhausted(now: datetime) → bool`**
+True when `now` is at or past the last cached session end, so `is_open` is
+`False` because the calendar has run out rather than because the market is
+shut. `False` when nothing is cached. Raises `ValueError` on naive `now`.
+
 **`current_session(now: datetime) → SessionInfo | None`**
 The trading session containing `now`, or `None`.
 

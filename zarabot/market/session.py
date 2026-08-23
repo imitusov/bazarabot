@@ -50,6 +50,16 @@ def is_open(now: datetime) -> bool:
     return current_session(now) is not None
 
 
+def cache_exhausted(now: datetime) -> bool:
+    _reject_naive(now)
+    if not _cache:
+        return False
+    ends = [session.end for session in _cache if session.end is not None]
+    if not ends:
+        return False
+    return now >= max(ends)
+
+
 def in_closing_window(now: datetime, minutes: int) -> bool:
     session = current_session(now)
     if session is None:
