@@ -367,18 +367,21 @@ async def test_get_order_state_uses_request_id_type(capture: _Capture) -> None:
 
 
 @pytest.mark.asyncio
-async def test_commission_is_converted_with_money_to_decimal(
-    capture: _Capture, monkeypatch: pytest.MonkeyPatch
+async def test_commission_comes_from_executed_commission(
+    capture: _Capture,
 ) -> None:
-    monkeypatch.setattr(
-        "zarabot.broker.client.money_to_decimal",
-        lambda _money: Decimal("7.25"),
-        raising=False,
-    )
+    """Commission is read from the order response, per spec §4 broker.client.
+
+    Asserts the converted VALUE, not which helper converts it. The previous
+    version monkeypatched money_to_decimal and asserted the stub's return, so
+    it pinned an implementation detail while stubbing out the conversion it
+    claimed to cover — it would have passed against an arithmetically wrong
+    converter, and failed against a correct one that used a different helper.
+    """
     posted = await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
-    assert posted.commission == Decimal("7.25")
+    assert posted.commission == Decimal("0.5")
     state = await get_order_state("key-1")
-    assert state.commission == Decimal("7.25")
+    assert state.commission == Decimal("0.5")
 
 
 @pytest.mark.asyncio

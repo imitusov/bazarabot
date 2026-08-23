@@ -25,7 +25,7 @@ from t_tech.invest.schemas import (
     StopOrderStatusOption,
     StopOrderType,
 )
-from t_tech.invest.utils import decimal_to_quotation, money_to_decimal
+from t_tech.invest.utils import decimal_to_quotation
 
 from zarabot import clock, config
 from zarabot.models import (
@@ -184,7 +184,10 @@ def _decimal_money(raw: object | None) -> Decimal:
 def _executed_commission(raw: object | None) -> Decimal | None:
     if raw is None:
         return None
-    return money_to_decimal(raw)
+    # _as_decimal, like the money and quote converters beside it, reads
+    # units/nano directly. money_to_decimal wants an SDK MoneyProtocol, which
+    # this module deliberately does not thread through its own helpers.
+    return _as_decimal(raw)
 
 
 def _decimal_quote(raw: object | None) -> Decimal:

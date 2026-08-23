@@ -22,12 +22,23 @@ RELAXED = 70.0
 RELAXED_PREFIXES = ("zarabot/app/",)
 DEFAULT = 80.0
 
+# Modules already below the default when per-module floors were introduced.
+# Recorded at their real value so the gate ratchets: they may improve, they may
+# not get worse, and the deficiency is visible here instead of being hidden by
+# a global average that the rest of the project pays for. See issue #30.
+KNOWN_BELOW = {
+    "zarabot/broker/client.py": 74.0,
+    "zarabot/pnl.py": 69.0,
+}
+
 data = json.loads(pathlib.Path("coverage.json").read_text(encoding="utf-8"))
 failures = []
 for path, entry in sorted(data["files"].items()):
     pct = entry["summary"]["percent_covered"]
     if path in STRICT_MODULES:
         floor, label = STRICT, "money-path"
+    elif path in KNOWN_BELOW:
+        floor, label = KNOWN_BELOW[path], "ratchet, see #30"
     elif path.startswith(RELAXED_PREFIXES):
         floor, label = RELAXED, "orchestration"
     else:
