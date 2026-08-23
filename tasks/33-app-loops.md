@@ -31,7 +31,30 @@ Module **33** of 39 in `dependency-order.md`. Everything before it is complete a
 Steps 3 and 4 running before step 5 is what implements the brief's
 halt-blocks-entries-only rule, and their order is binding.
 
-**`async run(ctx) → None`** — schedules the trading cycle, the daily rollover, the commission backfill (at rollover, and immediately before the weekly report so the report is never composed from figures a pending commission would move), the nightly backup, the weekly report, and the heartbeat. A failure in one task must never terminate another.
+**`async run(ctx) → None`** — **the sole owner of composition.** Every
+long-running task in the system is started here and nowhere else, and this list
+is exhaustive:
+
+1. the trading cycle
+2. the daily rollover
+3. **the trading-schedule refresh** (see `market.session`)
+4. the commission backfill — at rollover, and immediately before the weekly
+   report so the report is never composed from figures a pending commission
+   would move
+5. the nightly backup
+6. the weekly report
+7. the heartbeat
+8. **the Telegram command listener**, via
+   `telegram.commands.build_application()`
+
+A module whose entry point appears in no list is dead code that passes its own
+tests. `telegram.commands.build_application` was defined, covered by tests, and
+never called — so `/halt` did not exist at runtime and the kill switch was
+unreachable, while every test was green. Anything added to this system that must
+run continuously is added to this list in the same change, or it does not run.
+
+A failure in one task must never terminate another; each is supervised and
+restarted with backoff. A failure in one task must never terminate another.
 
 ## Relevant error handling rules
 
@@ -66,6 +89,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- `run` starts the Telegram command listener, and a `/halt` sent afterwards
+  halts trading (proves the kill switch exists at runtime — the acceptance
+  criterion that a defined-but-uncalled listener left unmeetable while every
+  unit test passed).
+- An exhausted schedule cache alerts rather than quietly reporting closed
+  (proves silent non-trading is detected).
 - A shutdown signal during an in-flight order submission waits for a known state
   before exiting (proves the graceful-shutdown contract).
 - Shutdown neither cancels nor liquidates positions (proves restarts have no

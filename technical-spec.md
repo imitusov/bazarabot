@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.16
+**Version:** 1.17
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -416,6 +416,12 @@ it proves.
   is consulted, not the weekday).
 - With the schedule unavailable, reports closed and raises no exception (proves
   the safe default is to not trade).
+- With `now` past the last cached session, `is_open` is False **and**
+  `cache_exhausted` is True (proves an exhausted calendar is distinguishable
+  from a closed market — the difference between a bot resting and a bot that
+  has silently stopped trading).
+- After a rollover refresh, `cache_exhausted` is False again (proves the cadence
+  actually reloads).
 
 **`market.data`**
 - Candles for a watchlist ticker are returned newest-last, timezone-aware
@@ -629,6 +635,12 @@ Additionally, `strategies.ml_model`:
 **`app.loops` / `app.shutdown`**
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- `run` starts the Telegram command listener, and a `/halt` sent afterwards
+  halts trading (proves the kill switch exists at runtime — the acceptance
+  criterion that a defined-but-uncalled listener left unmeetable while every
+  unit test passed).
+- An exhausted schedule cache alerts rather than quietly reporting closed
+  (proves silent non-trading is detected).
 - A shutdown signal during an in-flight order submission waits for a known state
   before exiting (proves the graceful-shutdown contract).
 - Shutdown neither cancels nor liquidates positions (proves restarts have no
@@ -1109,6 +1121,20 @@ above; must never return a `float`.
 - Returns `False` when the schedule is unavailable — the safe default is not to
   trade.
 
+**`cache_exhausted(now: datetime) → bool`**
+- True when `now` is at or past the last cached session, meaning `is_open` is
+  returning `False` because the bot has run out of calendar rather than because
+  the market is shut.
+- These two states are indistinguishable from `is_open` alone, and conflating
+  them is how a bot stops trading silently: every cycle returns "closed", no
+  error is raised, and the heartbeat keeps reporting health. `app.loops` checks
+  this and alerts.
+
+**Refresh cadence.** The schedule is refreshed at startup **and at every daily
+rollover**, always fetching a horizon longer than the gap between refreshes. A
+cache filled once at startup expires while the process is still running, which
+is the failure this cadence exists to prevent.
+
 **`current_session(now: datetime) → SessionInfo | None`**
 
 **`in_closing_window(now: datetime, minutes: int) → bool`** — true during the final `minutes` of the current session; used only by the maximum-age exit.
@@ -1395,7 +1421,30 @@ Fixed ordering; each step completes before the next begins:
 Steps 3 and 4 running before step 5 is what implements the brief's
 halt-blocks-entries-only rule, and their order is binding.
 
-**`async run(ctx) → None`** — schedules the trading cycle, the daily rollover, the commission backfill (at rollover, and immediately before the weekly report so the report is never composed from figures a pending commission would move), the nightly backup, the weekly report, and the heartbeat. A failure in one task must never terminate another.
+**`async run(ctx) → None`** — **the sole owner of composition.** Every
+long-running task in the system is started here and nowhere else, and this list
+is exhaustive:
+
+1. the trading cycle
+2. the daily rollover
+3. **the trading-schedule refresh** (see `market.session`)
+4. the commission backfill — at rollover, and immediately before the weekly
+   report so the report is never composed from figures a pending commission
+   would move
+5. the nightly backup
+6. the weekly report
+7. the heartbeat
+8. **the Telegram command listener**, via
+   `telegram.commands.build_application()`
+
+A module whose entry point appears in no list is dead code that passes its own
+tests. `telegram.commands.build_application` was defined, covered by tests, and
+never called — so `/halt` did not exist at runtime and the kill switch was
+unreachable, while every test was green. Anything added to this system that must
+run continuously is added to this list in the same change, or it does not run.
+
+A failure in one task must never terminate another; each is supervised and
+restarted with backoff. A failure in one task must never terminate another.
 
 ### `zarabot/app/shutdown.py`
 

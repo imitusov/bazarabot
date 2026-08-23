@@ -38,6 +38,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- `run` starts the Telegram command listener, and a `/halt` sent afterwards
+  halts trading (proves the kill switch exists at runtime — the acceptance
+  criterion that a defined-but-uncalled listener left unmeetable while every
+  unit test passed).
+- An exhausted schedule cache alerts rather than quietly reporting closed
+  (proves silent non-trading is detected).
 - A shutdown signal during an in-flight order submission waits for a known state
   before exiting (proves the graceful-shutdown contract).
 - Shutdown neither cancels nor liquidates positions (proves restarts have no

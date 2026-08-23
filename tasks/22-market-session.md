@@ -24,6 +24,20 @@ Module **22** of 39 in `dependency-order.md`. Everything before it is complete a
 - Returns `False` when the schedule is unavailable — the safe default is not to
   trade.
 
+**`cache_exhausted(now: datetime) → bool`**
+- True when `now` is at or past the last cached session, meaning `is_open` is
+  returning `False` because the bot has run out of calendar rather than because
+  the market is shut.
+- These two states are indistinguishable from `is_open` alone, and conflating
+  them is how a bot stops trading silently: every cycle returns "closed", no
+  error is raised, and the heartbeat keeps reporting health. `app.loops` checks
+  this and alerts.
+
+**Refresh cadence.** The schedule is refreshed at startup **and at every daily
+rollover**, always fetching a horizon longer than the gap between refreshes. A
+cache filled once at startup expires while the process is still running, which
+is the failure this cadence exists to prevent.
+
 **`current_session(now: datetime) → SessionInfo | None`**
 
 **`in_closing_window(now: datetime, minutes: int) → bool`** — true during the final `minutes` of the current session; used only by the maximum-age exit.
@@ -48,6 +62,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   is consulted, not the weekday).
 - With the schedule unavailable, reports closed and raises no exception (proves
   the safe default is to not trade).
+- With `now` past the last cached session, `is_open` is False **and**
+  `cache_exhausted` is True (proves an exhausted calendar is distinguishable
+  from a closed market — the difference between a bot resting and a bot that
+  has silently stopped trading).
+- After a rollover refresh, `cache_exhausted` is False again (proves the cadence
+  actually reloads).
 
 ## Expected output
 
