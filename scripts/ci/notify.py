@@ -25,7 +25,11 @@ if not token or not chat:
 
 title = sys.argv[1] if len(sys.argv) > 1 else "Pipeline"
 path = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else None
-body = path.read_text(encoding="utf-8") if path and path.exists() else "(no digest produced)"
+body = (
+    path.read_text(encoding="utf-8")
+    if path and path.exists()
+    else "(no digest produced)"
+)
 
 text = f"*{title}*\n\n{body}"
 if len(text) > LIMIT:
