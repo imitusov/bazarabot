@@ -16,7 +16,16 @@ Module **22** of 39 in `dependency-order.md`. Everything before it is complete a
 
 ### `zarabot/market/session.py`
 
-**`async refresh(days: int) → None`** — caches the schedule; called at startup and once per trading day.
+**`async refresh(days: int) → None`**
+- Caches the schedule. Called at startup and once per trading day.
+- **A response containing no trading sessions is treated as unavailable**, per
+  error rule 10: the cache is left as it was, and the owner is alerted once. It
+  must never replace a populated cache with an empty one, and it must never
+  report success having stored nothing — a schedule fetch that "succeeds" with
+  no sessions leaves the bot unable to trade with nothing raised.
+- Does not raise on an unavailable schedule. Aborting startup over a transient
+  broker blip is worse than starting and reporting the condition, which
+  `cache_exhausted` then keeps visible on every cycle until it is fixed.
 
 **`is_open(now: datetime) → bool`**
 - True when `now` falls within a main session, inclusive of the open instant and
@@ -28,6 +37,17 @@ Module **22** of 39 in `dependency-order.md`. Everything before it is complete a
 - True when `now` is at or past the last cached session, meaning `is_open` is
   returning `False` because the bot has run out of calendar rather than because
   the market is shut.
+- **True when the cache is empty.** An empty cache is the strongest form of
+  having run out of calendar: there is no calendar at all. Reporting `False`
+  there is the failure this function exists to detect, in its worst form — not a
+  cache that expired, but one that never filled, with `is_open` false every
+  cycle, nothing raised, and the heartbeat still reporting health.
+- This relies on `app.startup` step 5 refreshing the schedule **before**
+  `app.loops.run()` starts the trading cycle. Without that ordering an empty
+  cache would be the normal state for the first moments of a run and this
+  function would alert on every start. The ordering is contractual, not
+  incidental; a change that moves the first refresh after `run()` must revisit
+  this contract.
 - These two states are indistinguishable from `is_open` alone, and conflating
   them is how a bot stops trading silently: every cycle returns "closed", no
   error is raised, and the heartbeat keeps reporting health. `app.loops` checks
@@ -48,8 +68,11 @@ is the failure this cadence exists to prevent.
 
 From `technical-spec.md` §8. Handle each exactly as written.
 
-10. **Trading schedule unavailable** → treat the market as closed, WARNING, alert
-    once. The safe default is not to trade.
+10. **Trading schedule unavailable, or returned with no trading sessions** →
+    treat the market as closed, WARNING, alert once, and leave any existing
+    cache intact. The safe default is not to trade. An empty result is a form of
+    unavailable, not a valid schedule: treating it as success stores a cache
+    that makes `is_open` false forever with no error anywhere.
 
 ## Test cases
 
@@ -66,6 +89,11 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   `cache_exhausted` is True (proves an exhausted calendar is distinguishable
   from a closed market — the difference between a bot resting and a bot that
   has silently stopped trading).
+- With an **empty** cache, `cache_exhausted` is True (proves the worst case is
+  detected: a cache that never filled, not one that expired).
+- `refresh` receiving a schedule with no trading sessions leaves a previously
+  populated cache intact and alerts (proves an empty response cannot overwrite
+  a good calendar).
 - After a rollover refresh, `cache_exhausted` is False again (proves the cadence
   actually reloads).
 
