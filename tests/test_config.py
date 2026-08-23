@@ -23,6 +23,8 @@ def _env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None = None) -
     for key in (
         "TINVEST_TOKEN",
         "TINVEST_ACCOUNT_ID",
+        "TINVEST_TOKEN_SANDBOX",
+        "TINVEST_ACCOUNT_ID_SANDBOX",
         "TRADING_MODE",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
@@ -168,3 +170,74 @@ def test_unreadable_ml_model_path_raises(
     _env(monkeypatch, {"ML_MODEL_PATH": str(missing)})
     with pytest.raises(ConfigError, match="ML_MODEL_PATH"):
         load()
+
+
+SANDBOX = {
+    "TINVEST_TOKEN_SANDBOX": "sandbox-secret-token",
+    "TINVEST_ACCOUNT_ID_SANDBOX": "sandbox-account-id",
+}
+
+
+def test_sandbox_mode_resolves_the_sandbox_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"TRADING_MODE": "sandbox", **SANDBOX})
+    cfg = load()
+    assert cfg.trading_mode == "sandbox"
+    assert cfg.tinvest_token == "sandbox-secret-token"
+    assert cfg.tinvest_account_id == "sandbox-account-id"
+
+
+def test_live_mode_ignores_the_sandbox_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"TRADING_MODE": "live", **SANDBOX})
+    cfg = load()
+    assert cfg.tinvest_token == "tinvest-secret-token"
+    assert cfg.tinvest_account_id == "account-id"
+
+
+def test_sandbox_mode_falls_back_to_the_base_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"TRADING_MODE": "sandbox"})
+    cfg = load()
+    assert cfg.tinvest_token == "tinvest-secret-token"
+    assert cfg.tinvest_account_id == "account-id"
+
+
+def test_empty_sandbox_override_falls_back_rather_than_authenticating_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(
+        monkeypatch,
+        {
+            "TRADING_MODE": "sandbox",
+            "TINVEST_TOKEN_SANDBOX": "   ",
+            "TINVEST_ACCOUNT_ID_SANDBOX": "",
+        },
+    )
+    cfg = load()
+    assert cfg.tinvest_token == "tinvest-secret-token"
+    assert cfg.tinvest_account_id == "account-id"
+
+
+def test_sandbox_token_is_overridden_independently_of_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(
+        monkeypatch,
+        {"TRADING_MODE": "sandbox", "TINVEST_TOKEN_SANDBOX": "sandbox-secret-token"},
+    )
+    cfg = load()
+    assert cfg.tinvest_token == "sandbox-secret-token"
+    assert cfg.tinvest_account_id == "account-id"
+
+
+def test_config_string_form_hides_the_sandbox_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"TRADING_MODE": "sandbox", **SANDBOX})
+    cfg = load()
+    text = str(cfg) + repr(cfg)
+    assert "sandbox-secret-token" not in text
