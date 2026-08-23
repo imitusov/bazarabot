@@ -11,10 +11,12 @@ from zarabot.broker.client import (
     get_trading_schedule,
 )
 from zarabot.models import SessionInfo
+from zarabot.telegram.notifier import alert
 
 _LOG = logging.getLogger(__name__)
 _cache: list[SessionInfo] | None = None
 _alerted = False
+_UNAVAILABLE = "trading schedule unavailable; treating market as closed"
 
 
 def _reject_naive(now: datetime) -> None:
@@ -22,15 +24,30 @@ def _reject_naive(now: datetime) -> None:
         raise ValueError("datetime must be timezone-aware")
 
 
+def _has_trading_sessions(sessions: list[SessionInfo]) -> bool:
+    return any(session.is_trading_day for session in sessions)
+
+
+async def _report_unavailable() -> None:
+    global _alerted
+    if _alerted:
+        return
+    _LOG.warning(_UNAVAILABLE)
+    await alert(_UNAVAILABLE)
+    _alerted = True
+
+
 async def refresh(days: int) -> None:
-    global _cache, _alerted
+    global _cache
     try:
-        _cache = await get_trading_schedule(days)
+        fetched = await get_trading_schedule(days)
     except (BrokerUnavailable, BrokerRateLimited):
-        _cache = None
-        if not _alerted:
-            _LOG.warning("trading schedule unavailable; treating market as closed")
-            _alerted = True
+        await _report_unavailable()
+        return
+    if not _has_trading_sessions(fetched):
+        await _report_unavailable()
+        return
+    _cache = fetched
 
 
 def current_session(now: datetime) -> SessionInfo | None:
@@ -53,10 +70,14 @@ def is_open(now: datetime) -> bool:
 def cache_exhausted(now: datetime) -> bool:
     _reject_naive(now)
     if not _cache:
-        return False
-    ends = [session.end for session in _cache if session.end is not None]
+        return True
+    ends = [
+        session.end
+        for session in _cache
+        if session.is_trading_day and session.end is not None
+    ]
     if not ends:
-        return False
+        return True
     return now >= max(ends)
 
 

@@ -465,8 +465,9 @@ Cached broker calendar. Closed when the schedule is missing. Never hardcodes
 weekdays.
 
 **`async refresh(days: int) → None`**
-Loads `broker.client.get_trading_schedule`. On `BrokerUnavailable` /
-`BrokerRateLimited`, caches nothing, logs WARNING once (rule 10).
+Loads `broker.client.get_trading_schedule`. Unavailable broker, or a response
+with no trading sessions, leaves any existing cache intact, logs WARNING, and
+alerts once (rule 10). Does not raise.
 
 **`is_open(now: datetime) → bool`**
 True iff `now` is in a trading session, inclusive of `start`, exclusive of
@@ -475,7 +476,7 @@ True iff `now` is in a trading session, inclusive of `start`, exclusive of
 **`cache_exhausted(now: datetime) → bool`**
 True when `now` is at or past the last cached session end, so `is_open` is
 `False` because the calendar has run out rather than because the market is
-shut. `False` when nothing is cached. Raises `ValueError` on naive `now`.
+shut. **True when the cache is empty.** Raises `ValueError` on naive `now`.
 
 **`current_session(now: datetime) → SessionInfo | None`**
 The trading session containing `now`, or `None`.
