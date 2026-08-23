@@ -78,5 +78,25 @@ change.
 
 ## Status
 
-- **v1.17** amends the spec for **F-02** and **F-03**. Tasks `33` and `34`
-  regenerated; re-run them to implement.
+Procedure: `ops/RUNBOOK.md`.
+
+| Batch | Modules | Issues | State |
+|---|---|---|---|
+| 1 | `market.session`, `app.loops` | #2, #3 | **done** — v1.17, `b0d2e4b`, critic clean |
+| 2a | `market.session` | #31 | next — one line, same module as batch 1 |
+| 2 | `config` | #26, part of #15 | |
+| 3 | `db.*` | #20, #29 | |
+| 4 | `risk.sizing`, `risk.gate` | #15, #16 | |
+| 5 | `lifecycle.exits` | #6 | |
+| 6 | `broker.client` | #10, #18, #23 | |
+| 7 | `market.session`, `market.data` | #19, #13 | |
+| 8 | `execution.orders` | #4, #5, #10, #11, #22, #28 | **six issues — the hard one** |
+| 9 | `broker.reconcile` | #7, #11 | |
+| 10 | `pnl` | #9 | |
+| 11 | `ops.backup`, `ops.commissions` | #8, #25 | |
+| 12 | `app.*` | #17, #21, #24, #27 | |
+| 13 | `sandbox.*` | #12, #13, #14 | research only |
+| 14 | `broker.client`, `pnl` | #30 | coverage ratchet |
+
+Closed: #1 (`6f4be32`), #2 and #3 (`b0d2e4b`).
+Opened during the work: #30 (coverage floors), #31 (empty-cache contract gap).
