@@ -702,6 +702,8 @@ of its own behaviour.
 | `TINVEST_ACCOUNT_ID` | Yes | — | The specific brokerage account the bot may trade. Must hold only the allocated capital. |
 | `SSL_TBANK_VERIFY` | No | `true` | Makes the broker SDK use the Russian Trusted Root certificate it ships. Required in practice: the broker's certificate is not signed by an authority the networking library trusts by default, so leaving this off makes every connection fail. |
 | `TRADING_MODE` | No | `live` | `live` or `sandbox`. Selects the broker environment; the code path is otherwise identical. |
+| `TINVEST_TOKEN_SANDBOX` | No | `TINVEST_TOKEN` | Token used when `TRADING_MODE` is `sandbox`. Ignored in live mode. |
+| `TINVEST_ACCOUNT_ID_SANDBOX` | No | `TINVEST_ACCOUNT_ID` | Sandbox account the bot may trade. Sandbox accounts do not exist on the live endpoint, so the live id cannot serve both. Ignored in live mode. |
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Credential for the Telegram bot. |
 | `TELEGRAM_CHAT_ID` | Yes | — | The single chat authorised to command the bot. All others are refused. |
 | `ALLOCATED_CAPITAL` | Yes | — | Capital the bot may deploy, in roubles. Every risk limit is a percentage of this. |

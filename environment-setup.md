@@ -234,6 +234,15 @@ host paths. `SSL_TBANK_VERIFY=true` is required (§4); without it every broker
 call dies in the TLS handshake. Set `TRADING_MODE=sandbox` until the §6
 verification suite has passed against the live-shaped path.
 
+Sandbox is a separate broker environment, not a flag on the live one. Its
+accounts do not exist on the live endpoint, so `TINVEST_ACCOUNT_ID` cannot serve
+both modes — set `TINVEST_ACCOUNT_ID_SANDBOX`, and `TINVEST_TOKEN_SANDBOX` if
+you use a different token there. Both are read only in sandbox mode and both
+fall back to their base variable when left empty, so the live pair stays intact
+across a mode switch. Starting in sandbox without a sandbox account gives
+`GetPortfolio NOT_FOUND 50004` and the rule 15 restart loop, one Telegram alert
+every thirty seconds.
+
 **3. Build and start.**
 
 ```bash

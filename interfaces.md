@@ -113,6 +113,11 @@ range, or a cross-field rule fails. The message names the offending variable.
 `backup_dir: Path`, `log_level: str`, `tz: str`, `ssl_tbank_verify: bool = True`.
 
 **`load() → Config`**
+`tinvest_token` and `tinvest_account_id` are resolved for the mode in force: in
+`sandbox` they come from `TINVEST_TOKEN_SANDBOX` and `TINVEST_ACCOUNT_ID_SANDBOX`,
+each falling back to its base variable when unset or blank; live ignores both.
+Callers see one token and one account id and must not branch on `trading_mode`
+to pick credentials.
 Reads the brief's environment-variable table. Applies documented defaults to
 non-risk optional variables. `SSL_TBANK_VERIFY` defaults to `true`; only the
 strings `true` and `false` are accepted. Never substitutes a default for missing

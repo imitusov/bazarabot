@@ -60,7 +60,7 @@ def test_complete_environment_produces_populated_config(
 ) -> None:
     _env(monkeypatch)
     cfg = load()
-    assert cfg.tinvest_account_id == "account-id"
+    assert cfg.tinvest_account_id == REQUIRED["TINVEST_ACCOUNT_ID"]
     assert cfg.watchlist == ("SBER", "GAZP", "LKOH")
     assert cfg.position_size_pct == Decimal("10")
     assert cfg.trading_mode == "live"
@@ -184,8 +184,8 @@ def test_sandbox_mode_resolves_the_sandbox_credentials(
     _env(monkeypatch, {"TRADING_MODE": "sandbox", **SANDBOX})
     cfg = load()
     assert cfg.trading_mode == "sandbox"
-    assert cfg.tinvest_token == "sandbox-secret-token"
-    assert cfg.tinvest_account_id == "sandbox-account-id"
+    assert cfg.tinvest_token == SANDBOX["TINVEST_TOKEN_SANDBOX"]
+    assert cfg.tinvest_account_id == SANDBOX["TINVEST_ACCOUNT_ID_SANDBOX"]
 
 
 def test_live_mode_ignores_the_sandbox_credentials(
@@ -193,8 +193,8 @@ def test_live_mode_ignores_the_sandbox_credentials(
 ) -> None:
     _env(monkeypatch, {"TRADING_MODE": "live", **SANDBOX})
     cfg = load()
-    assert cfg.tinvest_token == "tinvest-secret-token"
-    assert cfg.tinvest_account_id == "account-id"
+    assert cfg.tinvest_token == REQUIRED["TINVEST_TOKEN"]
+    assert cfg.tinvest_account_id == REQUIRED["TINVEST_ACCOUNT_ID"]
 
 
 def test_sandbox_mode_falls_back_to_the_base_credentials(
@@ -202,8 +202,8 @@ def test_sandbox_mode_falls_back_to_the_base_credentials(
 ) -> None:
     _env(monkeypatch, {"TRADING_MODE": "sandbox"})
     cfg = load()
-    assert cfg.tinvest_token == "tinvest-secret-token"
-    assert cfg.tinvest_account_id == "account-id"
+    assert cfg.tinvest_token == REQUIRED["TINVEST_TOKEN"]
+    assert cfg.tinvest_account_id == REQUIRED["TINVEST_ACCOUNT_ID"]
 
 
 def test_empty_sandbox_override_falls_back_rather_than_authenticating_blank(
@@ -218,8 +218,8 @@ def test_empty_sandbox_override_falls_back_rather_than_authenticating_blank(
         },
     )
     cfg = load()
-    assert cfg.tinvest_token == "tinvest-secret-token"
-    assert cfg.tinvest_account_id == "account-id"
+    assert cfg.tinvest_token == REQUIRED["TINVEST_TOKEN"]
+    assert cfg.tinvest_account_id == REQUIRED["TINVEST_ACCOUNT_ID"]
 
 
 def test_sandbox_token_is_overridden_independently_of_the_account(
@@ -227,11 +227,14 @@ def test_sandbox_token_is_overridden_independently_of_the_account(
 ) -> None:
     _env(
         monkeypatch,
-        {"TRADING_MODE": "sandbox", "TINVEST_TOKEN_SANDBOX": "sandbox-secret-token"},
+        {
+            "TRADING_MODE": "sandbox",
+            "TINVEST_TOKEN_SANDBOX": SANDBOX["TINVEST_TOKEN_SANDBOX"],
+        },
     )
     cfg = load()
-    assert cfg.tinvest_token == "sandbox-secret-token"
-    assert cfg.tinvest_account_id == "account-id"
+    assert cfg.tinvest_token == SANDBOX["TINVEST_TOKEN_SANDBOX"]
+    assert cfg.tinvest_account_id == REQUIRED["TINVEST_ACCOUNT_ID"]
 
 
 def test_config_string_form_hides_the_sandbox_token(
@@ -240,4 +243,4 @@ def test_config_string_form_hides_the_sandbox_token(
     _env(monkeypatch, {"TRADING_MODE": "sandbox", **SANDBOX})
     cfg = load()
     text = str(cfg) + repr(cfg)
-    assert "sandbox-secret-token" not in text
+    assert SANDBOX["TINVEST_TOKEN_SANDBOX"] not in text

@@ -183,10 +183,21 @@ def load() -> Config:
         _require(name)
 
     token = _require("TINVEST_TOKEN")
+    account_id = _require("TINVEST_ACCOUNT_ID")
     telegram_token = _require("TELEGRAM_BOT_TOKEN")
     trading_mode = _optional("TRADING_MODE")
     if trading_mode not in {"live", "sandbox"}:
         raise ConfigError("TRADING_MODE is out of range")
+
+    # Sandbox is a separate broker environment, not a flag on the live one: its
+    # accounts do not exist on the live endpoint and are usually reached with a
+    # different token. Resolve the pair for the mode in force, so every other
+    # module still sees exactly one token and one account id. Each override is
+    # independent and falls back to the base value when unset, because the same
+    # token often works against both endpoints while the account id never does.
+    if trading_mode == "sandbox":
+        token = _raw("TINVEST_TOKEN_SANDBOX") or token
+        account_id = _raw("TINVEST_ACCOUNT_ID_SANDBOX") or account_id
 
     allocated = _decimal("ALLOCATED_CAPITAL", _require("ALLOCATED_CAPITAL"))
     if allocated <= 0:
@@ -221,7 +232,7 @@ def load() -> Config:
 
     return Config(
         tinvest_token=token,
-        tinvest_account_id=_require("TINVEST_ACCOUNT_ID"),
+        tinvest_account_id=account_id,
         trading_mode=trading_mode,
         telegram_bot_token=telegram_token,
         telegram_chat_id=_int("TELEGRAM_CHAT_ID", _require("TELEGRAM_CHAT_ID")),
