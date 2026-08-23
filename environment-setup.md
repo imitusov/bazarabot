@@ -243,6 +243,16 @@ across a mode switch. Starting in sandbox without a sandbox account gives
 `GetPortfolio NOT_FOUND 50004` and the rule 15 restart loop, one Telegram alert
 every thirty seconds.
 
+A sandbox token does not come with an account. Open and fund one with:
+
+```bash
+set -a && source .env && set +a && .venv/bin/python scripts/open_sandbox_account.py
+```
+
+It lists what already exists rather than opening a duplicate, is hard-wired to
+the sandbox endpoint so it cannot reach the live account, and prints the
+`TINVEST_ACCOUNT_ID_SANDBOX=` line to paste.
+
 **3. Build and start.**
 
 ```bash
