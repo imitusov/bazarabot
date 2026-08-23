@@ -1,0 +1,19 @@
+# VPS deployment. Runs a published image by digest rather than building on the
+# box: the thing that was tested is the thing that runs, and a rollback is one
+# digest away. Local development still uses docker-compose.yml, which builds.
+services:
+  zarabot:
+    image: ${IMAGE_REF:?set IMAGE_REF to an image digest}
+    container_name: zarabot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Europe/Moscow
+    volumes:
+      - /opt/zarabot/data:/data
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,29 +1,26 @@
 name: Implement
 
-# Stage 2. Runs only after a spec amendment has been reviewed and merged, so
-# Composer implements against a contract a human agreed to.
-#
-# Note what is NOT here: no step splits work into tasks. scripts/make_tasks.py
-# already generates 39 self-contained task files from the spec, deterministically.
-# Putting a model in front of that replaces a reproducible step with a guess.
+# Stage 2. Daily: pick up one ready task, implement it test-first, run every
+# check, open a PR. One task per run, deliberately - two agents editing
+# interfaces.md in the same window conflict, and a failure is easier to read
+# when only one thing changed.
 on:
+  schedule:
+    - cron: "0 6 * * 1-5"      # 06:00 UTC weekdays = 09:00 MSK, before the open
   workflow_dispatch:
     inputs:
       task:
-        description: "Task file, e.g. 26-execution-orders"
-        required: true
-      issue:
-        description: Issue this closes
+        description: "Task file stem, e.g. 26-execution-orders (blank = pick the next spec:ready issue)"
         required: false
 
 concurrency:
-  group: implement-${{ github.event.inputs.task }}
+  group: implement
   cancel-in-progress: false
 
 jobs:
   implement:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: write
       pull-requests: write
@@ -31,70 +28,98 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Choose the task
+        id: pick
+        run: |
+          if [ -n "${{ github.event.inputs.task }}" ]; then
+            echo "task=${{ github.event.inputs.task }}" >> "$GITHUB_OUTPUT"
+            echo "issue=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # Lowest-numbered ready issue, so severity ordering is yours to set
+          NUM=$(gh issue list --label spec:ready --state open \
+                 --json number --jq 'sort_by(.number)|.[0].number // empty')
+          if [ -z "$NUM" ]; then
+            echo "nothing labelled spec:ready"; echo "task=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "issue=$NUM" >> "$GITHUB_OUTPUT"
+          # The issue body must name its task file; the audit prompt writes it.
+          TASK=$(gh issue view "$NUM" --json body --jq .body \
+                 | grep -oE 'tasks/[0-9]+[a-z]?-[a-z0-9_-]+' | head -1 | sed 's|tasks/||')
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Nothing to do
+        if: steps.pick.outputs.task == ''
+        run: echo "No ready task. Exiting cleanly."
+
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+        if: steps.pick.outputs.task != ''
+        with: { python-version: "3.12" }
 
       - name: Install
+        if: steps.pick.outputs.task != ''
         run: |
           pip install -q vendor/t_tech_investments-1.49.1-py3-none-any.whl
           pip install -q -r requirements.lock
 
       - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+        if: steps.pick.outputs.task != ''
+        with: { node-version: "20" }
 
       - name: Install Cursor CLI
+        if: steps.pick.outputs.task != ''
         run: curl https://cursor.com/install -fsS | bash && echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
 
-      # Restricted autonomy, as Cursor's own CI guidance recommends: the agent
-      # edits files, the workflow does everything irreversible.
-      - name: Composer implements the task
+      - name: Composer implements, test-first
+        if: steps.pick.outputs.task != ''
         run: |
-          cursor-agent -p "$(cat <<'PROMPT'
-          Implement the task in tasks/${{ github.event.inputs.task }}.md.
-
-          Read AGENTS.md, the AGENTS.md in the directory you will edit, and
-          interfaces.md first.
-
-          TEST-FIRST, and it is checkable afterwards: write the test file from
-          the task's test cases, run it, confirm it FAILS, then implement until
-          green. Do not weaken a test to make it pass.
-
-          Modify no module other than the one in the task. Do not edit
-          technical-spec.md — the contract is already agreed. If the contract
-          cannot be satisfied, stop and write why to /tmp/blocked.md.
-
-          When green, append the module's public signatures to interfaces.md.
-          PROMPT
-          )" --model composer-1 --force
+          cursor-agent -p "Implement tasks/${{ steps.pick.outputs.task }}.md.
+          Read AGENTS.md, the AGENTS.md in the directory you edit, and interfaces.md first.
+          Write the test file FIRST from the task's test cases, run it, confirm it FAILS,
+          then implement until green. Never weaken a test to make it pass.
+          Modify no module other than this one. Do not edit technical-spec.md.
+          If the contract cannot be satisfied, stop and write why to /tmp/blocked.md.
+          When green, append public signatures to interfaces.md." \
+            --model composer-1 --force
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
 
-      - name: Stop if the agent was blocked
+      - name: Blocked on a contract conflict
+        if: steps.pick.outputs.task != '' && hashFiles('/tmp/blocked.md') != ''
         run: |
-          if [ -f /tmp/blocked.md ]; then
-            echo "::error::Agent stopped on a contract conflict"; cat /tmp/blocked.md; exit 1
-          fi
+          gh issue comment "${{ steps.pick.outputs.issue }}" --body-file /tmp/blocked.md
+          python scripts/ci/notify.py "Implementation blocked" /tmp/blocked.md
+          exit 1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.DEV_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.DEV_TELEGRAM_CHAT_ID }}
 
-      - name: Deterministic gates before anyone reviews this
+      - name: Full checks
+        if: steps.pick.outputs.task != ''
         run: |
           ruff check .
           mypy zarabot
           pytest --cov --cov-report=json -q
           python scripts/ci/check_coverage.py
           python scripts/ci/check_docs.py
+          python scripts/make_tasks.py && git diff --exit-code tasks/
 
-      - name: Open the implementation PR
+      - name: Open the PR
+        if: steps.pick.outputs.task != ''
         run: |
-          git config user.name  "composer[bot]"
+          git config user.name "composer[bot]"
           git config user.email "noreply@github.com"
-          BRANCH="impl/${{ github.event.inputs.task }}"
+          BRANCH="impl/${{ steps.pick.outputs.task }}"
           git checkout -b "$BRANCH"
-          git add -A && git commit -m "Implement ${{ github.event.inputs.task }}"
+          git add -A && git commit -m "Implement ${{ steps.pick.outputs.task }}"
           git push -u origin "$BRANCH"
-          gh pr create --title "Implement ${{ github.event.inputs.task }}" \
-            --body "Implements \`tasks/${{ github.event.inputs.task }}.md\`.${{ github.event.inputs.issue && format(' Closes #{0}.', github.event.inputs.issue) || '' }}" \
-            --label implementation --base main
+          BODY="Implements \`tasks/${{ steps.pick.outputs.task }}.md\`."
+          if [ -n "${{ steps.pick.outputs.issue }}" ]; then
+            BODY="$BODY Closes #${{ steps.pick.outputs.issue }}."
+          fi
+          gh pr create --title "Implement ${{ steps.pick.outputs.task }}" \
+            --body "$BODY" --label implementation --base main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

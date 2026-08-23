@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly check for a new zarabot image
+
+# Hourly, but update.sh refuses outside 02:00-05:00 MSK. The timer is cheap and
+# the decision lives in the script, where the market-hours and in-flight-order
+# checks are.
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

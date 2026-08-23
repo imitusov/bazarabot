@@ -1,0 +1,95 @@
+name: Weekly audit
+
+# Stage 1. Sunday: audit the codebase against its own contracts, file findings,
+# and amend the spec for the ones safe to automate.
+on:
+  schedule:
+    - cron: "0 5 * * 0"        # 05:00 UTC Sunday = 08:00 MSK, market closed
+  workflow_dispatch:
+
+concurrency:
+  group: spec-amendment        # shares the lock with per-issue amendments
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --allowedTools "Read,Grep,Glob,Edit,Write,
+            Bash(python scripts/make_tasks.py),
+            Bash(python scripts/ci/check_docs.py),
+            Bash(git log --oneline -50),
+            Bash(gh issue list*),Bash(gh issue create*)"
+          prompt: |
+            Weekly audit of this repository. Read AGENTS.md first.
+
+            PART 1 — FIND. Audit the code against technical-spec.md. Look for
+            the failure modes that pass tests:
+              - a function built but never called by anything
+              - a contract satisfied vacuously (a value never obtained, so a
+                rule about never estimating it is trivially true)
+              - a two-valued discriminator handled as if it had one value
+              - a limit that can never bind
+              - state mutated by more than one owner
+              - an alert path that reaches a log instead of the owner
+            Check open issues first with `gh issue list` and do not duplicate.
+            File each new finding with `gh issue create`, labelled
+            severity:blocking|critical|serious|limit and area:<area>. Include
+            file:line evidence. A finding without evidence is a guess: drop it.
+
+            PART 2 — AMEND. For findings labelled severity:limit ONLY, amend
+            technical-spec.md: fix the contract, add the test contract cases
+            that would have caught it, add an error rule if a failure mode is
+            uncovered, bump the version, then run `python scripts/make_tasks.py`.
+
+            Do NOT amend the spec for severity:serious, critical or blocking, or
+            for anything touching area:money or area:risk. Those need a human to
+            read the contract change before code is written against it. File
+            them and stop.
+
+            PART 3 — REPORT. Write /tmp/digest.md, for a non-technical read:
+            for each finding, three short paragraphs headed
+            "Problem", "What was done", "How this is prevented in future".
+            The third must name the concrete mechanism — a test contract case,
+            an error rule, a CI check — not an intention.
+
+      - name: Open the amendment PR
+        id: pr
+        run: |
+          git config user.name "weekly-audit[bot]"
+          git config user.email "noreply@github.com"
+          if git diff --quiet; then
+            echo "no spec changes"; echo "opened=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          BRANCH="spec/audit-$(date +%Y-%m-%d)"
+          git checkout -b "$BRANCH"
+          git add -A && git commit -m "spec: weekly audit $(date +%Y-%m-%d)"
+          git push -u origin "$BRANCH"
+          gh pr create --title "spec: weekly audit $(date +%Y-%m-%d)" \
+            --body-file /tmp/digest.md --label spec-amendment --base main
+          echo "opened=true" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send the digest
+        if: always()
+        run: python scripts/ci/notify.py "Weekly audit" /tmp/digest.md
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.DEV_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.DEV_TELEGRAM_CHAT_ID }}

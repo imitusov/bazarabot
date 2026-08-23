@@ -1,0 +1,14 @@
+[Unit]
+Description=Check for a new zarabot image and deploy it if it is safe to do so
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/zarabot/app
+Environment=REPO_DIR=/opt/zarabot/app
+Environment=DATA_DIR=/opt/zarabot/data
+Environment=IMAGE=ghcr.io/imitusov/bazarabot
+ExecStart=/opt/zarabot/app/scripts/deploy/update.sh
+StandardOutput=journal
+StandardError=journal
