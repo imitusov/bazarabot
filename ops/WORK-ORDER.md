@@ -83,13 +83,13 @@ Procedure: `ops/RUNBOOK.md`.
 | Batch | Modules | Issues | State |
 |---|---|---|---|
 | 1 | `market.session`, `app.loops` | #2, #3 | **done** — v1.17, `b0d2e4b`, critic clean |
-| 2a | `market.session` | #31 | next — one line, same module as batch 1 |
-| 2 | `config` | #26, part of #15 | |
+| 2a | `market.session` | #31 | **done** — v1.18, `4272cfb`, critic clean but for #32 |
+| 2 | `config` | #26, part of #15 | next |
 | 3 | `db.*` | #20, #29 | |
 | 4 | `risk.sizing`, `risk.gate` | #15, #16 | |
 | 5 | `lifecycle.exits` | #6 | |
 | 6 | `broker.client` | #10, #18, #23 | |
-| 7 | `market.session`, `market.data` | #19, #13 | |
+| 7 | `market.session`, `market.data` | #19, #13, **#32** | |
 | 8 | `execution.orders` | #4, #5, #10, #11, #22, #28 | **six issues — the hard one** |
 | 9 | `broker.reconcile` | #7, #11 | |
 | 10 | `pnl` | #9 | |
@@ -98,5 +98,12 @@ Procedure: `ops/RUNBOOK.md`.
 | 13 | `sandbox.*` | #12, #13, #14 | research only |
 | 14 | `broker.client`, `pnl` | #30 | coverage ratchet |
 
-Closed: #1 (`6f4be32`), #2 and #3 (`b0d2e4b`).
-Opened during the work: #30 (coverage floors), #31 (empty-cache contract gap).
+Closed: #1 (`6f4be32`), #2 and #3 (`b0d2e4b`), #31 (`4272cfb`).
+Opened during the work: #30 (coverage floors), #31 (empty-cache contract gap),
+#32 (alert latch never resets).
+
+**Three of the four issues opened during this work came from the checks, not
+from reading code**: #30 from the per-module coverage floors, #31 and #32 from
+Contract Critic runs on code that passed every test. That is the loop paying for
+itself — each was found in the batch that created or touched it, rather than in
+production months later.
