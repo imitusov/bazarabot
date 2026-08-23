@@ -837,3 +837,131 @@ async def test_weekly_backfills_immediately_before_report(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls.index("backfill") < calls.index("weekly")
+
+
+async def test_run_starts_telegram_listener_and_halt_stops_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import run, trading_cycle
+    from zarabot.models import HaltReason
+    from zarabot.telegram import commands as commands_mod
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    listener_started = asyncio.Event()
+    halted_flag = False
+
+    class _App:
+        async def initialize(self) -> None:
+            return None
+
+        async def start(self) -> None:
+            listener_started.set()
+
+        async def stop(self) -> None:
+            return None
+
+        async def shutdown(self) -> None:
+            return None
+
+        async def run_polling(self, *args: object, **kwargs: object) -> None:
+            listener_started.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(loops, "build_application", _App)
+
+    async def _is_halted() -> bool:
+        return halted_flag
+
+    async def _persist(reason: HaltReason, detail: str, at: datetime) -> None:
+        nonlocal halted_flag
+        halted_flag = True
+
+    async def _reply(update: object, text: str) -> None:
+        return None
+
+    monkeypatch.setattr(loops, "is_halted", _is_halted)
+    monkeypatch.setattr(commands_mod, "persist_halt", _persist)
+    monkeypatch.setattr(commands_mod, "_authorised", lambda update: True)
+    monkeypatch.setattr(commands_mod, "_reply", _reply)
+    monkeypatch.setattr(commands_mod, "now", lambda: NOW)
+
+    async def _trade(_ctx: AppContext) -> None:
+        return None
+
+    monkeypatch.setattr(loops, "trading_cycle", _trade)
+    loops._backed_up_on = NOW.date()
+    loops._heartbeat_on = NOW.date()
+    loops._weekly_on = NOW.date()
+    loops._rolled_on = NOW.date()
+
+    real_sleep = asyncio.sleep
+
+    async def _yield(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _yield)
+    task = asyncio.create_task(run(_ctx(strategies=(_BuyStrategy(),))))
+    for _ in range(80):
+        await real_sleep(0)
+        if listener_started.is_set():
+            break
+    assert listener_started.is_set()
+
+    class _Chat:
+        id = 1
+
+    class _Message:
+        async def reply_text(self, text: str, **kwargs: object) -> None:
+            return None
+
+    class _Update:
+        effective_chat = _Chat()
+        message = _Message()
+
+    await commands_mod.halt(_Update(), None)  # type: ignore[arg-type]
+    monkeypatch.setattr(loops, "trading_cycle", trading_cycle)
+
+    candle_calls: list[str] = []
+
+    async def _candles(
+        tickers: list[str], lookback: int, now: datetime
+    ) -> dict[str, list[Candle]]:
+        candle_calls.append("candles")
+        return {}
+
+    monkeypatch.setattr(loops, "candles_for_watchlist", _candles)
+    await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert candle_calls == []
+    assert halted_flag is True
+
+
+async def test_exhausted_schedule_cache_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    async def _price(figi: str) -> Decimal:
+        calls.append(f"price:{figi}")
+        return Decimal("100")
+
+    monkeypatch.setattr(loops, "is_open", lambda moment: False)
+    monkeypatch.setattr(loops, "cache_exhausted", lambda moment: True)
+    monkeypatch.setattr(loops, "alert", _alert)
+    monkeypatch.setattr(loops, "get_last_price", _price)
+    await trading_cycle(_ctx())
+    assert alerts
+    assert calls == []
