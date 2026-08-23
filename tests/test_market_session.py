@@ -41,9 +41,16 @@ def _holiday() -> SessionInfo:
 
 
 @pytest.fixture(autouse=True)
-def _reset_cache() -> None:
+def _reset_cache(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     session_mod._cache = None
     session_mod._alerted = False
+    alerts: list[str] = []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(session_mod, "alert", _alert, raising=False)
+    return alerts
 
 
 @pytest.fixture
@@ -87,6 +94,10 @@ async def test_unavailable_schedule_is_closed_without_raising(
 
 async def test_never_refreshed_is_closed() -> None:
     assert is_open(INSIDE) is False
+
+
+async def test_empty_cache_is_exhausted() -> None:
+    assert cache_exhausted(INSIDE) is True
 
 
 async def test_current_session_and_closing_window(schedule: None) -> None:
@@ -137,3 +148,30 @@ async def test_rollover_refresh_clears_cache_exhausted(
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _rollover)
     await refresh(7)
     assert cache_exhausted(past_last) is False
+
+
+async def test_empty_schedule_leaves_populated_cache_intact(
+    schedule: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _empty(days: int) -> list[SessionInfo]:
+        return []
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _empty)
+    await refresh(7)
+    assert is_open(INSIDE) is True
+    assert current_session(INSIDE) is not None
+
+
+async def test_empty_schedule_alerts_once(
+    _reset_cache: list[str],
+    schedule: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _empty(days: int) -> list[SessionInfo]:
+        return []
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _empty)
+    await refresh(7)
+    await refresh(7)
+    assert len(_reset_cache) == 1
