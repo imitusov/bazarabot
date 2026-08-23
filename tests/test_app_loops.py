@@ -200,6 +200,25 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     async def _cooldown(*_a: object, **_k: object) -> bool:
         return False
 
+    async def _refresh(days: int) -> None:
+        calls.append("schedule_refresh")
+
+    class _IdleTelegram:
+        async def initialize(self) -> None:
+            return None
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        async def shutdown(self) -> None:
+            return None
+
+        async def run_polling(self, *args: object, **kwargs: object) -> None:
+            await asyncio.Event().wait()
+
     monkeypatch.setattr(loops, "get_last_price", _price)
     monkeypatch.setattr(loops, "list_stop_orders", _stops)
     monkeypatch.setattr(loops, "get_portfolio", _portfolio)
@@ -217,6 +236,11 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr(loops, "close_position", _none)
     monkeypatch.setattr(loops, "close_executed_stop", _none)
     monkeypatch.setattr(loops, "backfill", _backfill)
+    monkeypatch.setattr(loops, "refresh", _refresh)
+    monkeypatch.setattr(loops, "build_application", _IdleTelegram)
+    monkeypatch.setattr(loops, "cache_exhausted", lambda moment: False)
+    loops._cache_exhausted_alerted = False
+    loops._refreshed_on = None
 
 
 async def test_session_closed_makes_no_market_data_call(
@@ -843,7 +867,6 @@ async def test_run_starts_telegram_listener_and_halt_stops_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from zarabot.app.loops import run, trading_cycle
-    from zarabot.models import HaltReason
     from zarabot.telegram import commands as commands_mod
 
     calls: list[str] = []

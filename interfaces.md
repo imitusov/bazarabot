@@ -691,12 +691,14 @@ return; else fetch candles, evaluate strategies, gate, record, and open
 approved entries.
 
 **`async run(ctx: AppContext) → None`**
-Schedules the trading cycle, daily rollover at session open, commission
-`backfill` (after rollover, and immediately before the weekly report so the
-report is never composed from figures a pending commission would move), nightly
-backup with 30-day prune, Sunday 12:00 Moscow weekly report, and a daily
-heartbeat. Each task is restarted with exponential backoff after an unhandled
-exception.
+Sole owner of composition. Starts the trading cycle, daily rollover, trading-
+schedule `refresh`, commission `backfill` (after rollover, and immediately
+before the weekly report), nightly backup with 30-day prune, Sunday 12:00
+Moscow weekly report, daily heartbeat, and the Telegram command listener via
+`telegram.commands.build_application`. Closed-session cycles call
+`cache_exhausted` and alert when the calendar has run out, so exhaustion is
+not mistaken for a quiet close. Each task is restarted with exponential
+backoff after an unhandled exception.
 
 ## `zarabot.app.shutdown`
 

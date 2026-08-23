@@ -33,7 +33,7 @@ from zarabot.execution.orders import (
 )
 from zarabot.lifecycle.exits import evaluate
 from zarabot.market.data import candles_for_watchlist
-from zarabot.market.session import current_session, is_open
+from zarabot.market.session import cache_exhausted, current_session, is_open, refresh
 from zarabot.models import (
     HaltReason,
     PortfolioState,
@@ -48,6 +48,7 @@ from zarabot.pnl import daily_loss_pct
 from zarabot.reporter.weekly import send as send_report
 from zarabot.risk.gate import check
 from zarabot.state.halt import halt, is_halted
+from zarabot.telegram.commands import build_application
 from zarabot.telegram.notifier import alert
 
 _LOG = logging.getLogger(__name__)
@@ -63,6 +64,8 @@ _rolled_on: date | None = None
 _backed_up_on: date | None = None
 _heartbeat_on: date | None = None
 _weekly_on: date | None = None
+_refreshed_on: date | None = None
+_cache_exhausted_alerted = False
 
 
 def _poll_seconds(ctx: AppContext) -> float:
@@ -220,8 +223,18 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
 
 async def trading_cycle(ctx: AppContext) -> None:
     """One iteration: session guard, exits, daily-loss halt, then entries."""
+    global _cache_exhausted_alerted
     moment = now()
     if not is_open(moment):
+        if cache_exhausted(moment):
+            if not _cache_exhausted_alerted:
+                _cache_exhausted_alerted = True
+                await alert(
+                    "Trading schedule cache exhausted; is_open is false "
+                    "because the calendar ran out, not because the market is shut."
+                )
+        else:
+            _cache_exhausted_alerted = False
         return
     try:
         await resolve_unfinished(moment)
@@ -286,6 +299,34 @@ async def _weekly_loop(ctx: AppContext) -> None:
         await asyncio.sleep(_poll_seconds(ctx))
 
 
+async def _schedule_refresh_loop(ctx: AppContext) -> None:
+    global _refreshed_on, _cache_exhausted_alerted
+    while True:
+        moment = now()
+        day = moscow_date(moment)
+        if _refreshed_on != day:
+            await refresh(_SCHEDULE_DAYS)
+            _refreshed_on = day
+            _cache_exhausted_alerted = False
+        await asyncio.sleep(_poll_seconds(ctx))
+
+
+async def _telegram_loop() -> None:
+    application = build_application()
+    await application.initialize()
+    await application.start()
+    updater = getattr(application, "updater", None)
+    if updater is not None:
+        await updater.start_polling()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        if updater is not None:
+            await updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+
 async def _heartbeat_loop(ctx: AppContext) -> None:
     global _heartbeat_on
     while True:
@@ -327,13 +368,15 @@ async def _supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
 
 
 async def run(ctx: AppContext) -> None:
-    """Schedule trading, rollover, backfill, backup, weekly report, and heartbeat."""
+    """Sole owner of composition: start every long-running task, nowhere else."""
     global _started_at
     _started_at = now()
     await asyncio.gather(
         _supervise("trading", lambda: _trading_loop(ctx)),
         _supervise("rollover", lambda: _rollover_loop(ctx)),
+        _supervise("schedule", lambda: _schedule_refresh_loop(ctx)),
         _supervise("backup", lambda: _backup_loop(ctx)),
         _supervise("weekly", lambda: _weekly_loop(ctx)),
         _supervise("heartbeat", lambda: _heartbeat_loop(ctx)),
+        _supervise("telegram", _telegram_loop),
     )
