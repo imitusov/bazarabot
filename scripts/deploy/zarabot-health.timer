@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly production health export, ahead of the Sunday audit
+
+[Timer]
+# Saturday 23:00 MSK — before the audit runs at 08:00 MSK Sunday, so the audit
+# always reads fresh behaviour rather than last week's.
+OnCalendar=Sat *-*-* 20:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

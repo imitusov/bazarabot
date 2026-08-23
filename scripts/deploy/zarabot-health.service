@@ -1,0 +1,21 @@
+[Unit]
+Description=Export production health for the weekly audit
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/zarabot/app
+# A fine-grained PAT with contents:write on this repository only. It can write
+# code, which is bad if it leaks - but it cannot touch the broker, and pushing
+# keeps GitHub from holding any credential for this machine.
+EnvironmentFile=/opt/zarabot/.health-token
+ExecStart=/bin/bash -lc '\
+  python3 scripts/deploy/export_health.py --db /opt/zarabot/data/zarabot.db --out ops/health --days 7 && \
+  git add ops/health && \
+  git -c user.name=zarabot-vps -c user.email=noreply@localhost \
+      diff --cached --quiet || \
+  git -c user.name=zarabot-vps -c user.email=noreply@localhost \
+      commit -m "ops: production health $(date -I)" && \
+  git push https://x-access-token:${HEALTH_TOKEN}@github.com/imitusov/bazarabot.git HEAD:ops/health'
+StandardOutput=journal
+StandardError=journal

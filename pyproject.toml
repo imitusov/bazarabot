@@ -35,6 +35,11 @@ select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "DTZ", "S", "RET", "SIM"]
 # for. They are pre-development tooling, not application code.
 "scripts/verify/**" = ["UP", "S", "E501"]
 "scripts/make_tasks.py" = ["UP", "E501"]
+# Host tooling, like scripts/verify: runs on the VPS's system interpreter, and
+# driving `docker compose` as a subprocess is the entire purpose, so S603/S607
+# flag the intent rather than a risk. E501 is allowed for the SQL literals,
+# which are more readable on one line than wrapped.
+"scripts/deploy/**" = ["UP", "S603", "S607", "E501"]
 
 [tool.mypy]
 python_version = "3.12"

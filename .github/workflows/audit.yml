@@ -24,6 +24,15 @@ jobs:
       - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
 
+      # Production behaviour, exported by the VPS on Saturday night. Without it
+      # the audit can only read contracts, and the findings that matter most -
+      # every exit booked as one trigger, commission null on every order, an
+      # equity curve that was never written - are invisible in correct-looking
+      # code.
+      - name: Fetch the production health export
+        run: |
+          git fetch origin ops/health:ops-health 2>/dev/null             && git checkout ops-health -- ops/health             && echo "health export present:" && ls -la ops/health             || echo "::warning::no health export — auditing contracts only, not behaviour"
+
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
 
@@ -38,6 +47,21 @@ jobs:
             Bash(gh issue list*),Bash(gh issue create*)"
           prompt: |
             Weekly audit of this repository. Read AGENTS.md first.
+
+            PART 0 — READ PRODUCTION. If ops/health/latest.json exists, read it
+            first. It is aggregated behaviour from the running bot. Treat these
+            as findings, not curiosities:
+              - one exit trigger dominating the distribution (mis-attribution,
+                not a strategy that only takes profit)
+              - filled_orders_missing_commission > 0 (P&L is silently gross)
+              - stop_ownership_violations > 0 (the invariant is broken live)
+              - daily_snapshots_rows near zero (no equity curve exists)
+              - heartbeats far below expected (the bot was not running)
+              - one rejection_reason dominating (something is blocking every
+                signal, and nobody noticed because it is not an error)
+              - orders_in_flight persistently non-zero (recovery is not resolving)
+            A behavioural finding outranks a stylistic one. State the number you
+            saw in the issue body.
 
             PART 1 — FIND. Audit the code against technical-spec.md. Look for
             the failure modes that pass tests:
