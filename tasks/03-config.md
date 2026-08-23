@@ -22,6 +22,11 @@ Loads and validates every setting once at startup.
 - Reads all variables in the brief's environment-variable table (§18), applies
   defaults, coerces types, and validates.
 - Returns a frozen `Config`.
+- Resolves `tinvest_token` and `tinvest_account_id` for the mode in force: when
+  `TRADING_MODE` is `sandbox`, each is taken from its `*_SANDBOX` variable and
+  falls back to the base variable when that is unset or blank. Live mode ignores
+  the overrides. The rest of the codebase sees one token and one account id and
+  never branches on mode — sandbox remains selected by endpoint alone.
 - Raises `ConfigError` naming the offending variable when: a required variable is
   missing or empty; a numeric value is out of range; `POSITION_SIZE_PCT` exceeds
   `MAX_POSITION_PCT`; `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100;

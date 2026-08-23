@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+
 from zarabot.telegram.notifier import alert
 
 REQUIRED_ENV = {

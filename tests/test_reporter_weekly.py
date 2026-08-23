@@ -9,7 +9,6 @@ from pathlib import Path
 
 import aiosqlite
 import pytest
-from zarabot.reporter.weekly import build, send
 
 from zarabot.db.migrations import apply
 from zarabot.db.signals import record
@@ -22,6 +21,7 @@ from zarabot.models import (
     Signal,
     StopProtection,
 )
+from zarabot.reporter.weekly import build, send
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
 START = date(2026, 3, 16)

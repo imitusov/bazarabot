@@ -8,9 +8,9 @@ from pathlib import Path
 
 import aiosqlite
 import pytest
-from zarabot.ops.backup import prune, run
 
 from zarabot.db.migrations import apply
+from zarabot.ops.backup import prune, run
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
 REQUIRED_ENV = {
