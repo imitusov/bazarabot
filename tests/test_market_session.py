@@ -8,6 +8,7 @@ import pytest
 
 import zarabot.market.session as session_mod
 from zarabot.market.session import (
+    cache_exhausted,
     current_session,
     in_closing_window,
     is_open,
@@ -101,3 +102,38 @@ async def test_next_open_returns_upcoming_session_start(schedule: None) -> None:
     before = datetime(2026, 3, 16, 5, 0, tzinfo=UTC)
     assert next_open(before) == OPEN
     assert next_open(SATURDAY) == OPEN
+
+
+async def test_past_last_cached_session_is_closed_and_cache_exhausted(
+    schedule: None,
+) -> None:
+    past_last = CLOSE + timedelta(seconds=1)
+    assert is_open(past_last) is False
+    assert cache_exhausted(past_last) is True
+    assert is_open(SATURDAY) is False
+    assert cache_exhausted(SATURDAY) is False
+
+
+async def test_rollover_refresh_clears_cache_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _first(days: int) -> list[SessionInfo]:
+        return [_weekday()]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _first)
+    await refresh(7)
+    past_last = CLOSE + timedelta(hours=1)
+    assert cache_exhausted(past_last) is True
+
+    next_open_start = datetime(2026, 3, 17, 6, 50, tzinfo=UTC)
+    next_open_end = datetime(2026, 3, 17, 15, 50, tzinfo=UTC)
+
+    async def _rollover(days: int) -> list[SessionInfo]:
+        return [
+            _weekday(),
+            SessionInfo(start=next_open_start, end=next_open_end, is_trading_day=True),
+        ]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _rollover)
+    await refresh(7)
+    assert cache_exhausted(past_last) is False
