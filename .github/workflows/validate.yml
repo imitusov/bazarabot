@@ -1,0 +1,54 @@
+name: Contract validation
+
+# Stage 3. Reviews the change against its CONTRACT, not against its diff.
+#
+# This distinction is the whole point. Every defect this project has hit -
+# close_position keyed on the trigger instead of the stop owner, commission
+# never fetched at all, telegram.notifier built after the modules that alert,
+# duplicate stops neither adopted nor reported - would pass a diff review. The
+# code matched what the spec said. The spec was wrong, or the wiring was.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+jobs:
+  contract-critic:
+    if: "!github.event.pull_request.draft"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: '--allowedTools "Read,Grep,Glob,Bash(git diff --stat origin/main...HEAD),Bash(git diff origin/main...HEAD),mcp__github_inline_comment__create_inline_comment"'
+          prompt: |
+            Review this pull request against its contract. You do not write code.
+
+            Check, in order:
+            1. Does every signature match technical-spec.md exactly, including `| None`?
+            2. Is every documented exception raised under exactly the stated condition?
+            3. Are the ordering constraints respected — write-then-send,
+               cancel-stop-then-sell, position row before stop order?
+            4. Does a module the spec calls pure do any I/O, read any clock, or
+               touch the database?
+            5. Do the tests test the contract, or do they test the implementation?
+            6. Is any numbered error rule handled differently from section 8?
+            7. Anything logging a token, using float for money, or a naive datetime?
+            8. Is anything built but never called? A function with no caller is
+               the failure mode that passes every test.
+
+            Report findings by severity — CRITICAL if it could move money
+            incorrectly, SIGNIFICANT if it diverges from the contract, MINOR
+            otherwise — quoting the contract line and the code line for each.
+            Post them as inline comments. If you find nothing, say so plainly.

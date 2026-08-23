@@ -1,0 +1,100 @@
+name: Implement
+
+# Stage 2. Runs only after a spec amendment has been reviewed and merged, so
+# Composer implements against a contract a human agreed to.
+#
+# Note what is NOT here: no step splits work into tasks. scripts/make_tasks.py
+# already generates 39 self-contained task files from the spec, deterministically.
+# Putting a model in front of that replaces a reproducible step with a guess.
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task file, e.g. 26-execution-orders"
+        required: true
+      issue:
+        description: Issue this closes
+        required: false
+
+concurrency:
+  group: implement-${{ github.event.inputs.task }}
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install -q vendor/t_tech_investments-1.49.1-py3-none-any.whl
+          pip install -q -r requirements.lock
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Cursor CLI
+        run: curl https://cursor.com/install -fsS | bash && echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
+
+      # Restricted autonomy, as Cursor's own CI guidance recommends: the agent
+      # edits files, the workflow does everything irreversible.
+      - name: Composer implements the task
+        run: |
+          cursor-agent -p "$(cat <<'PROMPT'
+          Implement the task in tasks/${{ github.event.inputs.task }}.md.
+
+          Read AGENTS.md, the AGENTS.md in the directory you will edit, and
+          interfaces.md first.
+
+          TEST-FIRST, and it is checkable afterwards: write the test file from
+          the task's test cases, run it, confirm it FAILS, then implement until
+          green. Do not weaken a test to make it pass.
+
+          Modify no module other than the one in the task. Do not edit
+          technical-spec.md — the contract is already agreed. If the contract
+          cannot be satisfied, stop and write why to /tmp/blocked.md.
+
+          When green, append the module's public signatures to interfaces.md.
+          PROMPT
+          )" --model composer-1 --force
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+
+      - name: Stop if the agent was blocked
+        run: |
+          if [ -f /tmp/blocked.md ]; then
+            echo "::error::Agent stopped on a contract conflict"; cat /tmp/blocked.md; exit 1
+          fi
+
+      - name: Deterministic gates before anyone reviews this
+        run: |
+          ruff check .
+          mypy zarabot
+          pytest --cov --cov-report=json -q
+          python scripts/ci/check_coverage.py
+          python scripts/ci/check_docs.py
+
+      - name: Open the implementation PR
+        run: |
+          git config user.name  "composer[bot]"
+          git config user.email "noreply@github.com"
+          BRANCH="impl/${{ github.event.inputs.task }}"
+          git checkout -b "$BRANCH"
+          git add -A && git commit -m "Implement ${{ github.event.inputs.task }}"
+          git push -u origin "$BRANCH"
+          gh pr create --title "Implement ${{ github.event.inputs.task }}" \
+            --body "Implements \`tasks/${{ github.event.inputs.task }}.md\`.${{ github.event.inputs.issue && format(' Closes #{0}.', github.event.inputs.issue) || '' }}" \
+            --label implementation --base main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
