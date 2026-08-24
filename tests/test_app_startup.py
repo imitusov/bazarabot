@@ -318,3 +318,54 @@ async def test_startup_applies_reported_stop_remedies(
     assert "replace" in env
     assert "adopt" in env
     assert "cancel" in env
+
+
+async def test_ssl_verify_false_alerts_before_broker_call_without_token(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §3.2: running without certificate verification is told to the owner.
+
+    A log line on a server nobody watches is not a security control, so the
+    alert must precede the first broker call — and must never carry the token.
+    """
+    from zarabot.app.startup import start
+
+    monkeypatch.setenv("SSL_TBANK_VERIFY", "false")
+    alerts_before_broker: list[list[str]] = []
+
+    async def _refresh(days: int) -> None:
+        alerts_before_broker.append(
+            [item for item in env if item.startswith("alert:")]
+        )
+        env.append("refresh")
+
+    monkeypatch.setattr("zarabot.app.startup.refresh", _refresh)
+    await start()
+
+    assert alerts_before_broker, "market.session.refresh was never reached"
+    warned = [
+        text
+        for text in alerts_before_broker[0]
+        if "certificate" in text.lower() and "verif" in text.lower()
+    ]
+    assert warned, alerts_before_broker[0]
+    assert os.environ["SSL_TBANK_VERIFY"] == "false"
+    all_alerts = [item for item in env if item.startswith("alert:")]
+    assert all(REQUIRED_ENV["TINVEST_TOKEN"] not in text for text in all_alerts)
+    assert all(REQUIRED_ENV["TELEGRAM_BOT_TOKEN"] not in text for text in all_alerts)
+
+
+async def test_ssl_verify_true_does_not_alert_about_certificates(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alert is the exception, not a line every start emits."""
+    from zarabot.app.startup import start
+
+    monkeypatch.setenv("SSL_TBANK_VERIFY", "true")
+    await start()
+
+    assert not [
+        item
+        for item in env
+        if item.startswith("alert:") and "certificate" in item.lower()
+    ]
