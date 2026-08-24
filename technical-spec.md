@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.18
+**Version:** 1.19
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -376,6 +376,15 @@ it proves.
   typed, not leaked as SDK exceptions).
 - A rate-limit response raises `BrokerRateLimited` carrying the retry hint
   (proves the caller can back off correctly).
+- A zero-valued quote raises `PriceRejected`, not `BrokerUnavailable` and not
+  `Decimal(0)` (proves the mass-liquidation path is closed at its source, and
+  that bad data is distinguishable from an outage).
+- A quote older than `price_max_age_seconds` raises `PriceRejected` (boundary:
+  exactly at the threshold is accepted, one second beyond is not).
+- A price more than `price_max_move_pct` from the last accepted price raises
+  `PriceRejected`, and the last accepted price is **unchanged** afterwards
+  (proves an implausible value cannot become the baseline that makes the next
+  one look reasonable).
 - An order rejection raises `OrderRejected` carrying the broker's reason string
   (proves the reason reaches the owner).
 - No exception raised by this module contains the token in its message (proves
@@ -640,6 +649,12 @@ Additionally, `strategies.ml_model`:
 **`app.loops` / `app.shutdown`**
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- One position's price raising `PriceRejected` leaves the other positions
+  evaluated normally, submits no exit for the rejected one, and does not
+  increment the outage counter (proves one bad quote cannot abort a cycle or
+  masquerade as a broker failure).
+- Every price rejected in a cycle produces exactly one alert naming the count
+  (proves a correlated failure is reported as one event, not as N).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every
@@ -750,6 +765,14 @@ Loads and validates every setting once at startup.
   falls back to the base variable when that is unset or blank. Live mode ignores
   the overrides. The rest of the codebase sees one token and one account id and
   never branches on mode — sandbox remains selected by endpoint alone.
+- Adds `price_max_age_seconds` (default 120) and `price_max_move_pct` (default
+  20), the bounds `broker.client` validates quotes against.
+- `ssl_tbank_verify` defaults to true. **Setting it false must be loud**: it
+  disables certificate verification on the connection carrying the trading
+  token, so `config.load()` logs a CRITICAL line naming the risk, and
+  `app.startup` alerts the owner before the first broker call. A security
+  control that can be turned off silently by one environment variable is a
+  control nobody can audit after the fact.
 - Raises `ConfigError` naming the offending variable when: a required variable is
   missing or empty; a numeric value is out of range; `POSITION_SIZE_PCT` exceeds
   `MAX_POSITION_PCT`; `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100;
@@ -987,7 +1010,29 @@ else it does.
 - Returns an empty list when the range contains no trading activity.
 - Raises `ValueError` on naive datetimes.
 
+**`PriceRejected`** — a quote arrived but is not usable. **Distinct from
+`BrokerUnavailable`**, which means the broker could not be reached. Conflating
+them makes a malformed field read as a network outage, so it counts toward the
+consecutive-failure alert and is retried as though waiting would help.
+
 **`async get_last_price(figi: str) → Decimal`**
+- Validates the quote at the **single point prices enter the system**, and
+  treats a bad price as missing data rather than as a signal. Raises
+  `PriceRejected` when:
+  - the price is **not strictly positive** — `Decimal(0)` currently flows
+    straight through to `lifecycle.exits`, where `0 <= stop_price` is true for
+    every position, so one degraded response liquidates the whole book at
+    market;
+  - the quote's timestamp is older than `price_max_age_seconds`;
+  - the price differs from the last accepted price for that instrument by more
+    than `price_max_move_pct`.
+- Keeps the last accepted price per instrument, which is what makes the move
+  check possible. This is the only state this module holds, and it is why the
+  check cannot live in `lifecycle.exits`: that module is pure and has no memory
+  of the previous tick.
+- A rejected quote does not update the last accepted price. Accepting an
+  implausible value as the new baseline would make the *next* implausible value
+  look reasonable.
 
 **`async get_portfolio() → PortfolioState`**
 - Returns cash and holdings as reported by the broker. This is the authoritative
@@ -1435,6 +1480,13 @@ Fixed ordering; each step completes before the next begins:
 1. If the session is closed, return without any broker call.
 2. Refresh prices for open positions, and poll standing stop orders for
    execution. A stop filled by the exchange closes its position here.
+   **A `PriceRejected` for one position omits that ticker and continues with the
+   rest** — it must not abort the cycle, and must not count toward the
+   consecutive-failure outage alert, which exists for a broker that cannot be
+   reached. Positions with no price are skipped by the exit evaluation that
+   follows, which already tolerates a missing entry. Rejections are alerted once
+   per cycle, naming the count: every price being rejected at once is a
+   different event from one instrument going quiet.
 3. Evaluate the remaining exits — take-profit, maximum age, and stop-loss only
    for `LOCAL`-protected positions — and submit them. **Before** any halt check,
    and before entries.
@@ -1885,6 +1937,12 @@ Applies across all modules. Every external failure mode has exactly one rule.
    cycle, WARNING. Unavailable at startup → `StartupError`; the bot must not
    trade an instrument whose lot size it cannot confirm.
 9. **Candle fetch fails for one ticker** → omit it, WARNING, continue the batch.
+9b. **A quote is rejected as non-positive, stale, or an implausible move** →
+    WARNING, omit that instrument for the cycle, alert once per cycle with the
+    count. It is **not** a broker outage: it must not increment the consecutive
+    failure counter of rule 1, and it must not be retried, because the next
+    reading arrives on the next cycle anyway. Treating bad data as an outage is
+    how a malformed field becomes an alert about the network.
 10. **Trading schedule unavailable, or returned with no trading sessions** →
     treat the market as closed, WARNING, alert once, and leave any existing
     cache intact. The safe default is not to trade. An empty result is a form of

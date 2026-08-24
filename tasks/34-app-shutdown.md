@@ -38,6 +38,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- One position's price raising `PriceRejected` leaves the other positions
+  evaluated normally, submits no exit for the rejected one, and does not
+  increment the outage counter (proves one bad quote cannot abort a cycle or
+  masquerade as a broker failure).
+- Every price rejected in a cycle produces exactly one alert naming the count
+  (proves a correlated failure is reported as one event, not as N).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every

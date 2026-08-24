@@ -31,6 +31,12 @@ From `technical-spec.md` §8. Handle each exactly as written.
    process alive and keep trying. Never exit.
 
 9. **Candle fetch fails for one ticker** → omit it, WARNING, continue the batch.
+9b. **A quote is rejected as non-positive, stale, or an implausible move** →
+    WARNING, omit that instrument for the cycle, alert once per cycle with the
+    count. It is **not** a broker outage: it must not increment the consecutive
+    failure counter of rule 1, and it must not be retried, because the next
+    reading arrives on the next cycle anyway. Treating bad data as an outage is
+    how a malformed field becomes an alert about the network.
 
 ## Test cases
 

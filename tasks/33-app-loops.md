@@ -20,6 +20,13 @@ Module **33** of 39 in `dependency-order.md`. Everything before it is complete a
 1. If the session is closed, return without any broker call.
 2. Refresh prices for open positions, and poll standing stop orders for
    execution. A stop filled by the exchange closes its position here.
+   **A `PriceRejected` for one position omits that ticker and continues with the
+   rest** — it must not abort the cycle, and must not count toward the
+   consecutive-failure outage alert, which exists for a broker that cannot be
+   reached. Positions with no price are skipped by the exit evaluation that
+   follows, which already tolerates a missing entry. Rejections are alerted once
+   per cycle, naming the count: every price being rejected at once is a
+   different event from one instrument going quiet.
 3. Evaluate the remaining exits — take-profit, maximum age, and stop-loss only
    for `LOCAL`-protected positions — and submit them. **Before** any halt check,
    and before entries.
@@ -89,6 +96,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- One position's price raising `PriceRejected` leaves the other positions
+  evaluated normally, submits no exit for the rejected one, and does not
+  increment the outage counter (proves one bad quote cannot abort a cycle or
+  masquerade as a broker failure).
+- Every price rejected in a cycle produces exactly one alert naming the count
+  (proves a correlated failure is reported as one event, not as N).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every

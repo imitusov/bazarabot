@@ -51,7 +51,29 @@ else it does.
 - Returns an empty list when the range contains no trading activity.
 - Raises `ValueError` on naive datetimes.
 
+**`PriceRejected`** — a quote arrived but is not usable. **Distinct from
+`BrokerUnavailable`**, which means the broker could not be reached. Conflating
+them makes a malformed field read as a network outage, so it counts toward the
+consecutive-failure alert and is retried as though waiting would help.
+
 **`async get_last_price(figi: str) → Decimal`**
+- Validates the quote at the **single point prices enter the system**, and
+  treats a bad price as missing data rather than as a signal. Raises
+  `PriceRejected` when:
+  - the price is **not strictly positive** — `Decimal(0)` currently flows
+    straight through to `lifecycle.exits`, where `0 <= stop_price` is true for
+    every position, so one degraded response liquidates the whole book at
+    market;
+  - the quote's timestamp is older than `price_max_age_seconds`;
+  - the price differs from the last accepted price for that instrument by more
+    than `price_max_move_pct`.
+- Keeps the last accepted price per instrument, which is what makes the move
+  check possible. This is the only state this module holds, and it is why the
+  check cannot live in `lifecycle.exits`: that module is pure and has no memory
+  of the previous tick.
+- A rejected quote does not update the last accepted price. Accepting an
+  implausible value as the new baseline would make the *next* implausible value
+  look reasonable.
 
 **`async get_portfolio() → PortfolioState`**
 - Returns cash and holdings as reported by the broker. This is the authoritative
@@ -190,6 +212,15 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   typed, not leaked as SDK exceptions).
 - A rate-limit response raises `BrokerRateLimited` carrying the retry hint
   (proves the caller can back off correctly).
+- A zero-valued quote raises `PriceRejected`, not `BrokerUnavailable` and not
+  `Decimal(0)` (proves the mass-liquidation path is closed at its source, and
+  that bad data is distinguishable from an outage).
+- A quote older than `price_max_age_seconds` raises `PriceRejected` (boundary:
+  exactly at the threshold is accepted, one second beyond is not).
+- A price more than `price_max_move_pct` from the last accepted price raises
+  `PriceRejected`, and the last accepted price is **unchanged** afterwards
+  (proves an implausible value cannot become the baseline that makes the next
+  one look reasonable).
 - An order rejection raises `OrderRejected` carrying the broker's reason string
   (proves the reason reaches the owner).
 - No exception raised by this module contains the token in its message (proves
