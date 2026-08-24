@@ -165,7 +165,8 @@ ascending order, each in its own transaction. Returns the resulting schema
 version. Idempotent. `applied_at` is written via `clock.now()`. At the start
 of `apply`, issues `PRAGMA foreign_keys = ON`, `PRAGMA busy_timeout = 30000`,
 and `PRAGMA journal_mode = WAL` on the given connection. Does not call
-`aiosqlite.connect` and does not close `conn`.
+`aiosqlite.connect` and does not close `conn`. Ships `003_position_events.sql`,
+which creates `position_events`.
 
 ## `zarabot.db.positions`
 
