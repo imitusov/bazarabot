@@ -32,6 +32,10 @@ from zarabot.telegram.commands import set_report_builder
 from zarabot.telegram.notifier import alert
 
 _VERSION = "0.1.0"
+_SSL_DISABLED_TEXT = (
+    "zarabot starting with SSL_TBANK_VERIFY=false: certificate verification "
+    "is disabled on the connection that carries the trading token"
+)
 _SCHEDULE_DAYS = 14
 _STOP_TYPES = frozenset(
     {"STOP_MISSING", "STOP_ORPHAN", "STOP_MISPRICED", "STOP_ADOPTABLE"}
@@ -140,6 +144,8 @@ async def start() -> AppContext:
         await _abort(f"Startup aborted: {exc}", exc)
 
     os.environ["SSL_TBANK_VERIFY"] = "true" if cfg.ssl_tbank_verify else "false"
+    if not cfg.ssl_tbank_verify:
+        await alert(_SSL_DISABLED_TEXT, urgent=True)
 
     configure(cfg.log_level, [cfg.tinvest_token, cfg.telegram_bot_token])
     try:

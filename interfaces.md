@@ -681,7 +681,8 @@ Frozen: `config`, `strategies`, `halt`, `reconciliation`. Lives here, not in
 
 **`async start() → AppContext`**
 `config.load` → write `SSL_TBANK_VERIFY` from `config.ssl_tbank_verify` into
-`os.environ` (`"true"` / `"false"`) → `logging_setup.configure` →
+`os.environ` (`"true"` / `"false"`) → urgent `alert` when verification is
+disabled, before any broker call and carrying no token → `logging_setup.configure` →
 `db.migrations.apply` → `strategies.registry.enabled` →
 `market.session.refresh` → `execution.orders.resolve_unfinished` →
 `broker.reconcile.reconcile` plus stop remedies → restore halt → ready `alert`.
