@@ -1,6 +1,7 @@
 # Pipeline
 
-Audit finding → spec amendment → implementation → contract validation → merge.
+Issue → spec amendment → implementation → contract validation → merge.
+The first three run from your machine; CI is the deterministic floor under them.
 Deployment is never automatic.
 
 ## Stages
@@ -8,18 +9,27 @@ Deployment is never automatic.
 | Stage | Trigger | Runs | Gate |
 |---|---|---|---|
 | **CI** | every push and PR | ruff, mypy, pytest, per-module coverage, docs consistency, spec drift, image build | Deterministic. No model opinions |
-| **Spec amendment** | `spec:ready` label on an issue | Claude amends `technical-spec.md`, regenerates `tasks/` | You review and merge the PR |
-| **Implement** | manual dispatch with a task name | Cursor Composer implements one task, test-first | CI + validation must pass |
-| **Validate** | every PR | Contract Critic against the contract, not the diff | You read the findings |
+| **Spec amendment** | you, in a Claude session | amend `technical-spec.md`, regenerate `tasks/` | `ops/RUNBOOK.md` step 1 |
+| **Implement** | you, one Cursor chat per task | Cursor Composer implements one task, test-first | `make check` must pass |
+| **Validate** | you, `/contract-critic` after a task | Contract Critic against the contract, not the diff | You read the findings |
 | **Package** | green `main` | builds and publishes to GHCR, tagged by commit | Gated on the full check suite |
 | **Deploy** | hourly timer on the VPS | pulls the new digest, verifies, rolls back on failure | Refuses outside 02:00-05:00 MSK or with orders in flight |
 
-## Why a label and not issue creation
+## Why three stages are local and not workflows
 
-Opening an issue is not a decision; applying `spec:ready` is. Auto-triggering on
-creation means every duplicate, question and half-formed thought starts an agent
-amending the specification of a system that trades real money. The label costs
-one click and gives you a queue you control.
+There are no repository secrets. `Weekly audit`, `Spec amendment` and
+`Contract validation` were `anthropics/claude-code-action` workflows needing
+`ANTHROPIC_API_KEY`, so every run failed at the action and **`Contract
+validation` put a red X on every pull request** while producing no review. A
+gate that cannot run is worse than no gate: it looks like coverage.
+
+They were removed rather than disabled, because a workflow file that never runs
+still reads as a control when someone audits this repository later. The loop
+they described is unchanged and lives in `ops/RUNBOOK.md` — it is run by hand,
+which is also what `Cursor never edits technical-spec.md` requires.
+
+To restore them: `git show <commit>^:.github/workflows/audit.yml` and the two
+siblings, add `ANTHROPIC_API_KEY` as a repository secret first.
 
 ## Why spec first
 
@@ -31,13 +41,15 @@ decay loud, but the ordering is what prevents it.
 
 ## Why spec amendments are serial
 
-`concurrency: spec-amendment` with `cancel-in-progress: false`. Six reliability
-issues and five money issues touch the same spec sections; two agents amending
-them in parallel produce conflicting versions of the same contract.
+Six reliability issues and five money issues touch the same spec sections; two
+agents amending them in parallel produce conflicting versions of the same
+contract. One amendment at a time, finished and committed before the next
+starts.
 
 ## Why validation is not a diff review
 
-Every defect found so far would pass one. `close_position` keyed on the exit
+Run it with `/contract-critic` after each task, before closing the issue.
+Every defect found so far would pass a diff review. `close_position` keyed on the exit
 trigger instead of the stop owner, commission never fetched at all,
 `telegram.notifier` built after the modules required to alert, duplicate stops
 neither adopted nor reported — in each case the code matched what the spec said,
@@ -45,16 +57,13 @@ and the spec or the wiring was wrong. Validation reads the contract.
 
 ## Setup, once
 
-1. `/install-github-app` from Claude Code in this repo — installs the app and
-   stores `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`.
-2. Add `CURSOR_API_KEY` as a repository secret.
-3. Create labels: `spec:ready`, `spec-amendment`, `implementation`.
-4. Protect `main`: require the CI check, disallow direct pushes.
+1. Protect `main`: require the CI check, disallow direct pushes.
+2. Nothing else. CI and Package need no secrets — `GITHUB_TOKEN` is provided by
+   Actions, and `scripts/ci/notify.py` exits 0 when the Telegram variables are
+   unset, so a missing digest never reddens a run.
 
-**If an audit bot files the issues**, add the bot to `allowed_bots` in the
-Claude action inputs. It rejects bot actors by default to stop agents triggering
-each other in loops — the failure is silent, and looks like the workflow simply
-not running.
+`Implement` still needs `CURSOR_API_KEY` and runs on a weekday schedule. Until
+that secret exists it fails on every run; add the key or remove the workflow.
 
 ## The deploy is pull-based
 
@@ -78,10 +87,11 @@ Rollback by hand:
 
 ## Risk tiering
 
-The weekly audit amends the spec **only** for `severity:limit` findings, and
-never for anything labelled `area:money` or `area:risk`. Everything more serious
-is filed and stops there, for a human to read the contract change before code is
-written against it.
+Amend the spec automatically **only** for `severity:limit` findings, and never
+for anything labelled `area:money` or `area:risk`. Everything more serious is
+filed and stops there, for a human to read the contract change before code is
+written against it. This was enforced by the weekly-audit prompt; with that
+workflow gone it is enforced by you.
 
 This is the line I would not move. An agent amending its own contract for a
 critical money defect, then implementing against the contract it just wrote, has

@@ -112,3 +112,17 @@ async def test_recorded_version_ahead_of_code_raises_and_changes_nothing(
         highest = await cursor.fetchone()
     assert before == after
     assert highest == (current + 10,)
+
+
+async def test_apply_sets_wal_and_foreign_keys_on_given_connection(
+    db_path: Path,
+) -> None:
+    async with aiosqlite.connect(db_path) as conn:
+        await apply(conn)
+        journal = await conn.execute("PRAGMA journal_mode")
+        journal_row = await journal.fetchone()
+        foreign_keys = await conn.execute("PRAGMA foreign_keys")
+        foreign_keys_row = await foreign_keys.fetchone()
+    assert journal_row is not None
+    assert journal_row[0].lower() == "wal"
+    assert foreign_keys_row == (1,)

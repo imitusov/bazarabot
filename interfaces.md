@@ -162,7 +162,10 @@ Directory of `NNN_description.sql` files. Defaults to repo `migrations/`.
 **`async apply(conn: aiosqlite.Connection) → int`**
 Applies every migration whose version exceeds the recorded version, in
 ascending order, each in its own transaction. Returns the resulting schema
-version. Idempotent. `applied_at` is written via `clock.now()`.
+version. Idempotent. `applied_at` is written via `clock.now()`. At the start
+of `apply`, issues `PRAGMA foreign_keys = ON`, `PRAGMA busy_timeout = 30000`,
+and `PRAGMA journal_mode = WAL` on the given connection. Does not call
+`aiosqlite.connect` and does not close `conn`.
 
 ## `zarabot.db.positions`
 

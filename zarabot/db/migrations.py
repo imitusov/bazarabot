@@ -45,6 +45,9 @@ async def _recorded_version(conn: aiosqlite.Connection) -> int:
 
 async def apply(conn: aiosqlite.Connection) -> int:
     """Apply pending migrations in ascending order. Each file is one transaction."""
+    await conn.execute("PRAGMA foreign_keys = ON")
+    await conn.execute("PRAGMA busy_timeout = 30000")
+    await conn.execute("PRAGMA journal_mode = WAL")
     files = _migration_files()
     if not files:
         raise MigrationError("no migration files found")
