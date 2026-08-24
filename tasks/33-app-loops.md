@@ -24,9 +24,15 @@ Module **33** of 39 in `dependency-order.md`. Everything before it is complete a
    rest** — it must not abort the cycle, and must not count toward the
    consecutive-failure outage alert, which exists for a broker that cannot be
    reached. Positions with no price are skipped by the exit evaluation that
-   follows, which already tolerates a missing entry. Rejections are alerted once
-   per cycle, naming the count: every price being rejected at once is a
-   different event from one instrument going quiet.
+   follows, which already tolerates a missing entry. Rejections **latch**, like
+   every other alert in this module: one alert when a cycle first rejects
+   anything, naming the count, and none further until a cycle rejects nothing
+   and re-arms it. An alert every cycle would be roughly 510 messages in an
+   8.5-hour session for one permanently stale instrument, and the brief is
+   explicit that a bot which cries wolf gets muted, and a muted bot is
+   unmonitored. The count still matters — every price rejected at once is a
+   different event from one instrument going quiet — so it is named in the alert
+   that does fire.
 3. Evaluate the remaining exits — take-profit, maximum age, and stop-loss only
    for `LOCAL`-protected positions — and submit them. **Before** any halt check,
    and before entries.
@@ -102,6 +108,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   masquerade as a broker failure).
 - Every price rejected in a cycle produces exactly one alert naming the count
   (proves a correlated failure is reported as one event, not as N).
+- A second consecutive cycle with rejections produces **no** further alert, and a
+  cycle with none re-arms it (proves the latch — the difference between a
+  monitoring channel the owner reads and one they mute).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every
