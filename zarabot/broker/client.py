@@ -46,6 +46,7 @@ from zarabot.models import (
 _CLASS_CODE = "TQBR"
 _EXCHANGE_HINT = "MOEX"
 _STATUS_PREFIX = "SECURITY_TRADING_STATUS_"
+_last_accepted: dict[str, Decimal] = {}
 
 
 class InstrumentNotFound(Exception):
@@ -54,6 +55,10 @@ class InstrumentNotFound(Exception):
 
 class BrokerUnavailable(Exception):
     """Transport failure talking to the broker."""
+
+
+class PriceRejected(Exception):
+    """A quote arrived but is not usable. Distinct from a transport failure."""
 
 
 class BrokerRateLimited(Exception):
@@ -252,6 +257,33 @@ async def get_candles(
     return candles
 
 
+def _quote_time(raw: object) -> datetime | None:
+    moment = getattr(raw, "time", None)
+    if moment is None:
+        moment = getattr(raw, "timestamp", None)
+    if not isinstance(moment, datetime):
+        return None
+    return moment
+
+
+def _reject_quote(figi: str, price: Decimal, quoted_at: datetime | None) -> None:
+    if price <= 0:
+        raise PriceRejected("price is not strictly positive")
+    if quoted_at is None:
+        raise PriceRejected("quote timestamp is missing")
+    if quoted_at.tzinfo is None or quoted_at.tzinfo.utcoffset(quoted_at) is None:
+        raise PriceRejected("quote timestamp is naive")
+    cfg = config.load()
+    age = clock.now() - quoted_at
+    if age > timedelta(seconds=cfg.price_max_age_seconds):
+        raise PriceRejected("quote is older than price_max_age_seconds")
+    last = _last_accepted.get(figi)
+    if last is not None and last > 0:
+        move_pct = (abs(price - last) / last) * Decimal(100)
+        if move_pct > cfg.price_max_move_pct:
+            raise PriceRejected("price moved beyond price_max_move_pct")
+
+
 async def get_last_price(figi: str) -> Decimal:
     token = _token()
     try:
@@ -262,7 +294,11 @@ async def get_last_price(figi: str) -> Decimal:
     prices = list(response.last_prices)
     if not prices:
         raise BrokerUnavailable("broker unavailable")
-    return _decimal_quote(prices[0].price)
+    quote = prices[0]
+    price = _decimal_quote(quote.price)
+    _reject_quote(figi, price, _quote_time(quote))
+    _last_accepted[figi] = price
+    return price
 
 
 async def get_portfolio() -> PortfolioState:

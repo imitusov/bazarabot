@@ -435,14 +435,19 @@ The only module that calls the broker. Sandbox is selected by
 `INVEST_GRPC_API_SANDBOX` endpoint, never `post_sandbox_*`. Never passes
 `confirm_margin_trade=True`. Never logs or raises the token. Prices are `Decimal`.
 
-**Exceptions:** `InstrumentNotFound`, `BrokerUnavailable`, `BrokerRateLimited`
-(with `retry_after: Decimal | None`), `OrderRejected` / `StopOrderRejected`
-(with `reason: str`), `OrderNotFound`.
+**Exceptions:** `InstrumentNotFound`, `BrokerUnavailable`, `PriceRejected`
+(quote arrived but is not usable — distinct from `BrokerUnavailable`),
+`BrokerRateLimited` (with `retry_after: Decimal | None`), `OrderRejected` /
+`StopOrderRejected` (with `reason: str`), `OrderNotFound`.
 
 **`async get_instrument(ticker: str) → Instrument`**
 **`async get_candles(figi: str, interval, since: datetime, until: datetime) → list[Candle]`**
 Oldest-first. Empty list when none. `ValueError` on naive datetimes.
 **`async get_last_price(figi: str) → Decimal`**
+Rejects non-positive prices, quotes older than `price_max_age_seconds`, and
+moves beyond `price_max_move_pct` from the last accepted price for that
+instrument (`PriceRejected`). A rejected quote does not update the last
+accepted price.
 **`async get_portfolio() → PortfolioState`**
 Broker-authoritative cash and holdings.
 **`async get_trading_schedule(days: int) → list[SessionInfo]`**
