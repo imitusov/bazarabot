@@ -14,6 +14,7 @@ from zarabot.broker.client import (
     BrokerUnavailable,
     InstrumentNotFound,
     OrderRejected,
+    PriceRejected,
     get_instrument,
     get_last_price,
     get_portfolio,
@@ -93,8 +94,18 @@ def _note_data_success() -> None:
 
 async def _prices_for(positions: list[Position]) -> dict[str, Decimal]:
     prices: dict[str, Decimal] = {}
+    rejected = 0
     for position in positions:
-        prices[position.ticker] = await get_last_price(position.figi)
+        try:
+            prices[position.ticker] = await get_last_price(position.figi)
+        except PriceRejected:
+            rejected += 1
+            continue
+    if rejected:
+        await alert(
+            f"{rejected} instrument price(s) rejected this cycle; "
+            "those instruments skipped."
+        )
     return prices
 
 
