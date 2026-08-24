@@ -84,7 +84,7 @@ Procedure: `ops/RUNBOOK.md`.
 |---|---|---|---|
 | 1 | `market.session`, `app.loops` | #2, #3 | **done** — v1.17, `b0d2e4b`, critic clean |
 | 2a | `market.session` | #31 | **done** — v1.18, `4272cfb`, critic clean but for #32 |
-| 2 | `config` | #26, part of #15 | next |
+| 2 | `config` | #26, part of #15 | `config` half done; `app.startup` half done in `cedfb39` |
 | 3 | `db.*` | #20, #29 | |
 | 4 | `risk.sizing`, `risk.gate` | #15, #16 | |
 | 5 | `lifecycle.exits` | #6 | |
@@ -100,10 +100,20 @@ Procedure: `ops/RUNBOOK.md`.
 
 Closed: #1 (`6f4be32`), #2 and #3 (`b0d2e4b`), #31 (`4272cfb`).
 Opened during the work: #30 (coverage floors), #31 (empty-cache contract gap),
-#32 (alert latch never resets).
+#32 (alert latch never resets), #34 (price-rejection alert never latches),
+**#35** (`STOP_DUPLICATE` detected and dropped) and **#36** (`/report` wiring in
+no contract).
 
-**Three of the four issues opened during this work came from the checks, not
-from reading code**: #30 from the per-module coverage floors, #31 and #32 from
-Contract Critic runs on code that passed every test. That is the loop paying for
-itself — each was found in the batch that created or touched it, rather than in
-production months later.
+**Every issue opened during this work came from a check or a critic pass, none
+from a test**: #30 from the per-module coverage floors, #31, #32, #34, #35 and
+#36 from Contract Critic runs on code that passed every test. That is the loop
+paying for itself — each was found in the batch that created or touched it,
+rather than in production months later.
+
+**#35 is the reason batch 1 is not closed yet.** `broker.reconcile` reports the
+double-sell condition and `app.startup` drops it on the floor, because step 7 of
+the `app.startup` contract enumerates three remedies and the duplicate
+obligation was written in `broker.reconcile`'s section. Failure class 2 for the
+third time. It needs a spec amendment, then tasks 27 and 32 re-run in that
+order — fold it into batch 9 (`broker.reconcile`, #7 and #11) rather than
+running it alone, since it lands on the same contract.

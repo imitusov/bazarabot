@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-25 · spec v1.22 · brief v1.6 · 30 open issues
+Updated: 2026-08-25 · spec v1.22 · brief v1.6 · 32 open issues
 
 ## What this is
 
@@ -20,7 +20,8 @@ module) → code. **When the brief and the spec conflict, the brief wins.**
 positions, zero orders, zero signals, zero snapshots. The verification suite
 (V1–V11, `make verify`) has never run.
 
-So every one of the 30 open issues was found by *reading* code, and
+So every one of the 32 open issues was found by *reading* code, or by a
+critic pass over code that had already been read, and
 `broker.client` is written against an API surface read out of the vendored SDK
 wheel and never exercised against a live account. Lot sizes, candle depth, rate
 limits and sandbox fidelity are all still assumptions.
@@ -36,10 +37,32 @@ Closing #6 (zero/stale price liquidates every LOCAL position), #23, #26.
 |---|---|---|
 | `03-config` | #26 (log half) | done |
 | `21-broker-client` | #6, #23 | done |
-| `33-app-loops` | #6 | done; **re-run for #34** (alert must latch, spec v1.22) |
-| `32-app-startup` | #26 (alert half) | **not started** |
+| `33-app-loops` | #6 | done — latch landed in `74c7451` |
+| `32-app-startup` | #26 (alert half) | done — `5a81008` + `cedfb39`, pushed |
 
-Batch is done when 32 lands and 33 is re-run. Then #6, #23, #26 close.
+All four tasks have landed and `make check` is green on all six gates
+(coverage 90.57%). **#6, #23 and #26 are not closed yet**: the critic pass on
+task 32 was not clean, and the runbook's rule is that a batch closes only once
+the critic is clean or its findings are filed. They are filed — #35 and #36 —
+so closing the three is the next action, and it needs nothing but the decision.
+
+Neither finding is in the code the batch changed; both are contract gaps the
+critic surfaced while reviewing the whole module.
+
+## Opened by the critic on task 32
+
+- **#35 · `STOP_DUPLICATE` detected and dropped.** `broker.reconcile` reports
+  more than one live stop on a position — the double-sell condition the whole
+  ownership design exists to prevent — and `app.startup._apply_remedies` has no
+  branch for it, so it falls through silently and the bot starts trading with
+  two live stops. `severity:critical`. The cause is failure class 2 below: the
+  duplicate remedy is written in `broker.reconcile`'s contract section, so
+  `tasks/32-app-startup.md` never carried it. Amend, then re-run 27 and 32 in
+  that order; fold it into batch 9, which already lands on `broker.reconcile`.
+- **#36 · the `/report` wiring is in no contract.** `set_report_builder` appears
+  in `interfaces.md` and in the code, and nowhere in `technical-spec.md`. Delete
+  the line and `/report` says `report unavailable` forever with every test
+  green. Same shape as `build_application`, same failure class.
 
 ## Next after that
 
@@ -89,9 +112,14 @@ Recorded because they will happen again, and three of them were mine.
 
 ## Validation earns its place
 
-Of the six issues opened while doing this work — #30, #31, #32, #33, #34 and the
-`client.py:187` type error — **every one came from a check or a critic pass, none
-from tests**. All the code involved passed its tests and matched its contract.
+Of the eight issues opened while doing this work — #30, #31, #32, #33, #34, #35,
+#36 and the `client.py:187` type error — **every one came from a check or a
+critic pass, none from tests**. All the code involved passed its tests and
+matched its contract.
+
+Failure class 2 has now produced three findings on its own (#26's alert half,
+#35, #36). It is the only class in the list above that no automated check
+catches, and it is the one that keeps recurring.
 
 ## Not yet done
 
