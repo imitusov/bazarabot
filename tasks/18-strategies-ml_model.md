@@ -1,4 +1,4 @@
-# Task 18/39: Implement `zarabot/strategies/ml_model.py`
+# Task 18/40: Implement `zarabot/strategies/ml_model.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Optional ML strategy, disabled unless a model file is configured. Fails loudly a
 
 ## Build order position
 
-Module **18** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **18** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

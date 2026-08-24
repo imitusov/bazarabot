@@ -1,4 +1,4 @@
-# Task 12/39: Implement `zarabot/risk/sizing.py`
+# Task 12/40: Implement `zarabot/risk/sizing.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Pure. Converts a price and a budget into whole lots, always rounding down. 95% c
 
 ## Build order position
 
-Module **12** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **12** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

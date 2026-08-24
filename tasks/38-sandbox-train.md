@@ -1,4 +1,4 @@
-# Task 38/39: Implement `sandbox/train.py`
+# Task 38/40: Implement `sandbox/train.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Model training and export with a feature manifest. Walk-forward validation only.
 
 ## Build order position
 
-Module **38** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **38** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

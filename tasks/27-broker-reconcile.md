@@ -1,4 +1,4 @@
-# Task 27/39: Implement `zarabot/broker/reconcile.py`
+# Task 27/40: Implement `zarabot/broker/reconcile.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Compares broker truth against local belief on startup. Observes and reports only
 
 ## Build order position
 
-Module **27** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **27** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -95,6 +95,13 @@ historical record is the purpose of the project. Backups are retained 30 days.
 
 ### `zarabot/broker/reconcile.py`
 
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation. This module is not a `db.*` repository, but it
+was one of the eight sites opening its own connection. **The shared connection is
+the only change to this module in v1.23**: the `STOP_DUPLICATE` remedy gap is
+issue #35 and is scheduled separately — do not fold it in here.
+
 **`async reconcile(now: datetime) → ReconciliationReport`**
 - Compares `broker.client.get_portfolio()` against `db.positions.list_open()`.
 - Locally-open but absent at the broker → closed as `EXTERNAL` at the last known
@@ -144,6 +151,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
     `stop_protection = 'EXCHANGE'` → place a replacement immediately and alert.
     An unprotected position is the state this whole mechanism exists to prevent.
 
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+---
+
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -167,6 +183,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (proves it does not thrash). Stop-order *findings* are re-reported until the
   caller remedies them, which is correct — this module observes, and an
   unremedied discrepancy is still true on the second pass.
+- The module calls `aiosqlite.connect` nowhere; the reconciliation row is written
+  on `db.connection.shared()` (proves the shared connection reached the two
+  modules outside `db.*` that were opening their own).
 
 ## Expected output
 

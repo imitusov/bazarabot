@@ -1,4 +1,4 @@
-# Task 25/39: Implement `zarabot/pnl.py`
+# Task 25/40: Implement `zarabot/pnl.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Realised and unrealised P&L, the daily loss percentage, and the buy-and-hold ben
 
 ## Build order position
 
-Module **25** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **25** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

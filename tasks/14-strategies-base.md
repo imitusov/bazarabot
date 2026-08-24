@@ -1,4 +1,4 @@
-# Task 14/39: Implement `zarabot/strategies/base.py`
+# Task 14/40: Implement `zarabot/strategies/base.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The Strategy protocol. Pure, entry-only, deterministic - the properties that let
 
 ## Build order position
 
-Module **14** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **14** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

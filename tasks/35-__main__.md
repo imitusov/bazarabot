@@ -1,4 +1,4 @@
-# Task 35/39: Implement `zarabot/__main__.py`
+# Task 35/40: Implement `zarabot/__main__.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Process entry point so that `python -m zarabot` works. No logic of its own.
 
 ## Build order position
 
-Module **35** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **35** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

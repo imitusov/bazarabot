@@ -6,13 +6,14 @@ Each repository owns its tables exclusively and no other module writes them:
 
 | Module | Owns |
 |---|---|
-| `db.positions` | `positions` |
+| `db.positions` | `positions`, `position_events` |
 | `db.orders` | `orders` |
 | `db.stop_orders` | `stop_orders` |
 | `db.cooldowns` | `cooldowns` |
 | `db.signals` | `signals` |
 | `db.snapshots` | `daily_snapshots` |
-| `db.migrations` | `schema_version` |
+| `db.migrations` | `schema_version`, and the files in `migrations/` |
+| `db.connection` | the process-wide connection, and `tests/conftest.py` |
 
 Never read or write another repository's **tables** — no `SELECT`, no `JOIN`, not
 even a "quick" one. The table is the private implementation; the module is the
@@ -34,6 +35,18 @@ depends on a layout the owner is free to change.
 - **Nothing is ever deleted.** Closing a position is a state transition. History
   is permanent — it is the point of the project.
 - Return `[]` for "nothing found", never `None`.
+
+## One connection, and nobody else opens it
+
+`db.connection` owns the process-wide connection. No module in this directory —
+and no module outside it, including `state.halt` and `broker.reconcile` — calls
+`aiosqlite.connect` or closes a connection. All SQL runs on
+`db.connection.shared()`, which raises `DatabaseNotOpenError` rather than opening
+a fallback (rule 30).
+
+A connection per call is what left every declared foreign key unenforced: SQLite
+applies `PRAGMA foreign_keys` per connection, so a pragma nobody issues is a
+constraint nobody has.
 
 ## SQL lives here and nowhere else
 

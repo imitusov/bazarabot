@@ -1,4 +1,4 @@
-# Task 5/39: Implement `zarabot/db/migrations.py`
+# Task 5/40: Implement `zarabot/db/migrations.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Schema creation and version tracking. Forward-only: a bad migration is fixed by 
 
 ## Build order position
 
-Module **5** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **5** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -34,7 +34,19 @@ Owns schema creation and version tracking.
 - Raises `MigrationError` if the recorded version exceeds the highest known
   migration, and makes no modification in that case.
 - Idempotent: applying twice is a no-op the second time.
-- Called by `app.startup` before any repository function.
+- Called by `app.startup` before any repository function, on
+  `db.connection.shared()`. This module never calls `aiosqlite.connect` and never
+  closes the connection it is given.
+- At the start of `apply`, issues `PRAGMA foreign_keys = ON`,
+  `PRAGMA busy_timeout = 30000` and `PRAGMA journal_mode = WAL` on that
+  connection. `journal_mode` is persistent; the other two are per-connection and
+  must be re-issued on every connection, which is why they appear both here and
+  in `db.connection.connect`. Setting them here means a test that passes its own
+  connection still gets WAL and foreign-key enforcement.
+- **Ships `003_position_events.sql`**, which creates the `position_events` table
+  that `db.positions` owns. The migration file belongs to this module even though
+  the table belongs to that one: `migrations/` is this module's directory, and a
+  table specified in §5 with no named file owner reaches no task at all.
 
 ## Relevant error handling rules
 
@@ -50,8 +62,17 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-- Applying migrations to an empty database creates every table at the current
-  version (happy path).
+- Applying migrations to an empty database creates every table **and leaves
+  `schema_version` at the highest migration present in `migrations/`**, asserted
+  against the files on disk rather than against a literal (happy path). Asserting
+  only that the tables exist passes even when the driver stops after `001`, since
+  `001` creates every table and later migrations only add columns — so the case
+  must also assert a column a later migration introduces, currently
+  `orders.exit_trigger`.
+- After `apply`, `PRAGMA journal_mode` reports `wal` and `PRAGMA foreign_keys`
+  reports `1` on the connection it was given (proves the pragmas live on the
+  connection rather than in a comment — the gap that left every declared foreign
+  key decorative at runtime).
 - Applying migrations twice makes no changes the second time and does not raise
   (proves idempotency).
 - A database at version N−1 is migrated to N without data loss in existing rows

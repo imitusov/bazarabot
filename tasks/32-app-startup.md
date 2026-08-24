@@ -1,12 +1,12 @@
-# Task 32/39: Implement `zarabot/app/startup.py`
+# Task 32/40: Implement `zarabot/app/startup.py`
 
 ## Product context
 
-Fixed startup ordering: config, logging, migrations, strategies, session, order recovery, reconciliation, halt state, ready alert. 70% coverage.
+Fixed startup ordering: config, logging, connection, migrations, strategies, session, order recovery, reconciliation, halt state, ready alert. 70% coverage.
 
 ## Build order position
 
-Module **32** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **32** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -29,7 +29,10 @@ Fixed ordering; each step completes before the next begins:
    is watching is not a security control. The alert must never contain the
    token.
 2. `logging_setup.configure()`.
-3. Open the database and `db.migrations.apply()`.
+3. `db.connection.connect(config.db_path)`, then
+   `db.migrations.apply(db.connection.shared())`. The connection is opened here —
+   not at import, and not inside a repository — and `apply` receives the shared
+   connection rather than opening a second one.
 4. `strategies.registry.enabled()`, including model load if configured.
 5. `market.session.refresh()`.
 6. `execution.orders.resolve_unfinished()`.
@@ -62,6 +65,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
     restart that task with exponential backoff. One failing task must never
     terminate the process or any other task.
 
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+---
+
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -83,6 +95,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - Reconciliation runs before the first entry is permitted (proves the same for
   position truth).
 - A halted-at-shutdown bot starts halted (proves halt persistence end to end).
+- `start` calls `db.connection.connect` **before** `db.migrations.apply`, and
+  `apply` receives `db.connection.shared()` (proves the connection is opened by
+  startup rather than at import or inside a repository).
+- Importing `app.startup` opens no database file.
 
 ## Expected output
 

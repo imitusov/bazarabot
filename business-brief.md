@@ -1,7 +1,7 @@
 # Zarabot — Business Brief
 
-**Version:** 1.6
-**Date:** 2026-08-18
+**Version:** 1.7
+**Date:** 2026-08-25
 **Status:** Ready for technical spec
 
 **Companion document.** Implementation contracts are in `technical-spec.md`.
@@ -473,6 +473,16 @@ no listening ports.
   history, every signal including rejected ones with the reason,
   daily P&L snapshots, the halted-or-active trading state, and the per-instrument
   re-entry cooldown timestamps.
+- **Every change to a position is recorded, not only its current state.** The
+  position row says what is true now; an append-only event trail says how it got
+  there — when stop ownership moved between the exchange and the bot, when
+  reconciliation corrected a lot count, when a late commission rewrote a realised
+  figure. After an incident the question is always "who owned the stop at 14:32,
+  and what changed it", and it must be answerable **from the database alone**.
+  Logs rotate — the deployed configuration keeps five files of ten megabytes —
+  and the database does not. An `updated_at` column plus structured log lines was
+  considered and rejected for that reason: it answers the question only for as
+  long as the logs happen to survive.
 - **What does not persist.** In-flight computation, cached candles, and the
   Telegram command context. These are rebuilt on startup.
 - **Halt state survives restarts.** If the bot was halted when it stopped, it

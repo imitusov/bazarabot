@@ -76,6 +76,8 @@ Never write implementation before tests. Never declare done with failing tests.
 - Read configuration only through `config`.
 - Access the database only through its owning repository module. No SQL
   anywhere else.
+- Never call `aiosqlite.connect` outside `db.connection`, and never close the
+  connection it owns. Repositories run on `db.connection.shared()`.
 - Return an empty list rather than `None` for "nothing found" collections.
 - Treat the broker as authoritative whenever it disagrees with local state.
 
@@ -99,8 +101,8 @@ missed branch in those four is a financial defect, not a coverage statistic.
 
 ```
 zarabot/          models, clock, config, logging_setup, pnl
-  db/             migrations, positions, orders, stop_orders, cooldowns,
-                  signals, snapshots
+  db/             migrations, connection, positions, orders, stop_orders,
+                  cooldowns, signals, snapshots
   broker/         client, reconcile
   market/         session, data
   strategies/     base, ma_crossover, rsi_reversion, momentum, ml_model, registry

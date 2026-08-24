@@ -1,4 +1,4 @@
-# Task 4/39: Implement `zarabot/logging_setup.py`
+# Task 4/40: Implement `zarabot/logging_setup.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Structured logging with secret redaction. A leaked token in a log file is equiva
 
 ## Build order position
 
-Module **4** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **4** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

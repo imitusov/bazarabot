@@ -1,4 +1,4 @@
-# Task 34/39: Implement `zarabot/app/shutdown.py`
+# Task 34/40: Implement `zarabot/app/shutdown.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Graceful shutdown. Never cancels or liquidates positions - restarts must have no
 
 ## Build order position
 
-Module **34** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **34** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -18,8 +18,9 @@ Module **34** of 39 in `dependency-order.md`. Everything before it is complete a
 
 **`async shutdown(ctx, signal) → None`**
 - Stops accepting new signals, waits for in-flight submissions to reach a known
-  state or a bounded timeout, settles what it can, records state, closes the
-  database, and exits.
+  state or a bounded timeout, settles what it can, records state, calls
+  `db.connection.disconnect()`, and exits. Closing the database means that call
+  and nothing else — no repository closes a connection it did not open.
 - Must never cancel or liquidate positions.
 - Orders unresolved at the timeout are left as `SUBMITTING` for the next startup
   to resolve — this is correct, not a leak.
@@ -31,6 +32,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
 21. **Unhandled exception in a background task** → log with traceback, alert,
     restart that task with exponential backoff. One failing task must never
     terminate the process or any other task.
+
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+---
 
 ## Test cases
 
@@ -57,6 +67,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   before exiting (proves the graceful-shutdown contract).
 - Shutdown neither cancels nor liquidates positions (proves restarts have no
   financial consequence).
+- `shutdown` calls `db.connection.disconnect()`, and `db.connection.shared()`
+  raises `DatabaseNotOpenError` afterwards (proves "closes the database" is that
+  one call rather than a repository-level close of a connection nobody owns).
 
 ## Expected output
 

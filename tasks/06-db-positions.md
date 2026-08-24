@@ -1,4 +1,4 @@
-# Task 6/39: Implement `zarabot/db/positions.py`
+# Task 6/40: Implement `zarabot/db/positions.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of position rows. Positions are never deleted; closing is a state tra
 
 ## Build order position
 
-Module **6** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **6** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -51,11 +51,38 @@ Module **6** of 39 in `dependency-order.md`. Everything before it is complete an
   in configuration must never move the stop of an already-open position.
 - Rows are never deleted.
 
+### `position_events`
+
+Append-only history of every mutation to a position. Owned by `db.positions`,
+written in the same transaction as the row change it describes.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER | Primary key |
+| `position_id` | INTEGER NOT NULL | FK → `positions(id)` |
+| `occurred_at` | TEXT NOT NULL | UTC ISO-8601, from `clock.now()` |
+| `event` | TEXT NOT NULL | CHECK IN (`OPENED`, `STOP_PROTECTION_CHANGED`, `LOTS_ADJUSTED`, `CLOSED`, `REALISED_RECOMPUTED`, `ADOPTED`) |
+| `detail` | TEXT NOT NULL | JSON object: previous and new values, and the order key where one applies |
+
+**Invariants.**
+- Rows are never updated and never deleted.
+- Every successful mutation of a position inserts exactly one row; a mutation
+  that rolls back inserts none. The trail cannot disagree with the row, because
+  the two are written in one transaction.
+- The `positions` row answers "what is true now"; this table answers "how did it
+  get there". The second question is the one an incident asks, and before v1.23
+  nothing in the database could answer it.
+
 ## Module contract
 
 ### `zarabot/db/positions.py`
 
 **Sole owner of position row mutation.** No other module writes these rows.
+**Sole owner of `position_events`.** No other module writes that table.
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
 
 **`async open(signal: Signal, order: OrderRecord, instrument: Instrument, stop: Decimal, target: Decimal, opened_at: datetime) → Position`**
 - Inserts an open position and returns it with its assigned identifier.
@@ -65,6 +92,8 @@ Module **6** of 39 in `dependency-order.md`. Everything before it is complete an
   never recorded as protected by something that has not been confirmed to exist;
   the failure direction is a redundant local check, not an unwatched position.
 - Raises `PositionStateError` if an open position already exists for the ticker.
+- In the same transaction, writes one `position_events` row with
+  `event = 'OPENED'`. `occurred_at` is `clock.now()`.
 
 **`async set_stop_protection(position_id: int, protection: StopProtection, stop_order_key: str | None) → Position`**
 - Promotes a position to `EXCHANGE` once its standing stop is confirmed active,
@@ -74,6 +103,9 @@ Module **6** of 39 in `dependency-order.md`. Everything before it is complete an
   `LOCAL` with one — the pairing is the invariant that prevents both owners
   acting on the same position.
 - Called only by `execution.orders` and by the startup remediation step.
+- In the same transaction as the row update, writes one `position_events` row
+  with `event = 'STOP_PROTECTION_CHANGED'` and `detail` naming the previous and
+  new protection and stop-order key.
 
 **`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
@@ -100,6 +132,12 @@ Module **6** of 39 in `dependency-order.md`. Everything before it is complete an
   case.
 - Raises `PositionStateError` if the position is already closed or absent.
 - The transition is atomic: concurrent calls produce exactly one success.
+- The commission reads, the status update and the `position_events` insert run
+  inside one `BEGIN IMMEDIATE` on `db.connection.shared()`. The commission was
+  previously read on a different connection, outside the transaction that used
+  it; `db.orders.get` must not commit the outer transaction.
+- In that same transaction, writes one `position_events` row with
+  `event = 'CLOSED'`.
 - Must never delete a row — history is permanent.
 
 **`async list_open() → list[Position]`**
@@ -116,6 +154,9 @@ Module **6** of 39 in `dependency-order.md`. Everything before it is complete an
 - This is the only mutation permitted on a closed position, and it exists because
   a stored figure that silently disagrees with its inputs is worse than one
   corrected once and logged.
+- In the same transaction, writes one `position_events` row with
+  `event = 'REALISED_RECOMPUTED'` and `detail` naming the previous and new
+  `realised_pnl`.
 
 **`async list_closed() → list[Position]`**
 - Closed positions, newest exit first. Empty list when none. Consumed by
@@ -127,12 +168,27 @@ Module **6** of 39 in `dependency-order.md`. Everything before it is complete an
   absent or already closed.
 - Never changes entry price, stop or target: the position's risk levels were set
   at entry and a quantity correction does not re-price them.
+- In the same transaction, writes one `position_events` row with
+  `event = 'LOTS_ADJUSTED'` and `detail` naming the previous and new lot count.
 
 **`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime) → Position`**
 - Creates an open position for a holding discovered at the broker but unknown
   locally, with `adopted = True`, stop and target derived from `average_price`,
   and age counted from `adopted_at`.
 - Called only by `broker.reconcile`.
+- In the same transaction, writes one `position_events` row with
+  `event = 'ADOPTED'`.
+
+**`async list_events(position_id: int) → list[PositionEvent]`**
+- Returns that position's events oldest-first. Empty list when none, never
+  `None`.
+- `PositionEvent` is a frozen dataclass owned by this module: `position_id`,
+  `occurred_at` (timezone-aware UTC), `event` (one of `OPENED`,
+  `STOP_PROTECTION_CHANGED`, `LOTS_ADJUSTED`, `CLOSED`, `REALISED_RECOMPUTED`,
+  `ADOPTED`) and `detail` (a JSON object as text).
+- Events are never updated and never deleted. This reader is what makes the
+  brief's requirement — that a post-incident question be answerable from the
+  database alone — true rather than aspirational.
 
 ## Relevant error handling rules
 
@@ -145,6 +201,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
 12. **Database write failure on a non-critical path** (signals, snapshots,
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
+
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+---
 
 ## Test cases
 
@@ -161,6 +226,17 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   those written (proves no float conversion in storage).
 - Concurrent close attempts on the same position result in exactly one success
   and one `PositionStateError` (proves the state transition is atomic).
+- `open`, `set_stop_protection`, `update_lots`, `close`, `recompute_realised` and
+  `adopt` each write exactly one `position_events` row, in the same transaction
+  as the mutation (proves the trail cannot diverge from the row it describes).
+- A `close` that rolls back leaves no event behind for that attempt (proves the
+  event is not committed independently of the mutation).
+- After a sequence of `set_stop_protection` calls, `list_events` reconstructs the
+  full stop-ownership history in order (proves post-incident reconstruction needs
+  nothing but the database).
+- No function in this module calls `aiosqlite.connect` (proves it runs on
+  `db.connection.shared()` — the defect that opened a connection per call, and
+  the reason the schema's declared foreign keys enforced nothing).
 
 ## Expected output
 

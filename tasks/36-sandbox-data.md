@@ -1,4 +1,4 @@
-# Task 36/39: Implement `sandbox/data.py`
+# Task 36/40: Implement `sandbox/data.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Historical candle loading for research. Laptop only.
 
 ## Build order position
 
-Module **36** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **36** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

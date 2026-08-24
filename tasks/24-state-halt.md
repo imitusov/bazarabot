@@ -1,4 +1,4 @@
-# Task 24/39: Implement `zarabot/state/halt.py`
+# Task 24/40: Implement `zarabot/state/halt.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of the halt flag. A halt suspends ENTRIES ONLY - exits keep running, 
 
 ## Build order position
 
-Module **24** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **24** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -32,6 +32,12 @@ Module **24** of 39 in `dependency-order.md`. Everything before it is complete a
 
 **Sole owner of the halt flag.**
 
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation. This module is not a `db.*` repository, but it
+was one of the eight sites opening its own connection and it owes the same
+obligation.
+
 **`async is_halted() → bool`** · **`async current() → HaltState | None`**
 
 **`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
@@ -49,13 +55,26 @@ From `technical-spec.md` §8. Handle each exactly as written.
 20. **Daily loss limit breached** → halt, persist the halt, alert with the loss
     and the trades that produced it. Exits continue to run.
 
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+---
+
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - Halting then reading state reports halted with its reason (happy path).
-- Halt state survives a simulated restart (proves persistence — a crash must
-  never resume trading).
+- Halt state survives a simulated restart, where a restart is
+  `db.connection.disconnect()` followed by `connect` to the same file — a
+  connection left open in-process is not a restart (proves persistence: a crash
+  must never be a way to resume trading).
+- The module calls `aiosqlite.connect` nowhere (proves it runs on the shared
+  connection; `state/halt.py` was one of the eight sites opening its own).
 - Resuming clears the halt and records who cleared it (proves auditability).
 - Resuming when not halted is accepted and changes nothing (proves idempotency).
 - A halt does not prevent `lifecycle.exits` from returning triggers, nor

@@ -1,8 +1,8 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.22
+**Version:** 1.23
 **Date:** 2026-08-18
-**Implements:** `business-brief.md` v1.2
+**Implements:** `business-brief.md` v1.7
 
 **Companion document.** Read the brief first. When this spec and the brief
 conflict, **the brief takes precedence**.
@@ -312,8 +312,17 @@ it proves.
   does not corrupt ordinary logs).
 
 **`db.migrations`**
-- Applying migrations to an empty database creates every table at the current
-  version (happy path).
+- Applying migrations to an empty database creates every table **and leaves
+  `schema_version` at the highest migration present in `migrations/`**, asserted
+  against the files on disk rather than against a literal (happy path). Asserting
+  only that the tables exist passes even when the driver stops after `001`, since
+  `001` creates every table and later migrations only add columns — so the case
+  must also assert a column a later migration introduces, currently
+  `orders.exit_trigger`.
+- After `apply`, `PRAGMA journal_mode` reports `wal` and `PRAGMA foreign_keys`
+  reports `1` on the connection it was given (proves the pragmas live on the
+  connection rather than in a comment — the gap that left every declared foreign
+  key decorative at runtime).
 - Applying migrations twice makes no changes the second time and does not raise
   (proves idempotency).
 - A database at version N−1 is migrated to N without data loss in existing rows
@@ -321,6 +330,27 @@ it proves.
 - A database whose recorded version is **higher** than the code's raises
   `MigrationError` and does not modify anything (proves a rolled-back deployment
   cannot silently corrupt a newer schema).
+
+**`db.connection`**
+- `connect` on a new file, then `shared()`, returns a live connection, and
+  importing the module opens no file (proves there is no import-time side effect,
+  which `AGENTS.md` forbids outside `config`).
+- A second `connect` without `disconnect` raises `DatabaseAlreadyOpenError`
+  (proves the process holds one connection rather than silently leaking the
+  previous file).
+- `shared()` before `connect`, and after `disconnect`, raises
+  `DatabaseNotOpenError` and opens no fallback connection (proves a test cannot
+  inherit a connection, and production cannot quietly reconnect to the wrong
+  file).
+- `disconnect` is idempotent: a second call does not raise.
+- After `connect`, `PRAGMA journal_mode` is `wal`, `PRAGMA foreign_keys` is `1`
+  and `PRAGMA busy_timeout` is `30000`.
+- Two concurrent tasks, one writing a row and one reading another table, both
+  complete (proves WAL: a writer does not block a reader, which is the contention
+  the 30-second timeout was absorbing).
+- Two sequential tests connect to different temporary paths, and the second
+  observes none of the first's rows (proves isolation without inheriting a
+  process connection).
 
 **`db.positions`**
 - Opening a position then reading open positions returns it (happy path).
@@ -334,6 +364,17 @@ it proves.
   those written (proves no float conversion in storage).
 - Concurrent close attempts on the same position result in exactly one success
   and one `PositionStateError` (proves the state transition is atomic).
+- `open`, `set_stop_protection`, `update_lots`, `close`, `recompute_realised` and
+  `adopt` each write exactly one `position_events` row, in the same transaction
+  as the mutation (proves the trail cannot diverge from the row it describes).
+- A `close` that rolls back leaves no event behind for that attempt (proves the
+  event is not committed independently of the mutation).
+- After a sequence of `set_stop_protection` calls, `list_events` reconstructs the
+  full stop-ownership history in order (proves post-incident reconstruction needs
+  nothing but the database).
+- No function in this module calls `aiosqlite.connect` (proves it runs on
+  `db.connection.shared()` — the defect that opened a connection per call, and
+  the reason the schema's declared foreign keys enforced nothing).
 
 **`db.orders`**
 - An order recorded as `SUBMITTING` then confirmed as `FILLED` reports the
@@ -416,6 +457,9 @@ it proves.
   (proves it does not thrash). Stop-order *findings* are re-reported until the
   caller remedies them, which is correct — this module observes, and an
   unremedied discrepancy is still true on the second pass.
+- The module calls `aiosqlite.connect` nowhere; the reconciliation row is written
+  on `db.connection.shared()` (proves the shared connection reached the two
+  modules outside `db.*` that were opening their own).
 
 **`market.session`**
 - A timestamp inside the main session reports open (happy path).
@@ -583,8 +627,12 @@ Additionally, `strategies.ml_model`:
 
 **`state.halt`**
 - Halting then reading state reports halted with its reason (happy path).
-- Halt state survives a simulated restart (proves persistence — a crash must
-  never resume trading).
+- Halt state survives a simulated restart, where a restart is
+  `db.connection.disconnect()` followed by `connect` to the same file — a
+  connection left open in-process is not a restart (proves persistence: a crash
+  must never be a way to resume trading).
+- The module calls `aiosqlite.connect` nowhere (proves it runs on the shared
+  connection; `state/halt.py` was one of the eight sites opening its own).
 - Resuming clears the halt and records who cleared it (proves auditability).
 - Resuming when not halted is accepted and changes nothing (proves idempotency).
 - A halt does not prevent `lifecycle.exits` from returning triggers, nor
@@ -648,6 +696,10 @@ Additionally, `strategies.ml_model`:
 - Reconciliation runs before the first entry is permitted (proves the same for
   position truth).
 - A halted-at-shutdown bot starts halted (proves halt persistence end to end).
+- `start` calls `db.connection.connect` **before** `db.migrations.apply`, and
+  `apply` receives `db.connection.shared()` (proves the connection is opened by
+  startup rather than at import or inside a repository).
+- Importing `app.startup` opens no database file.
 
 **`app.loops` / `app.shutdown`**
 - With the session closed, no market data call is made (proves the session guard
@@ -671,6 +723,9 @@ Additionally, `strategies.ml_model`:
   before exiting (proves the graceful-shutdown contract).
 - Shutdown neither cancels nor liquidates positions (proves restarts have no
   financial consequence).
+- `shutdown` calls `db.connection.disconnect()`, and `db.connection.shared()`
+  raises `DatabaseNotOpenError` afterwards (proves "closes the database" is that
+  one call rather than a repository-level close of a connection nobody owns).
 
 **`ops.backup`**
 - A backup produces a file that opens as a valid database containing the same
@@ -814,11 +869,83 @@ Owns schema creation and version tracking.
 - Raises `MigrationError` if the recorded version exceeds the highest known
   migration, and makes no modification in that case.
 - Idempotent: applying twice is a no-op the second time.
-- Called by `app.startup` before any repository function.
+- Called by `app.startup` before any repository function, on
+  `db.connection.shared()`. This module never calls `aiosqlite.connect` and never
+  closes the connection it is given.
+- At the start of `apply`, issues `PRAGMA foreign_keys = ON`,
+  `PRAGMA busy_timeout = 30000` and `PRAGMA journal_mode = WAL` on that
+  connection. `journal_mode` is persistent; the other two are per-connection and
+  must be re-issued on every connection, which is why they appear both here and
+  in `db.connection.connect`. Setting them here means a test that passes its own
+  connection still gets WAL and foreign-key enforcement.
+- **Ships `003_position_events.sql`**, which creates the `position_events` table
+  that `db.positions` owns. The migration file belongs to this module even though
+  the table belongs to that one: `migrations/` is this module's directory, and a
+  table specified in §5 with no named file owner reaches no task at all.
+
+### `zarabot/db/connection.py`
+
+**Sole owner of the process-wide SQLite connection.** No other module calls
+`aiosqlite.connect`. No other module closes the connection.
+
+This module exists so every repository signature in `interfaces.md` can stay
+exactly as recorded: callers keep calling `db.positions.open(...)` with no
+connection argument. Threading a connection through every repository would change
+every caller in the system. The lifecycle is already half-specified in
+`app.startup` ("open the database") and `app.shutdown` ("closes the database");
+this module is the named owner of the object those two sentences refer to.
+
+**Must never connect at import.** `AGENTS.md` forbids module-level side effects
+outside `config`. Connecting at import would violate that, and would make tests
+inherit whichever file the previous importer happened to open.
+
+**`async connect(path: str) → aiosqlite.Connection`**
+- Opens the SQLite file at `path`, stores it as the process connection, and
+  issues on that connection:
+  - `PRAGMA journal_mode = WAL`
+  - `PRAGMA foreign_keys = ON`
+  - `PRAGMA busy_timeout = 30000`
+- `foreign_keys` and `busy_timeout` are per-connection; `journal_mode` is
+  persistent. All three are set here so that a forgotten per-connection pragma
+  cannot silently disable integrity checking.
+- Raises `DatabaseAlreadyOpenError` when a process connection is already open. A
+  caller needing a different file must `disconnect` first.
+- Returns the connection. Does not apply migrations — `app.startup` calls
+  `db.migrations.apply(shared())` next.
+- Called only by `app.startup` and by the test fixture below.
+
+**`shared() → aiosqlite.Connection`**
+- Returns the open process connection.
+- Raises `DatabaseNotOpenError` when `connect` has not been called, or when
+  `disconnect` already has.
+- Must never open a connection as a side effect of being called. A silent
+  reconnect would hide a missing `app.startup` step and would let a test inherit
+  a file it did not create.
+
+**`async disconnect() → None`**
+- Closes the process connection and forgets it. Idempotent when already closed.
+- Called only by `app.shutdown` and by the fixture teardown.
+- After it returns, `shared()` raises `DatabaseNotOpenError`.
+
+**This module owns `tests/conftest.py`.** The fixture that connects a temporary
+file, applies migrations, yields, and disconnects on teardown is defined once
+there and used by every database test in the project. `tests/conftest.py` does
+not exist today — each test file builds its own temporary database — and leaving
+each task in this batch to invent its own fixture is a separate chance in each
+one to leak a process connection between test files.
+
+Enabling `foreign_keys` is cheap now: the live database holds zero rows, so
+turning enforcement on cannot surface an existing violation. This is the cheapest
+moment in the project's life to do it.
 
 ### `zarabot/db/positions.py`
 
 **Sole owner of position row mutation.** No other module writes these rows.
+**Sole owner of `position_events`.** No other module writes that table.
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
 
 **`async open(signal: Signal, order: OrderRecord, instrument: Instrument, stop: Decimal, target: Decimal, opened_at: datetime) → Position`**
 - Inserts an open position and returns it with its assigned identifier.
@@ -828,6 +955,8 @@ Owns schema creation and version tracking.
   never recorded as protected by something that has not been confirmed to exist;
   the failure direction is a redundant local check, not an unwatched position.
 - Raises `PositionStateError` if an open position already exists for the ticker.
+- In the same transaction, writes one `position_events` row with
+  `event = 'OPENED'`. `occurred_at` is `clock.now()`.
 
 **`async set_stop_protection(position_id: int, protection: StopProtection, stop_order_key: str | None) → Position`**
 - Promotes a position to `EXCHANGE` once its standing stop is confirmed active,
@@ -837,6 +966,9 @@ Owns schema creation and version tracking.
   `LOCAL` with one — the pairing is the invariant that prevents both owners
   acting on the same position.
 - Called only by `execution.orders` and by the startup remediation step.
+- In the same transaction as the row update, writes one `position_events` row
+  with `event = 'STOP_PROTECTION_CHANGED'` and `detail` naming the previous and
+  new protection and stop-order key.
 
 **`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
@@ -863,6 +995,12 @@ Owns schema creation and version tracking.
   case.
 - Raises `PositionStateError` if the position is already closed or absent.
 - The transition is atomic: concurrent calls produce exactly one success.
+- The commission reads, the status update and the `position_events` insert run
+  inside one `BEGIN IMMEDIATE` on `db.connection.shared()`. The commission was
+  previously read on a different connection, outside the transaction that used
+  it; `db.orders.get` must not commit the outer transaction.
+- In that same transaction, writes one `position_events` row with
+  `event = 'CLOSED'`.
 - Must never delete a row — history is permanent.
 
 **`async list_open() → list[Position]`**
@@ -879,6 +1017,9 @@ Owns schema creation and version tracking.
 - This is the only mutation permitted on a closed position, and it exists because
   a stored figure that silently disagrees with its inputs is worse than one
   corrected once and logged.
+- In the same transaction, writes one `position_events` row with
+  `event = 'REALISED_RECOMPUTED'` and `detail` naming the previous and new
+  `realised_pnl`.
 
 **`async list_closed() → list[Position]`**
 - Closed positions, newest exit first. Empty list when none. Consumed by
@@ -890,16 +1031,35 @@ Owns schema creation and version tracking.
   absent or already closed.
 - Never changes entry price, stop or target: the position's risk levels were set
   at entry and a quantity correction does not re-price them.
+- In the same transaction, writes one `position_events` row with
+  `event = 'LOTS_ADJUSTED'` and `detail` naming the previous and new lot count.
 
 **`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime) → Position`**
 - Creates an open position for a holding discovered at the broker but unknown
   locally, with `adopted = True`, stop and target derived from `average_price`,
   and age counted from `adopted_at`.
 - Called only by `broker.reconcile`.
+- In the same transaction, writes one `position_events` row with
+  `event = 'ADOPTED'`.
+
+**`async list_events(position_id: int) → list[PositionEvent]`**
+- Returns that position's events oldest-first. Empty list when none, never
+  `None`.
+- `PositionEvent` is a frozen dataclass owned by this module: `position_id`,
+  `occurred_at` (timezone-aware UTC), `event` (one of `OPENED`,
+  `STOP_PROTECTION_CHANGED`, `LOTS_ADJUSTED`, `CLOSED`, `REALISED_RECOMPUTED`,
+  `ADOPTED`) and `detail` (a JSON object as text).
+- Events are never updated and never deleted. This reader is what makes the
+  brief's requirement — that a post-incident question be answerable from the
+  database alone — true rather than aspirational.
 
 ### `zarabot/db/orders.py`
 
 **Sole owner of order rows and of order status transitions.**
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
 
 **`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str, exit_trigger: ExitTrigger | None = None) → OrderRecord`**
 - Persists the intent to place an order **before** it is sent.
@@ -941,6 +1101,10 @@ Owns schema creation and version tracking.
 
 **Sole owner of stop-order rows.** No other module writes them.
 
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
+
 **`async record_placing(key: str, position_id: int, ticker: str, lots: int, stop_price: Decimal) → StopOrderRecord`**
 - Persists the intent before the broker is called, exactly as `db.orders` does
   for ordinary orders, and for the same reason: a crash between the write and
@@ -964,6 +1128,10 @@ Owns schema creation and version tracking.
 
 **Sole owner of cooldown timestamps.**
 
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
+
 **`async start(ticker: str, at: datetime) → None`** — records or overwrites with the newer instant.
 
 **`async is_active(ticker: str, now: datetime, minutes: int) → bool`**
@@ -972,6 +1140,10 @@ Owns schema creation and version tracking.
 **`async active_until(ticker: str, minutes: int) → datetime | None`** — for display in command replies.
 
 ### `zarabot/db/signals.py`, `zarabot/db/snapshots.py`
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
 
 **`async record(signal: Signal, decision: RiskDecision) → None`** — stores every signal, approved or rejected, with its reason.
 
@@ -1139,6 +1311,13 @@ exception; must convert every SDK exception into one of the typed exceptions
 above; must never return a `float`.
 
 ### `zarabot/broker/reconcile.py`
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation. This module is not a `db.*` repository, but it
+was one of the eight sites opening its own connection. **The shared connection is
+the only change to this module in v1.23**: the `STOP_DUPLICATE` remedy gap is
+issue #35 and is scheduled separately — do not fold it in here.
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
 - Compares `broker.client.get_portfolio()` against `db.positions.list_open()`.
@@ -1399,6 +1578,12 @@ the system must never rest in.
 
 **Sole owner of the halt flag.**
 
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation. This module is not a `db.*` repository, but it
+was one of the eight sites opening its own connection and it owes the same
+obligation.
+
 **`async is_halted() → bool`** · **`async current() → HaltState | None`**
 
 **`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
@@ -1475,7 +1660,10 @@ Fixed ordering; each step completes before the next begins:
    is watching is not a security control. The alert must never contain the
    token.
 2. `logging_setup.configure()`.
-3. Open the database and `db.migrations.apply()`.
+3. `db.connection.connect(config.db_path)`, then
+   `db.migrations.apply(db.connection.shared())`. The connection is opened here —
+   not at import, and not inside a repository — and `apply` receives the shared
+   connection rather than opening a second one.
 4. `strategies.registry.enabled()`, including model load if configured.
 5. `market.session.refresh()`.
 6. `execution.orders.resolve_unfinished()`.
@@ -1548,8 +1736,9 @@ restarted with backoff. A failure in one task must never terminate another.
 
 **`async shutdown(ctx, signal) → None`**
 - Stops accepting new signals, waits for in-flight submissions to reach a known
-  state or a bounded timeout, settles what it can, records state, closes the
-  database, and exits.
+  state or a bounded timeout, settles what it can, records state, calls
+  `db.connection.disconnect()`, and exits. Closing the database means that call
+  and nothing else — no repository closes a connection it did not open.
 - Must never cancel or liquidate positions.
 - Orders unresolved at the timeout are left as `SUBMITTING` for the next startup
   to resolve — this is correct, not a leak.
@@ -1690,6 +1879,28 @@ explicit UTC offset. Booleans are `INTEGER` 0 or 1.
 - `stop_price` and `target_price` are frozen at entry. Changing `STOP_LOSS_PCT`
   in configuration must never move the stop of an already-open position.
 - Rows are never deleted.
+
+### `position_events`
+
+Append-only history of every mutation to a position. Owned by `db.positions`,
+written in the same transaction as the row change it describes.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER | Primary key |
+| `position_id` | INTEGER NOT NULL | FK → `positions(id)` |
+| `occurred_at` | TEXT NOT NULL | UTC ISO-8601, from `clock.now()` |
+| `event` | TEXT NOT NULL | CHECK IN (`OPENED`, `STOP_PROTECTION_CHANGED`, `LOTS_ADJUSTED`, `CLOSED`, `REALISED_RECOMPUTED`, `ADOPTED`) |
+| `detail` | TEXT NOT NULL | JSON object: previous and new values, and the order key where one applies |
+
+**Invariants.**
+- Rows are never updated and never deleted.
+- Every successful mutation of a position inserts exactly one row; a mutation
+  that rolls back inserts none. The trail cannot disagree with the row, because
+  the two are written in one transaction.
+- The `positions` row answers "what is true now"; this table answers "how did it
+  get there". The second question is the one an incident asks, and before v1.23
+  nothing in the database could answer it.
 
 ### `orders`
 
@@ -1834,6 +2045,11 @@ historical record is the purpose of the project. Backups are retained 30 days.
   constraint. It is a separate migration rather than an edit to `001` because
   `001` has been applied — in tests, and potentially on a developer machine — and
   the forward-only rule holds without exception.
+- `003_position_events.sql` creates `position_events`. Forward-only, as above:
+  `001` is already applied in tests and on the deployed database. The live
+  database holds zero rows, so adding the table and enabling foreign-key
+  enforcement cannot conflict with existing data — this is the cheapest moment in
+  the project's life to turn enforcement on.
 - Migrations are forward-only. There are no down-migrations: a bad migration is
   corrected by a new migration, because rolling a schema backwards under a
   database holding real trade history is more dangerous than the defect.
@@ -2033,6 +2249,12 @@ Applies across all modules. Every external failure mode has exactly one rule.
     than the drift it guards against, and the alternative — shipping a
     hand-written NTP client into a system that moves money — is more risk than a
     correctly configured time daemon warrants.
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
 
 ---
 

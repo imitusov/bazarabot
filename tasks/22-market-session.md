@@ -1,4 +1,4 @@
-# Task 22/39: Implement `zarabot/market/session.py`
+# Task 22/40: Implement `zarabot/market/session.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Is the exchange open? Queried from the broker calendar, never hardcoded. Default
 
 ## Build order position
 
-Module **22** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **22** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

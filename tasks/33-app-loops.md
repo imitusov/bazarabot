@@ -1,4 +1,4 @@
-# Task 33/39: Implement `zarabot/app/loops.py`
+# Task 33/40: Implement `zarabot/app/loops.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The trading cycle. Exits run before the halt check, which is what implements hal
 
 ## Build order position
 
-Module **33** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **33** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -94,8 +94,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     hand-written NTP client into a system that moves money — is more risk than a
     correctly configured time daemon warrants.
 
----
-
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -121,6 +119,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   before exiting (proves the graceful-shutdown contract).
 - Shutdown neither cancels nor liquidates positions (proves restarts have no
   financial consequence).
+- `shutdown` calls `db.connection.disconnect()`, and `db.connection.shared()`
+  raises `DatabaseNotOpenError` afterwards (proves "closes the database" is that
+  one call rather than a repository-level close of a connection nobody owns).
 
 ## Expected output
 

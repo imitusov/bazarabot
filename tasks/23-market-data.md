@@ -1,4 +1,4 @@
-# Task 23/39: Implement `zarabot/market/data.py`
+# Task 23/40: Implement `zarabot/market/data.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Candles for the watchlist. One failing instrument must never blind the bot to th
 
 ## Build order position
 
-Module **23** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **23** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

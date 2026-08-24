@@ -1,7 +1,7 @@
 # Dependency Order — Zarabot
 
-**Version:** 1.2
-**Derived from:** `technical-spec.md` v1.5
+**Version:** 1.3
+**Derived from:** `technical-spec.md` v1.23
 **Versioning:** new version when a module is added, removed, or its dependencies
 change.
 
@@ -30,6 +30,10 @@ of "now" and every later test injects it.
 ## Layer 2 — Storage
 
 5. **db.migrations** — depends on: config
+5b. **db.connection** — depends on: config
+    *(sole owner of the process-wide connection. Numbered after `db.migrations`
+    because `apply` is written to receive a connection rather than open one, and
+    the two are built in that order.)*
 6. **db.positions** — depends on: models, clock, db.migrations
 7. **db.orders** — depends on: models, clock, db.migrations
 8. **db.stop_orders** — depends on: models, clock, db.migrations
@@ -38,7 +42,10 @@ of "now" and every later test injects it.
 11. **db.snapshots** — depends on: models, clock, db.migrations
 
 Repository modules are independent of one another — order among 6–11 is free.
-Each owns its own tables exclusively; none reads or writes another's.
+Each owns its own tables exclusively; none reads or writes another's. All of them
+run their SQL on `db.connection.shared()`; none opens a connection. So do
+`state.halt` (24) and `broker.reconcile` (27), which are not repositories but
+were opening their own.
 
 ## Layer 3 — Pure logic (no I/O, no clock, no database)
 

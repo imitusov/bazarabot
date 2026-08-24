@@ -1,4 +1,4 @@
-# Task 9/39: Implement `zarabot/db/cooldowns.py`
+# Task 9/40: Implement `zarabot/db/cooldowns.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of per-instrument re-entry cooldowns, which replace a daily order cap
 
 ## Build order position
 
-Module **9** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **9** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -27,6 +27,10 @@ Module **9** of 39 in `dependency-order.md`. Everything before it is complete an
 
 **Sole owner of cooldown timestamps.**
 
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
+
 **`async start(ticker: str, at: datetime) → None`** — records or overwrites with the newer instant.
 
 **`async is_active(ticker: str, now: datetime, minutes: int) → bool`**
@@ -41,6 +45,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
 12. **Database write failure on a non-critical path** (signals, snapshots,
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
+
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+---
 
 ## Test cases
 

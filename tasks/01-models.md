@@ -1,4 +1,4 @@
-# Task 1/39: Implement `zarabot/models.py`
+# Task 1/40: Implement `zarabot/models.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Shared domain types. Every other module's signatures are written in these types,
 
 ## Build order position
 
-Module **1** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **1** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

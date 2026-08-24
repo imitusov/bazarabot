@@ -1,4 +1,4 @@
-# Task 10/39: Implement `zarabot/db/signals.py`
+# Task 10/40: Implement `zarabot/db/signals.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Records every signal with its risk decision, approved or rejected. Rejections ar
 
 ## Build order position
 
-Module **10** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **10** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -32,6 +32,10 @@ Module **10** of 39 in `dependency-order.md`. Everything before it is complete a
 
 ### `zarabot/db/signals.py`, `zarabot/db/snapshots.py`
 
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
+
 **`async record(signal: Signal, decision: RiskDecision) → None`** — stores every signal, approved or rejected, with its reason.
 
 **`async list_for_period(start: date, end: date) → list[...]`** — for the weekly report.
@@ -45,6 +49,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
 12. **Database write failure on a non-critical path** (signals, snapshots,
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
+
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+---
 
 ## Test cases
 

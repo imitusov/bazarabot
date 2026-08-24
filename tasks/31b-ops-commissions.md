@@ -1,4 +1,4 @@
-# Task 31b/39: Implement `zarabot/ops/commissions.py`
+# Task 31b/40: Implement `zarabot/ops/commissions.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Records commissions the broker reported after the fill and corrects the profit f
 
 ## Build order position
 
-Module **31b** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **31b** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

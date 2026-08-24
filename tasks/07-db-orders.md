@@ -1,4 +1,4 @@
-# Task 7/39: Implement `zarabot/db/orders.py`
+# Task 7/40: Implement `zarabot/db/orders.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of order rows. Records intent BEFORE the broker is called, which is w
 
 ## Build order position
 
-Module **7** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **7** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -50,6 +50,10 @@ permanently — mislabelled history cannot be repaired.
 ### `zarabot/db/orders.py`
 
 **Sole owner of order rows and of order status transitions.**
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation.
 
 **`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str, exit_trigger: ExitTrigger | None = None) → OrderRecord`**
 - Persists the intent to place an order **before** it is sent.
@@ -102,6 +106,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
 12. **Database write failure on a non-critical path** (signals, snapshots,
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
+
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+---
 
 ## Test cases
 

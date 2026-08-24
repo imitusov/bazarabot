@@ -1,4 +1,4 @@
-# Task 19/39: Implement `zarabot/strategies/registry.py`
+# Task 19/40: Implement `zarabot/strategies/registry.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Builds the active strategy set from configuration.
 
 ## Build order position
 
-Module **19** of 39 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **19** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
