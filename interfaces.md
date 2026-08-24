@@ -168,6 +168,33 @@ and `PRAGMA journal_mode = WAL` on the given connection. Does not call
 `aiosqlite.connect` and does not close `conn`. Ships `003_position_events.sql`,
 which creates `position_events`.
 
+## `zarabot.db.connection`
+
+Sole owner of the process-wide SQLite connection. The only module that calls
+`aiosqlite.connect` or closes that connection. Never connects at import.
+Opened by `app.startup`, closed by `app.shutdown`. Does not apply migrations.
+
+**`DatabaseNotOpenError`**
+Raised when `shared` is called before `connect` or after `disconnect` (rule 30).
+Never opens a fallback connection.
+
+**`DatabaseAlreadyOpenError`**
+Raised when `connect` is called while a process connection is already open.
+
+**`async connect(path: str) → aiosqlite.Connection`**
+Opens the SQLite file at `path`, stores it as the process connection, and issues
+`PRAGMA journal_mode = WAL`, `PRAGMA foreign_keys = ON`, and
+`PRAGMA busy_timeout = 30000`. Raises `DatabaseAlreadyOpenError` if already open.
+Does not apply migrations.
+
+**`shared() → aiosqlite.Connection`**
+Returns the open process connection. Raises `DatabaseNotOpenError` when none is
+open. Must never open a connection as a side effect.
+
+**`async disconnect() → None`**
+Closes the process connection and forgets it. Idempotent when already closed.
+After it returns, `shared()` raises `DatabaseNotOpenError`.
+
 ## `zarabot.db.positions`
 
 Sole owner of `positions` rows. Never deletes. Reads `DB_PATH` via `config.load()`.

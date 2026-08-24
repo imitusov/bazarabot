@@ -29,9 +29,7 @@ async def _close_process_connection() -> None:
     await disconnect()
 
 
-async def test_connect_then_shared_returns_live_connection_and_import_opens_no_file(
-    tmp_path: Path,
-) -> None:
+def test_importing_the_module_opens_no_file(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_REPO_ROOT)
     result = subprocess.run(  # noqa: S603
@@ -56,6 +54,8 @@ async def test_connect_then_shared_returns_live_connection_and_import_opens_no_f
     )
     assert result.returncode == 0, result.stderr
 
+
+async def test_connect_then_shared_returns_live_connection(tmp_path: Path) -> None:
     path = tmp_path / "zarabot.db"
     live = await connect(str(path))
     via_shared = shared()
