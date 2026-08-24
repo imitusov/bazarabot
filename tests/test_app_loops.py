@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 
 from zarabot.app.startup import AppContext
-from zarabot.broker.client import BrokerUnavailable, InstrumentNotFound, OrderRejected
+from zarabot.broker.client import (
+    BrokerUnavailable,
+    InstrumentNotFound,
+    OrderRejected,
+    PriceRejected,
+)
 from zarabot.config import Config
 from zarabot.execution.orders import ExitFailed
 from zarabot.models import (
@@ -527,6 +532,80 @@ async def test_three_consecutive_market_data_failures_alert_once(
     assert len(alerts) == 1
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
     assert len(alerts) == 1
+
+
+async def test_one_price_rejected_leaves_other_positions_evaluated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    closed: list[tuple[int, ExitTrigger]] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    sber = _position(id=1, ticker="SBER", figi="BBG000SBER01")
+    gazp = _position(id=2, ticker="GAZP", figi="BBG000GAZP01")
+
+    async def _open() -> list[Position]:
+        return [sber, gazp]
+
+    async def _price(figi: str) -> Decimal:
+        if figi == sber.figi:
+            raise PriceRejected("stale")
+        return Decimal("110")
+
+    async def _close(pos: Position, trigger: ExitTrigger) -> Position:
+        closed.append((pos.id, trigger))
+        return pos
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "get_last_price", _price)
+    monkeypatch.setattr(loops, "close_position", _close)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert closed == [(2, ExitTrigger.TAKE_PROFIT)]
+    assert loops._market_failures == 0
+
+
+async def test_all_prices_rejected_alerts_once_naming_the_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    alerts: list[str] = []
+    closed: list[object] = []
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    first = _position(id=1, ticker="SBER", figi="BBG000SBER01")
+    second = _position(id=2, ticker="GAZP", figi="BBG000GAZP01")
+
+    async def _open() -> list[Position]:
+        return [first, second]
+
+    async def _price(figi: str) -> Decimal:
+        raise PriceRejected("unusable")
+
+    async def _close(*_a: object, **_k: object) -> None:
+        closed.append("closed")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "get_last_price", _price)
+    monkeypatch.setattr(loops, "close_position", _close)
+    monkeypatch.setattr(loops, "alert", _alert)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert closed == []
+    assert len(alerts) == 1
+    assert "2" in alerts[0]
+    assert loops._market_failures == 0
 
 
 async def test_run_one_task_failure_does_not_kill_others(
