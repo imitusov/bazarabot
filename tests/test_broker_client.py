@@ -22,12 +22,14 @@ from t_tech.invest.schemas import (
 )
 from t_tech.invest.utils import decimal_to_money, decimal_to_quotation
 
+import zarabot.broker.client as broker_client
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
     InstrumentNotFound,
     OrderNotFound,
     OrderRejected,
+    PriceRejected,
     cancel_stop_order,
     get_candles,
     get_instrument,
@@ -71,6 +73,8 @@ class _Capture:
         self.fail: BaseException | None = None
         self.order_status = OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
         self.order_message = ""
+        self.last_price = Decimal("123.45")
+        self.last_price_time: datetime = NOW
 
 
 class _AsyncClient:
@@ -128,7 +132,12 @@ class _AsyncClient:
     async def get_last_prices(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_last_prices", kwargs)
         return SimpleNamespace(
-            last_prices=[SimpleNamespace(price=decimal_to_quotation(Decimal("123.45")))]
+            last_prices=[
+                SimpleNamespace(
+                    price=decimal_to_quotation(self._capture.last_price),
+                    time=self._capture.last_price_time,
+                )
+            ]
         )
 
     async def get_portfolio(self, **kwargs: Any) -> SimpleNamespace:
@@ -241,6 +250,13 @@ class _AsyncClient:
             order_date=NOW,
             order_request_id=kwargs.get("order_id", ""),
         )
+
+
+@pytest.fixture(autouse=True)
+def _reset_last_accepted_prices() -> None:
+    accepted = getattr(broker_client, "_last_accepted", None)
+    if isinstance(accepted, dict):
+        accepted.clear()
 
 
 @pytest.fixture
@@ -451,3 +467,44 @@ async def test_missing_order_raises_order_not_found(capture: _Capture) -> None:
     capture.fail = AioRequestError(StatusCode.NOT_FOUND, "no order", None)
     with pytest.raises(OrderNotFound):
         await get_order_state("missing-key")
+
+
+@pytest.mark.asyncio
+async def test_zero_quote_raises_price_rejected_not_unavailable(
+    capture: _Capture,
+) -> None:
+    capture.last_price = Decimal(0)
+    with pytest.raises(PriceRejected) as exc:
+        await get_last_price("FIGI-ZERO")
+    assert not isinstance(exc.value, BrokerUnavailable)
+    assert TOKEN not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_stale_quote_raises_price_rejected_at_age_boundary(
+    capture: _Capture,
+) -> None:
+    capture.last_price = Decimal("100")
+    capture.last_price_time = NOW - timedelta(seconds=120)
+    assert await get_last_price("FIGI-AGE") == Decimal("100")
+
+    capture.last_price_time = NOW - timedelta(seconds=121)
+    with pytest.raises(PriceRejected) as exc:
+        await get_last_price("FIGI-AGE-STALE")
+    assert not isinstance(exc.value, BrokerUnavailable)
+
+
+@pytest.mark.asyncio
+async def test_implausible_move_raises_price_rejected_and_does_not_update_baseline(
+    capture: _Capture,
+) -> None:
+    capture.last_price = Decimal("100")
+    figi = "FIGI-MOVE"
+    assert await get_last_price(figi) == Decimal("100")
+
+    capture.last_price = Decimal("121")
+    with pytest.raises(PriceRejected):
+        await get_last_price(figi)
+
+    capture.last_price = Decimal("110")
+    assert await get_last_price(figi) == Decimal("110")
