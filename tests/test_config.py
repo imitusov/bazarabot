@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from pathlib import Path
 
@@ -46,6 +47,8 @@ def _env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None = None) -
         "LOG_LEVEL",
         "TZ",
         "SSL_TBANK_VERIFY",
+        "PRICE_MAX_AGE_SECONDS",
+        "PRICE_MAX_MOVE_PCT",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in REQUIRED.items():
@@ -65,6 +68,8 @@ def test_complete_environment_produces_populated_config(
     assert cfg.position_size_pct == Decimal("10")
     assert cfg.trading_mode == "live"
     assert cfg.ssl_tbank_verify is True
+    assert cfg.price_max_age_seconds == 120
+    assert cfg.price_max_move_pct == Decimal("20")
 
 
 def test_missing_tinvest_token_raises_naming_the_variable(
@@ -155,6 +160,77 @@ def test_ssl_tbank_verify_true_and_false(
     assert load().ssl_tbank_verify is True
     _env(monkeypatch, {"SSL_TBANK_VERIFY": "false"})
     assert load().ssl_tbank_verify is False
+
+
+def test_ssl_tbank_verify_false_logs_critical_naming_the_risk(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _env(monkeypatch, {"SSL_TBANK_VERIFY": "false"})
+    with caplog.at_level(logging.CRITICAL):
+        load()
+    critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert critical
+    joined = " ".join(r.getMessage() for r in critical).lower()
+    assert "certificate" in joined
+    assert "token" in joined
+    assert "tinvest-secret-token" not in caplog.text
+    assert "telegram-secret-token" not in caplog.text
+
+
+def test_ssl_tbank_verify_true_does_not_log_critical(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _env(monkeypatch, {"SSL_TBANK_VERIFY": "true"})
+    with caplog.at_level(logging.CRITICAL):
+        load()
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
+
+
+def test_price_max_age_seconds_defaults_to_120(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch)
+    assert load().price_max_age_seconds == 120
+
+
+def test_price_max_age_seconds_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"PRICE_MAX_AGE_SECONDS": "30"})
+    assert load().price_max_age_seconds == 30
+
+
+def test_price_max_age_seconds_out_of_range_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"PRICE_MAX_AGE_SECONDS": "0"})
+    with pytest.raises(ConfigError, match="PRICE_MAX_AGE_SECONDS"):
+        load()
+
+
+def test_price_max_move_pct_defaults_to_20(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch)
+    assert load().price_max_move_pct == Decimal("20")
+
+
+def test_price_max_move_pct_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"PRICE_MAX_MOVE_PCT": "15"})
+    assert load().price_max_move_pct == Decimal("15")
+
+
+def test_price_max_move_pct_out_of_range_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"PRICE_MAX_MOVE_PCT": "0"})
+    with pytest.raises(ConfigError, match="PRICE_MAX_MOVE_PCT"):
+        load()
+    _env(monkeypatch, {"PRICE_MAX_MOVE_PCT": "101"})
+    with pytest.raises(ConfigError, match="PRICE_MAX_MOVE_PCT"):
+        load()
 
 
 def test_ssl_tbank_verify_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
