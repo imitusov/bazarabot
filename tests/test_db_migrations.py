@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import aiosqlite
 import pytest
 
-from zarabot.db.migrations import MigrationError, apply
+from zarabot.db.migrations import MIGRATIONS_DIR, MigrationError, apply
+
+_FILE = re.compile(r"^(\d+)_.*\.sql$")
 
 EXPECTED_TABLES = {
     "schema_version",
     "positions",
+    "position_events",
     "orders",
     "stop_orders",
     "signals",
@@ -23,12 +27,28 @@ EXPECTED_TABLES = {
 }
 
 
+def _highest_on_disk() -> int:
+    versions: list[int] = []
+    for path in MIGRATIONS_DIR.iterdir():
+        match = _FILE.match(path.name)
+        if match and path.is_file():
+            versions.append(int(match.group(1)))
+    assert versions
+    return max(versions)
+
+
 async def _tables(conn: aiosqlite.Connection) -> set[str]:
     cursor = await conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
     )
     rows = await cursor.fetchall()
     return {row[0] for row in rows}
+
+
+async def _columns(conn: aiosqlite.Connection, table: str) -> set[str]:
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
+    rows = await cursor.fetchall()
+    return {row[1] for row in rows}
 
 
 async def _version(conn: aiosqlite.Connection) -> int:
@@ -47,8 +67,26 @@ async def test_apply_to_empty_database_creates_every_table(db_path: Path) -> Non
     async with aiosqlite.connect(db_path) as conn:
         version = await apply(conn)
         tables = await _tables(conn)
+        order_cols = await _columns(conn, "orders")
+        recorded = await _version(conn)
     assert tables >= EXPECTED_TABLES
-    assert version >= 1
+    assert "exit_trigger" in order_cols
+    assert version == _highest_on_disk()
+    assert recorded == version
+
+
+async def test_apply_sets_wal_and_foreign_keys_on_given_connection(
+    db_path: Path,
+) -> None:
+    async with aiosqlite.connect(db_path) as conn:
+        await apply(conn)
+        journal = await conn.execute("PRAGMA journal_mode")
+        journal_row = await journal.fetchone()
+        foreign_keys = await conn.execute("PRAGMA foreign_keys")
+        foreign_keys_row = await foreign_keys.fetchone()
+    assert journal_row is not None
+    assert journal_row[0].lower() == "wal"
+    assert foreign_keys_row == (1,)
 
 
 async def test_apply_twice_is_idempotent(db_path: Path) -> None:
@@ -112,17 +150,3 @@ async def test_recorded_version_ahead_of_code_raises_and_changes_nothing(
         highest = await cursor.fetchone()
     assert before == after
     assert highest == (current + 10,)
-
-
-async def test_apply_sets_wal_and_foreign_keys_on_given_connection(
-    db_path: Path,
-) -> None:
-    async with aiosqlite.connect(db_path) as conn:
-        await apply(conn)
-        journal = await conn.execute("PRAGMA journal_mode")
-        journal_row = await journal.fetchone()
-        foreign_keys = await conn.execute("PRAGMA foreign_keys")
-        foreign_keys_row = await foreign_keys.fetchone()
-    assert journal_row is not None
-    assert journal_row[0].lower() == "wal"
-    assert foreign_keys_row == (1,)
