@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-25 · spec v1.22 · brief v1.6 · 32 open issues
+Updated: 2026-08-25 · spec v1.22 · brief v1.6 · 30 open issues
 
 ## What this is
 
@@ -20,7 +20,7 @@ module) → code. **When the brief and the spec conflict, the brief wins.**
 positions, zero orders, zero signals, zero snapshots. The verification suite
 (V1–V11, `make verify`) has never run.
 
-So every one of the 32 open issues was found by *reading* code, or by a
+So every one of the 30 open issues was found by *reading* code, or by a
 critic pass over code that had already been read, and
 `broker.client` is written against an API surface read out of the vendored SDK
 wheel and never exercised against a live account. Lot sizes, candle depth, rate
@@ -29,25 +29,29 @@ limits and sandbox fidelity are all still assumptions.
 `scripts/deploy/export_health.py` exists to give the audit real behaviour and
 currently returns nothing, because there is no behaviour.
 
-## In flight — batch 1 of the bug sweep
-
-Closing #6 (zero/stale price liquidates every LOCAL position), #23, #26.
+## Batch 1 of the bug sweep — done
 
 | Task | Issue | State |
 |---|---|---|
-| `03-config` | #26 (log half) | done |
-| `21-broker-client` | #6, #23 | done |
+| `03-config` | #26 (log half) | done — `a2a49a1` |
+| `21-broker-client` | #6 | done — `71a1a77` |
 | `33-app-loops` | #6 | done — latch landed in `74c7451` |
-| `32-app-startup` | #26 (alert half) | done — `5a81008` + `cedfb39`, pushed |
+| `32-app-startup` | #26 (alert half) | done — `5a81008` + `cedfb39` |
 
-All four tasks have landed and `make check` is green on all six gates
-(coverage 90.57%). **#6, #23 and #26 are not closed yet**: the critic pass on
-task 32 was not clean, and the runbook's rule is that a batch closes only once
-the critic is clean or its findings are filed. They are filed — #35 and #36 —
-so closing the three is the next action, and it needs nothing but the decision.
+**#6 and #26 closed**, each against its own verification list. `make check`
+green on all six gates, coverage 90.57%. The critic pass on task 32 was not
+clean; its two findings are filed as #35 and #36, which is what the runbook
+requires before a batch closes.
 
-Neither finding is in the code the batch changed; both are contract gaps the
-critic surfaced while reviewing the whole module.
+**#23 was in this batch's title and is not fixed.** Batch 1 gave it the type
+distinction — `PriceRejected` is no longer conflated with `BrokerUnavailable` —
+but both problems the issue actually specifies are untouched:
+`client.py:122` still turns every non-SDK exception into `BrokerUnavailable`
+with `from None`, and `market/data.py:37` is still `except Exception: continue`.
+It belongs to batch 6 with #10 and #18, where the work order already had it —
+error typing and channel reuse are one change to the same wrapper. Scope
+recorded on the issue so the next agent does not inherit the assumption that it
+landed here.
 
 ## Opened by the critic on task 32
 

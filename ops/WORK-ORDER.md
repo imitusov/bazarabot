@@ -84,11 +84,11 @@ Procedure: `ops/RUNBOOK.md`.
 |---|---|---|---|
 | 1 | `market.session`, `app.loops` | #2, #3 | **done** — v1.17, `b0d2e4b`, critic clean |
 | 2a | `market.session` | #31 | **done** — v1.18, `4272cfb`, critic clean but for #32 |
-| 2 | `config` | #26, part of #15 | `config` half done; `app.startup` half done in `cedfb39` |
+| 2 | `config` | #26, part of #15 | #26 **closed** (`a2a49a1` + `cedfb39`); #15 still open |
 | 3 | `db.*` | #20, #29 | |
 | 4 | `risk.sizing`, `risk.gate` | #15, #16 | |
 | 5 | `lifecycle.exits` | #6 | |
-| 6 | `broker.client` | #10, #18, #23 | |
+| 6 | `broker.client` | #10, #18, #23 | **#23 lives here**, not in batch 1 — see the issue |
 | 7 | `market.session`, `market.data` | #19, #13, **#32** | |
 | 8 | `execution.orders` | #4, #5, #10, #11, #22, #28 | **six issues — the hard one** |
 | 9 | `broker.reconcile` | #7, #11 | |
@@ -98,7 +98,8 @@ Procedure: `ops/RUNBOOK.md`.
 | 13 | `sandbox.*` | #12, #13, #14 | research only |
 | 14 | `broker.client`, `pnl` | #30 | coverage ratchet |
 
-Closed: #1 (`6f4be32`), #2 and #3 (`b0d2e4b`), #31 (`4272cfb`).
+Closed: #1 (`6f4be32`), #2 and #3 (`b0d2e4b`), #31 (`4272cfb`), #6
+(`71a1a77` + `74c7451`), #26 (`a2a49a1` + `cedfb39`).
 Opened during the work: #30 (coverage floors), #31 (empty-cache contract gap),
 #32 (alert latch never resets), #34 (price-rejection alert never latches),
 **#35** (`STOP_DUPLICATE` detected and dropped) and **#36** (`/report` wiring in
@@ -110,7 +111,11 @@ from a test**: #30 from the per-module coverage floors, #31, #32, #34, #35 and
 paying for itself — each was found in the batch that created or touched it,
 rather than in production months later.
 
-**#35 is the reason batch 1 is not closed yet.** `broker.reconcile` reports the
+**#23 was in batch 1's title and is not fixed by it** — batch 1 gave it the
+`PriceRejected` type distinction, but `client.py:122` and `market/data.py:37`
+are untouched. It stays in batch 6 above.
+
+**#35 is the largest thing this batch surfaced.** `broker.reconcile` reports the
 double-sell condition and `app.startup` drops it on the floor, because step 7 of
 the `app.startup` contract enumerates three remedies and the duplicate
 obligation was written in `broker.reconcile`'s section. Failure class 2 for the
