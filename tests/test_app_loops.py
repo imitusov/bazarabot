@@ -608,6 +608,50 @@ async def test_all_prices_rejected_alerts_once_naming_the_count(
     assert loops._market_failures == 0
 
 
+async def test_consecutive_price_rejections_alert_once_until_rearmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    alerts: list[str] = []
+    calls: list[str] = []
+    reject = True
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    first = _position(id=1, ticker="SBER", figi="BBG000SBER01")
+    second = _position(id=2, ticker="GAZP", figi="BBG000GAZP01")
+
+    async def _open() -> list[Position]:
+        return [first, second]
+
+    async def _price(figi: str) -> Decimal:
+        if reject:
+            raise PriceRejected("unusable")
+        return Decimal("110")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "get_last_price", _price)
+    monkeypatch.setattr(loops, "alert", _alert)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1
+    assert "2" in alerts[0]
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1
+    reject = False
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1
+    reject = True
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 2
+    assert "2" in alerts[1]
+
+
 async def test_run_one_task_failure_does_not_kill_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
