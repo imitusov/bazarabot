@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.19
+**Version:** 1.20
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -639,6 +639,9 @@ Additionally, `strategies.ml_model`:
   (proves the TLS root is available when the channel is built — the failure this
   guards against is a handshake error that looks like a network fault rather
   than a configuration one).
+- Starting with `ssl_tbank_verify` false alerts before any broker call, and the
+  alert contains no token (proves running without certificate verification is
+  something the owner is told about rather than something buried in a log).
 - An unresolved order from a previous run is resolved before the first strategy
   evaluation (proves recovery precedes trading — the ordering that prevents a
   duplicate order).
@@ -767,12 +770,12 @@ Loads and validates every setting once at startup.
   never branches on mode — sandbox remains selected by endpoint alone.
 - Adds `price_max_age_seconds` (default 120) and `price_max_move_pct` (default
   20), the bounds `broker.client` validates quotes against.
-- `ssl_tbank_verify` defaults to true. **Setting it false must be loud**: it
-  disables certificate verification on the connection carrying the trading
-  token, so `config.load()` logs a CRITICAL line naming the risk, and
-  `app.startup` alerts the owner before the first broker call. A security
-  control that can be turned off silently by one environment variable is a
-  control nobody can audit after the fact.
+- `ssl_tbank_verify` defaults to true. **Setting it false must be loud**:
+  `config.load()` logs a CRITICAL line naming the risk, because it disables
+  certificate verification on the connection carrying the trading token. A
+  security control that one environment variable can switch off silently is a
+  control nobody can audit after the fact. `app.startup` raises the matching
+  alert — see its own contract.
 - Raises `ConfigError` naming the offending variable when: a required variable is
   missing or empty; a numeric value is out of range; `POSITION_SIZE_PCT` exceeds
   `MAX_POSITION_PCT`; `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100;
@@ -1459,6 +1462,11 @@ Fixed ordering; each step completes before the next begins:
 1b. Write `SSL_TBANK_VERIFY` into the process environment from
    `config.ssl_tbank_verify`. This must precede every broker call; a channel
    created before it is set fails its TLS handshake.
+1c. **When `ssl_tbank_verify` is false, alert the owner before the first broker
+   call**, saying that certificate verification is disabled on the connection
+   carrying the trading token. `config` logs it; a log line on a server nobody
+   is watching is not a security control. The alert must never contain the
+   token.
 2. `logging_setup.configure()`.
 3. Open the database and `db.migrations.apply()`.
 4. `strategies.registry.enabled()`, including model load if configured.

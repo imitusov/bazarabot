@@ -23,6 +23,11 @@ Fixed ordering; each step completes before the next begins:
 1b. Write `SSL_TBANK_VERIFY` into the process environment from
    `config.ssl_tbank_verify`. This must precede every broker call; a channel
    created before it is set fails its TLS handshake.
+1c. **When `ssl_tbank_verify` is false, alert the owner before the first broker
+   call**, saying that certificate verification is disabled on the connection
+   carrying the trading token. `config` logs it; a log line on a server nobody
+   is watching is not a security control. The alert must never contain the
+   token.
 2. `logging_setup.configure()`.
 3. Open the database and `db.migrations.apply()`.
 4. `strategies.registry.enabled()`, including model load if configured.
@@ -69,6 +74,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (proves the TLS root is available when the channel is built — the failure this
   guards against is a handshake error that looks like a network fault rather
   than a configuration one).
+- Starting with `ssl_tbank_verify` false alerts before any broker call, and the
+  alert contains no token (proves running without certificate verification is
+  something the owner is told about rather than something buried in a log).
 - An unresolved order from a previous run is resolved before the first strategy
   evaluation (proves recovery precedes trading — the ordering that prevents a
   duplicate order).

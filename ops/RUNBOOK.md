@@ -25,6 +25,13 @@ are you, and take seconds.
 >
 > Then run `python scripts/make_tasks.py` and `make check`.
 >
+> **State each obligation in the contract of the module that owes it.** A
+> requirement on `app.startup` written inside `config`'s section is invisible to
+> `tasks/32-app-startup.md`, because the generator extracts by module heading —
+> the module that owes the work never sees the requirement. `check_docs.py` does
+> not catch this: it detects functions that are specified and missing, and an
+> orphaned obligation adds no function.
+>
 > Finish by telling me **every module task to re-run, in dependency order** —
 > not just the one the issue names. An amendment that adds a function to module
 > 22 and an obligation to module 33 needs both re-run, lowest first.

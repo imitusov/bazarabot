@@ -29,12 +29,12 @@ Loads and validates every setting once at startup.
   never branches on mode — sandbox remains selected by endpoint alone.
 - Adds `price_max_age_seconds` (default 120) and `price_max_move_pct` (default
   20), the bounds `broker.client` validates quotes against.
-- `ssl_tbank_verify` defaults to true. **Setting it false must be loud**: it
-  disables certificate verification on the connection carrying the trading
-  token, so `config.load()` logs a CRITICAL line naming the risk, and
-  `app.startup` alerts the owner before the first broker call. A security
-  control that can be turned off silently by one environment variable is a
-  control nobody can audit after the fact.
+- `ssl_tbank_verify` defaults to true. **Setting it false must be loud**:
+  `config.load()` logs a CRITICAL line naming the risk, because it disables
+  certificate verification on the connection carrying the trading token. A
+  security control that one environment variable can switch off silently is a
+  control nobody can audit after the fact. `app.startup` raises the matching
+  alert — see its own contract.
 - Raises `ConfigError` naming the offending variable when: a required variable is
   missing or empty; a numeric value is out of range; `POSITION_SIZE_PCT` exceeds
   `MAX_POSITION_PCT`; `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100;
