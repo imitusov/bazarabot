@@ -245,6 +245,7 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr(loops, "build_application", _IdleTelegram)
     monkeypatch.setattr(loops, "cache_exhausted", lambda moment: False)
     loops._cache_exhausted_alerted = False
+    loops._price_rejected_alerted = False
     loops._refreshed_on = None
 
 

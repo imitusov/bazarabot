@@ -700,8 +700,9 @@ via `close_position`; recompute daily P&L and halt on the loss limit; if halted
 return; else fetch candles, evaluate strategies, gate, record, and open
 approved entries. A `PriceRejected` for one position omits that ticker and
 continues; it does not abort the cycle and does not increment the consecutive
-market-data outage counter. Rejections are alerted once per cycle, naming the
-count.
+market-data outage counter. Rejections latch like the other alerts in this
+module: one alert when a cycle first rejects anything, naming the count, and
+none until a cycle rejects nothing and re-arms it.
 
 **`async run(ctx: AppContext) → None`**
 Sole owner of composition. Starts the trading cycle, daily rollover, trading-

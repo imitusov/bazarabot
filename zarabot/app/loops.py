@@ -60,6 +60,7 @@ _MAX_BACKOFF = 3600
 
 _market_failures = 0
 _market_alerted = False
+_price_rejected_alerted = False
 _started_at: datetime | None = None
 _rolled_on: date | None = None
 _backed_up_on: date | None = None
@@ -93,6 +94,7 @@ def _note_data_success() -> None:
 
 
 async def _prices_for(positions: list[Position]) -> dict[str, Decimal]:
+    global _price_rejected_alerted
     prices: dict[str, Decimal] = {}
     rejected = 0
     for position in positions:
@@ -102,10 +104,14 @@ async def _prices_for(positions: list[Position]) -> dict[str, Decimal]:
             rejected += 1
             continue
     if rejected:
-        await alert(
-            f"{rejected} instrument price(s) rejected this cycle; "
-            "those instruments skipped."
-        )
+        if not _price_rejected_alerted:
+            _price_rejected_alerted = True
+            await alert(
+                f"{rejected} instrument price(s) rejected this cycle; "
+                "those instruments skipped."
+            )
+    else:
+        _price_rejected_alerted = False
     return prices
 
 
