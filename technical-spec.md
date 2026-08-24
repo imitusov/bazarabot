@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.20
+**Version:** 1.21
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.2
 
@@ -1027,6 +1027,10 @@ consecutive-failure alert and is retried as though waiting would help.
     every position, so one degraded response liquidates the whole book at
     market;
   - the quote's timestamp is older than `price_max_age_seconds`;
+  - the quote carries **no timestamp, or a naive one** — freshness that cannot
+    be verified is not freshness. This is data from an outside system, so it is
+    rejected as unusable rather than raising `ValueError` the way a naive
+    datetime crossing an internal module boundary does;
   - the price differs from the last accepted price for that instrument by more
     than `price_max_move_pct`.
 - Keeps the last accepted price per instrument, which is what makes the move
