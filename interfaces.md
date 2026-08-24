@@ -110,7 +110,8 @@ range, or a cross-field rule fails. The message names the offending variable.
 `reentry_cooldown_minutes: int`, `daily_loss_limit_pct: Decimal`,
 `watchlist: tuple[str, ...]`, `enabled_strategies: tuple[str, ...]`,
 `ml_model_path: Path | None`, `poll_interval_seconds: int`, `db_path: Path`,
-`backup_dir: Path`, `log_level: str`, `tz: str`, `ssl_tbank_verify: bool = True`.
+`backup_dir: Path`, `log_level: str`, `tz: str`, `ssl_tbank_verify: bool = True`,
+`price_max_age_seconds: int = 120`, `price_max_move_pct: Decimal = Decimal("20")`.
 
 **`load() → Config`**
 `tinvest_token` and `tinvest_account_id` are resolved for the mode in force: in
@@ -120,10 +121,13 @@ Callers see one token and one account id and must not branch on `trading_mode`
 to pick credentials.
 Reads the brief's environment-variable table. Applies documented defaults to
 non-risk optional variables. `SSL_TBANK_VERIFY` defaults to `true`; only the
-strings `true` and `false` are accepted. Never substitutes a default for missing
-`ALLOCATED_CAPITAL`. Raises `ConfigError` naming the variable when: a required
-variable is missing or empty; a percentage is `<= 0` or `> 100`;
-`POSITION_SIZE_PCT` exceeds `MAX_POSITION_PCT`;
+strings `true` and `false` are accepted. `PRICE_MAX_AGE_SECONDS` defaults to
+`120`; `PRICE_MAX_MOVE_PCT` defaults to `20`. When `ssl_tbank_verify` is false,
+`load()` logs a CRITICAL line naming that certificate verification is disabled
+on the connection that carries the trading token; the token value is never
+logged. Never substitutes a default for missing `ALLOCATED_CAPITAL`. Raises
+`ConfigError` naming the variable when: a required variable is missing or empty;
+a percentage is `<= 0` or `> 100`; `POSITION_SIZE_PCT` exceeds `MAX_POSITION_PCT`;
 `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `TAKE_PROFIT_PCT` is not
 greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty; `TRADING_MODE` is not
 `live` or `sandbox`; `SSL_TBANK_VERIFY` is not `true` or `false`; or

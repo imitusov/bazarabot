@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 _DEFAULTS: dict[str, str] = {
     "TRADING_MODE": "live",
@@ -24,6 +27,8 @@ _DEFAULTS: dict[str, str] = {
     "LOG_LEVEL": "INFO",
     "TZ": "Europe/Moscow",
     "SSL_TBANK_VERIFY": "true",
+    "PRICE_MAX_AGE_SECONDS": "120",
+    "PRICE_MAX_MOVE_PCT": "20",
 }
 
 _REQUIRED = (
@@ -146,6 +151,8 @@ class Config:
     log_level: str
     tz: str
     ssl_tbank_verify: bool = True
+    price_max_age_seconds: int = 120
+    price_max_move_pct: Decimal = Decimal("20")
 
     def __repr__(self) -> str:
         return (
@@ -172,7 +179,9 @@ class Config:
             f"backup_dir={self.backup_dir!r}, "
             f"log_level={self.log_level!r}, "
             f"tz={self.tz!r}, "
-            f"ssl_tbank_verify={self.ssl_tbank_verify!r})"
+            f"ssl_tbank_verify={self.ssl_tbank_verify!r}, "
+            f"price_max_age_seconds={self.price_max_age_seconds!r}, "
+            f"price_max_move_pct={self.price_max_move_pct!r})"
         )
 
     __str__ = __repr__
@@ -230,7 +239,7 @@ def load() -> Config:
     else:
         ml_path = None
 
-    return Config(
+    cfg = Config(
         tinvest_token=token,
         tinvest_account_id=account_id,
         trading_mode=trading_mode,
@@ -262,4 +271,16 @@ def load() -> Config:
         log_level=_optional("LOG_LEVEL"),
         tz=_optional("TZ"),
         ssl_tbank_verify=_bool("SSL_TBANK_VERIFY", _optional("SSL_TBANK_VERIFY")),
+        price_max_age_seconds=_positive_int(
+            "PRICE_MAX_AGE_SECONDS", _optional("PRICE_MAX_AGE_SECONDS")
+        ),
+        price_max_move_pct=_pct(
+            "PRICE_MAX_MOVE_PCT", _optional("PRICE_MAX_MOVE_PCT")
+        ),
     )
+    if not cfg.ssl_tbank_verify:
+        _log.critical(
+            "SSL_TBANK_VERIFY is false: certificate verification is disabled "
+            "on the connection that carries the trading token"
+        )
+    return cfg
