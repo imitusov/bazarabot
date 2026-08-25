@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import aiosqlite
 
-from zarabot.config import load
+from zarabot.db.connection import shared
 
 _LOG = logging.getLogger(__name__)
 
@@ -17,30 +17,26 @@ def _reject_naive(moment: datetime) -> None:
         raise ValueError("datetime must be timezone-aware")
 
 
-async def _connect() -> aiosqlite.Connection:
-    conn = await aiosqlite.connect(load().db_path, timeout=30)
+def _conn() -> aiosqlite.Connection:
+    conn = shared()
     conn.row_factory = aiosqlite.Row
     return conn
 
 
 async def _started_at(ticker: str) -> datetime | None:
-    conn = await _connect()
-    try:
-        cursor = await conn.execute(
-            "SELECT started_at FROM cooldowns WHERE ticker = ?", (ticker,)
-        )
-        row = await cursor.fetchone()
-        if row is None:
-            return None
-        return datetime.fromisoformat(row["started_at"])
-    finally:
-        await conn.close()
+    cursor = await _conn().execute(
+        "SELECT started_at FROM cooldowns WHERE ticker = ?", (ticker,)
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return datetime.fromisoformat(row["started_at"])
 
 
 async def start(ticker: str, at: datetime) -> None:
     """Record the cooldown start, keeping the newer instant if one exists."""
     _reject_naive(at)
-    conn = await _connect()
+    conn = _conn()
     try:
         cursor = await conn.execute(
             "SELECT started_at FROM cooldowns WHERE ticker = ?", (ticker,)
@@ -62,8 +58,6 @@ async def start(ticker: str, at: datetime) -> None:
         await conn.commit()
     except aiosqlite.Error:
         _LOG.exception("cooldown write failed for %s", ticker)
-    finally:
-        await conn.close()
 
 
 async def is_active(ticker: str, now: datetime, minutes: int) -> bool:

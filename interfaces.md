@@ -324,19 +324,23 @@ Every `ACTIVE` stop, oldest first. Empty list when none.
 
 ## `zarabot.db.cooldowns`
 
-Sole owner of `cooldowns` rows. Reads `DB_PATH` via `config.load()`.
+Sole owner of `cooldowns` rows. All SQL runs on `db.connection.shared()`.
+Never calls `aiosqlite.connect` and never closes the connection.
 
 **`async start(ticker: str, at: datetime) → None`**
 Inserts `started_at`, or overwrites only when `at` is strictly newer. Raises
 `ValueError` on a naive `at`. Write failures are logged at ERROR and not
-propagated (rule 12).
+propagated (rule 12). Access before `connect` or after `disconnect` raises
+`DatabaseNotOpenError` (rule 30).
 
 **`async is_active(ticker: str, now: datetime, minutes: int) → bool`**
 True while `now - started_at < minutes`. False when no row exists, and False
-exactly at the boundary. Raises `ValueError` on a naive `now`.
+exactly at the boundary. Raises `ValueError` on a naive `now`. Access before
+`connect` or after `disconnect` raises `DatabaseNotOpenError` (rule 30).
 
 **`async active_until(ticker: str, minutes: int) → datetime | None`**
-`started_at + minutes`, or `None` when no cooldown is recorded.
+`started_at + minutes`, or `None` when no cooldown is recorded. Access before
+`connect` or after `disconnect` raises `DatabaseNotOpenError` (rule 30).
 
 ## `zarabot.db.signals`
 
