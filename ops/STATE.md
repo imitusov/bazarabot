@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-25 · spec v1.22 · brief v1.6 · 30 open issues
+Updated: 2026-08-25 · spec v1.24 · brief v1.7 · 28 open issues
 
 ## What this is
 
@@ -20,14 +20,34 @@ module) → code. **When the brief and the spec conflict, the brief wins.**
 positions, zero orders, zero signals, zero snapshots. The verification suite
 (V1–V11, `make verify`) has never run.
 
-So every one of the 30 open issues was found by *reading* code, or by a
-critic pass over code that had already been read, and
+So all but one of the 28 open issues was found by *reading* code, or by a
+critic pass over code that had already been read. The exception is #39, found in
+production, and it is the one that explains everything else, and
 `broker.client` is written against an API surface read out of the vendored SDK
 wheel and never exercised against a live account. Lot sizes, candle depth, rate
 limits and sandbox fidelity are all still assumptions.
 
 `scripts/deploy/export_health.py` exists to give the audit real behaviour and
 currently returns nothing, because there is no behaviour.
+
+## Batch 3 done — one connection, one transaction owner
+
+Closed #20, #29, #38 (spec v1.23) and then #40, #41 (v1.24). Twelve task
+re-runs, `main` green, `Package` publishing again.
+
+v1.23 made the connection shared and left the writers on per-module locks. That
+serialises nothing — the transaction lives on the connection — so two writers in
+different modules collided on the first attempt, and any bare `commit()` made
+another module's in-flight rows durable, which meant `rollback()` undid nothing
+on the money path. v1.24 gave `db.connection` a single reentrant `transaction()`
+and forbade every other module from touching transaction state (rule 31), with
+`db.migrations` the one stated exemption.
+
+**That defect was mine, in the amendment.** It was found by the critic pass on
+the finished batch, not by any test, and confirmed with two runnable
+reproductions before a line was changed. The lesson worth keeping: an amendment
+that changes *who owns* a resource has to say who owns the resource's
+**state**, not just the handle.
 
 ## Batch 1 of the bug sweep — done
 
