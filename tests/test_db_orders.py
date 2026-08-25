@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from zarabot.db.connection import DatabaseNotOpenError, connect, disconnect, shared
 from zarabot.db.migrations import apply
 from zarabot.db.orders import (
     DuplicateOrderError,
@@ -42,10 +44,14 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
-    monkeypatch.setattr("zarabot.db.orders.now", lambda: NOW)
-    async with aiosqlite.connect(path) as conn:
-        await apply(conn)
-    return path
+    monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
+    monkeypatch.setattr("zarabot.db.orders.now", lambda: NOW, raising=False)
+    conn = await connect(str(path))
+    await apply(conn)
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 async def test_submitting_then_filled_reports_terminal_state(db: Path) -> None:
@@ -68,6 +74,17 @@ async def test_submitting_orders_are_listed_unresolved(db: Path) -> None:
     assert await list_unresolved() == []
 
 
+async def test_unresolved_includes_submitted_oldest_first(db: Path) -> None:
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    await record_submitting(KEY2, "SBER", Side.BUY, 1, "ENTRY")
+    conn = shared()
+    await conn.execute("UPDATE orders SET status = 'SUBMITTED' WHERE key = ?", (KEY2,))
+    await conn.commit()
+    unresolved = await list_unresolved()
+    assert [order.key for order in unresolved] == [KEY, KEY2]
+    assert unresolved[1].status is OrderStatus.SUBMITTED
+
+
 async def test_duplicate_idempotency_key_raises(db: Path) -> None:
     await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
     with pytest.raises(DuplicateOrderError):
@@ -86,9 +103,7 @@ async def test_exit_without_trigger_and_entry_with_trigger_raise(db: Path) -> No
     )
     assert recorded.intent == "EXIT"
     assert recorded.exit_trigger is ExitTrigger.STOP_LOSS
-    entry = await record_submitting(
-        "22222222-2222-4222-8222-222222222222", "SBER", Side.BUY, 1, "ENTRY"
-    )
+    entry = await record_submitting(KEY2, "SBER", Side.BUY, 1, "ENTRY")
     assert entry.intent == "ENTRY"
     assert entry.exit_trigger is None
 
@@ -157,3 +172,61 @@ async def test_list_missing_commission_rejects_naive(db: Path) -> None:
     naive = datetime(2026, 3, 16, 10, 0)  # noqa: DTZ001
     with pytest.raises(ValueError):
         await list_missing_commission(naive, NOW)
+    with pytest.raises(ValueError):
+        await list_missing_commission(NOW, naive)
+
+
+async def test_get_does_not_commit_outer_transaction(db: Path) -> None:
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    conn = shared()
+    await conn.execute("BEGIN IMMEDIATE")
+    await conn.execute("UPDATE orders SET ticker = 'TEMP' WHERE key = ?", (KEY,))
+    loaded = await get(KEY)
+    assert loaded is not None
+    assert loaded.ticker == "TEMP"
+    await conn.rollback()
+    after = await get(KEY)
+    assert after is not None
+    assert after.ticker == "SBER"
+
+
+async def test_settle_uses_begin_immediate() -> None:
+    source = inspect.getsource(settle)
+    assert "BEGIN IMMEDIATE" in source
+
+
+async def test_access_without_connect_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "zarabot.db"
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DB_PATH", str(path))
+    with pytest.raises(DatabaseNotOpenError):
+        await list_unresolved()
+    with pytest.raises(DatabaseNotOpenError):
+        await get(KEY)
+
+
+async def test_module_never_calls_aiosqlite_connect(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zarabot.db.orders as module
+
+    source = inspect.getsource(module)
+    assert "aiosqlite.connect" not in source
+    calls: list[object] = []
+    real_connect = aiosqlite.connect
+
+    async def tracking_connect(*args: object, **kwargs: object) -> aiosqlite.Connection:
+        calls.append((args, kwargs))
+        return await real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    await get(KEY)
+    await list_unresolved()
+    await settle(KEY, OrderStatus.FILLED, 2, Decimal("100.00"), None, None)
+    await list_missing_commission(NOW - timedelta(days=1), NOW + timedelta(days=1))
+    await record_commission(KEY, Decimal("1.00"))
+    assert calls == []
