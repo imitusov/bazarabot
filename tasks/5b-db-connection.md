@@ -53,6 +53,25 @@ inherit whichever file the previous importer happened to open.
   reconnect would hide a missing `app.startup` step and would let a test inherit
   a file it did not create.
 
+**`transaction() → async context manager yielding aiosqlite.Connection`**
+- **The sole transaction owner.** Every write in the system runs inside it:
+  `async with transaction() as conn:`. It holds one process-wide lock, issues
+  `BEGIN IMMEDIATE`, commits on clean exit, and rolls back on exception.
+- **Reentrant.** A nested acquisition on the same task joins the outer
+  transaction instead of beginning a second one or deadlocking, and only the
+  outermost exit commits. `broker.reconcile` calls `db.positions.adopt` and
+  `db.positions.close` while doing work of its own, so nesting is the normal
+  case, not an edge one.
+- **No module may `BEGIN`, `commit` or `rollback` the shared connection
+  itself.** A per-module `asyncio.Lock` was sufficient when every call opened its
+  own connection; on one shared connection it serialises nothing, because the
+  transaction lives on the connection rather than in the module. Two writers in
+  different modules previously collided with `cannot start a transaction within a
+  transaction`, and — worse — a bare `commit()` in any module made another
+  module's in-flight rows durable, so its `rollback()` undid nothing. Both were
+  reproduced on the money path (#40).
+- A read needs no transaction and must not take one.
+
 **`async disconnect() → None`**
 - Closes the process connection and forgets it. Idempotent when already closed.
 - Called only by `app.shutdown` and by the fixture teardown.
@@ -84,8 +103,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
 
----
-
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -109,6 +126,19 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - Two sequential tests connect to different temporary paths, and the second
   observes none of the first's rows (proves isolation without inheriting a
   process connection).
+- Two writers in **different modules**, invoked concurrently, both complete and
+  neither raises `cannot start a transaction within a transaction` (proves the
+  transaction is serialised process-wide rather than per module — the collision
+  reproduced on the first attempt in #40).
+- A nested `transaction()` on the same task joins the outer one: the inner block
+  exiting does not commit, and an exception after it rolls back the outer work
+  too (proves `broker.reconcile` can call `db.positions.adopt` without
+  deadlocking or committing early).
+- A write inside `transaction()` does **not** survive that transaction's
+  rollback, even when another module performs a write of its own in between
+  (proves a foreign commit can no longer make half-written rows durable — the
+  defect that made `rollback()` meaningless on the money path).
+- A read path takes no transaction: reads succeed while another task holds one.
 
 ## Expected output
 

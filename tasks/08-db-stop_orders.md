@@ -41,7 +41,9 @@ the exchange sold the position; the corresponding position must be closed with
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async record_placing(key: str, position_id: int, ticker: str, lots: int, stop_price: Decimal) → StopOrderRecord`**
 - Persists the intent before the broker is called, exactly as `db.orders` does
@@ -80,8 +82,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     fails loudly rather than reconnecting to a file nobody chose. A silent
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
-
----
 
 ## Test cases
 

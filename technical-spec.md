@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.23
+**Version:** 1.24
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.7
 
@@ -351,6 +351,19 @@ it proves.
 - Two sequential tests connect to different temporary paths, and the second
   observes none of the first's rows (proves isolation without inheriting a
   process connection).
+- Two writers in **different modules**, invoked concurrently, both complete and
+  neither raises `cannot start a transaction within a transaction` (proves the
+  transaction is serialised process-wide rather than per module — the collision
+  reproduced on the first attempt in #40).
+- A nested `transaction()` on the same task joins the outer one: the inner block
+  exiting does not commit, and an exception after it rolls back the outer work
+  too (proves `broker.reconcile` can call `db.positions.adopt` without
+  deadlocking or committing early).
+- A write inside `transaction()` does **not** survive that transaction's
+  rollback, even when another module performs a write of its own in between
+  (proves a foreign commit can no longer make half-written rows durable — the
+  defect that made `rollback()` meaningless on the money path).
+- A read path takes no transaction: reads succeed while another task holds one.
 
 **`db.positions`**
 - Opening a position then reading open positions returns it (happy path).
@@ -372,9 +385,11 @@ it proves.
 - After a sequence of `set_stop_protection` calls, `list_events` reconstructs the
   full stop-ownership history in order (proves post-incident reconstruction needs
   nothing but the database).
-- No function in this module calls `aiosqlite.connect` (proves it runs on
-  `db.connection.shared()` — the defect that opened a connection per call, and
-  the reason the schema's declared foreign keys enforced nothing).
+- No function in this module calls `aiosqlite.connect`, and none issues `BEGIN`,
+  `commit` or `rollback` (proves it runs on `db.connection.shared()` inside
+  `db.connection.transaction()` — the defect that opened a connection per call,
+  and then the one where a bare commit made another module's half-written rows
+  durable).
 
 **`db.orders`**
 - An order recorded as `SUBMITTING` then confirmed as `FILLED` reports the
@@ -922,6 +937,25 @@ inherit whichever file the previous importer happened to open.
   reconnect would hide a missing `app.startup` step and would let a test inherit
   a file it did not create.
 
+**`transaction() → async context manager yielding aiosqlite.Connection`**
+- **The sole transaction owner.** Every write in the system runs inside it:
+  `async with transaction() as conn:`. It holds one process-wide lock, issues
+  `BEGIN IMMEDIATE`, commits on clean exit, and rolls back on exception.
+- **Reentrant.** A nested acquisition on the same task joins the outer
+  transaction instead of beginning a second one or deadlocking, and only the
+  outermost exit commits. `broker.reconcile` calls `db.positions.adopt` and
+  `db.positions.close` while doing work of its own, so nesting is the normal
+  case, not an edge one.
+- **No module may `BEGIN`, `commit` or `rollback` the shared connection
+  itself.** A per-module `asyncio.Lock` was sufficient when every call opened its
+  own connection; on one shared connection it serialises nothing, because the
+  transaction lives on the connection rather than in the module. Two writers in
+  different modules previously collided with `cannot start a transaction within a
+  transaction`, and — worse — a bare `commit()` in any module made another
+  module's in-flight rows durable, so its `rollback()` undid nothing. Both were
+  reproduced on the money path (#40).
+- A read needs no transaction and must not take one.
+
 **`async disconnect() → None`**
 - Closes the process connection and forgets it. Idempotent when already closed.
 - Called only by `app.shutdown` and by the fixture teardown.
@@ -945,7 +979,9 @@ moment in the project's life to do it.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async open(signal: Signal, order: OrderRecord, instrument: Instrument, stop: Decimal, target: Decimal, opened_at: datetime) → Position`**
 - Inserts an open position and returns it with its assigned identifier.
@@ -1059,7 +1095,9 @@ violation.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str, exit_trigger: ExitTrigger | None = None) → OrderRecord`**
 - Persists the intent to place an order **before** it is sent.
@@ -1103,7 +1141,9 @@ violation.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async record_placing(key: str, position_id: int, ticker: str, lots: int, stop_price: Decimal) → StopOrderRecord`**
 - Persists the intent before the broker is called, exactly as `db.orders` does
@@ -1130,7 +1170,9 @@ violation.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async start(ticker: str, at: datetime) → None`** — records or overwrites with the newer instant.
 
@@ -1143,7 +1185,9 @@ violation.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async record(signal: Signal, decision: RiskDecision) → None`** — stores every signal, approved or rejected, with its reason.
 
@@ -1314,7 +1358,9 @@ above; must never return a `float`.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation. This module is not a `db.*` repository, but it
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31). This module is not a `db.*` repository, but it
 was one of the eight sites opening its own connection. **The shared connection is
 the only change to this module in v1.23**: the `STOP_DUPLICATE` remedy gap is
 issue #35 and is scheduled separately — do not fold it in here.
@@ -1580,7 +1626,9 @@ the system must never rest in.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation. This module is not a `db.*` repository, but it
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31). This module is not a `db.*` repository, but it
 was one of the eight sites opening its own connection and it owes the same
 obligation.
 
@@ -2255,6 +2303,14 @@ Applies across all modules. Every external failure mode has exactly one rule.
     fails loudly rather than reconnecting to a file nobody chose. A silent
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
+
+31. **A module begins, commits or rolls back the shared connection itself** →
+    programming defect, in the same family as rules 22 and 30. Every write runs
+    inside `db.connection.transaction()`; nothing else touches transaction state.
+    A `commit()` is connection-wide, so a module committing on its own behalf
+    commits whatever another module has in flight, and that module's `rollback()`
+    then undoes nothing. This is not a runtime condition to handle — it is a rule
+    the code must not violate, and §3.2 pins it per module.
 
 ---
 

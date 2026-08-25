@@ -53,7 +53,9 @@ permanently — mislabelled history cannot be repaired.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async record_submitting(key: str, ticker: str, side: Side, lots: int, intent: str, exit_trigger: ExitTrigger | None = None) → OrderRecord`**
 - Persists the intent to place an order **before** it is sent.
@@ -113,8 +115,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     fails loudly rather than reconnecting to a file nobody chose. A silent
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
-
----
 
 ## Test cases
 

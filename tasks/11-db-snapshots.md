@@ -34,7 +34,9 @@ Module **11** of 40 in `dependency-order.md`. Everything before it is complete a
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async record(signal: Signal, decision: RiskDecision) → None`** — stores every signal, approved or rejected, with its reason.
 
@@ -56,8 +58,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     fails loudly rather than reconnecting to a file nobody chose. A silent
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
-
----
 
 ## Test cases
 

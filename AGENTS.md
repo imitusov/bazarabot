@@ -78,6 +78,8 @@ Never write implementation before tests. Never declare done with failing tests.
   anywhere else.
 - Never call `aiosqlite.connect` outside `db.connection`, and never close the
   connection it owns. Repositories run on `db.connection.shared()`.
+- Never issue `BEGIN`, `commit` or `rollback` outside `db.connection`. Every
+  write runs inside `db.connection.transaction()`, which is reentrant.
 - Return an empty list rather than `None` for "nothing found" collections.
 - Treat the broker as authoritative whenever it disagrees with local state.
 

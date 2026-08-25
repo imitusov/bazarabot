@@ -48,6 +48,14 @@ A connection per call is what left every declared foreign key unenforced: SQLite
 applies `PRAGMA foreign_keys` per connection, so a pragma nobody issues is a
 constraint nobody has.
 
+**One connection means one transaction owner.** Every write runs inside
+`async with db.connection.transaction()`. No module issues `BEGIN`, `commit` or
+`rollback`, and no module keeps a write lock of its own. A `commit()` is
+connection-wide: a module committing on its own behalf commits whatever another
+module has in flight, which is how `rollback()` stopped undoing anything (#40).
+The context manager is reentrant, so a repository called from inside another
+module's transaction joins it rather than deadlocking.
+
 ## SQL lives here and nowhere else
 
 No SQL string appears outside this directory.

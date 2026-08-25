@@ -40,8 +40,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
 
----
-
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.

@@ -97,7 +97,9 @@ historical record is the purpose of the project. Backups are retained 30 days.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation. This module is not a `db.*` repository, but it
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31). This module is not a `db.*` repository, but it
 was one of the eight sites opening its own connection. **The shared connection is
 the only change to this module in v1.23**: the `STOP_DUPLICATE` remedy gap is
 issue #35 and is scheduled separately — do not fold it in here.
@@ -157,8 +159,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     fails loudly rather than reconnecting to a file nobody chose. A silent
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
-
----
 
 ## Test cases
 

@@ -82,7 +82,9 @@ written in the same transaction as the row change it describes.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
-violation.
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
 
 **`async open(signal: Signal, order: OrderRecord, instrument: Instrument, stop: Decimal, target: Decimal, opened_at: datetime) → Position`**
 - Inserts an open position and returns it with its assigned identifier.
@@ -209,8 +211,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
 
----
-
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -234,9 +234,11 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - After a sequence of `set_stop_protection` calls, `list_events` reconstructs the
   full stop-ownership history in order (proves post-incident reconstruction needs
   nothing but the database).
-- No function in this module calls `aiosqlite.connect` (proves it runs on
-  `db.connection.shared()` — the defect that opened a connection per call, and
-  the reason the schema's declared foreign keys enforced nothing).
+- No function in this module calls `aiosqlite.connect`, and none issues `BEGIN`,
+  `commit` or `rollback` (proves it runs on `db.connection.shared()` inside
+  `db.connection.transaction()` — the defect that opened a connection per call,
+  and then the one where a bare commit made another module's half-written rows
+  durable).
 
 ## Expected output
 
