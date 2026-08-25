@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import aiosqlite
 
-from zarabot.config import load
+from zarabot.db.connection import shared
 
 _LOG = logging.getLogger(__name__)
 
@@ -27,8 +27,8 @@ class DailySnapshot:
     benchmark_value: Decimal | None
 
 
-async def _connect() -> aiosqlite.Connection:
-    conn = await aiosqlite.connect(load().db_path, timeout=30)
+def _conn() -> aiosqlite.Connection:
+    conn = shared()
     conn.row_factory = aiosqlite.Row
     return conn
 
@@ -65,7 +65,7 @@ def _money(value: Decimal | None) -> str | None:
 
 async def write_daily(snapshot: DailySnapshot) -> None:
     """Upsert on the Moscow trade date. Write failures are not propagated."""
-    conn = await _connect()
+    conn = _conn()
     try:
         await conn.execute(
             """
@@ -99,23 +99,17 @@ async def write_daily(snapshot: DailySnapshot) -> None:
         await conn.commit()
     except aiosqlite.Error:
         _LOG.exception("snapshot write failed for %s", snapshot.trade_date)
-    finally:
-        await conn.close()
 
 
 async def list_for_period(start: date, end: date) -> list[DailySnapshot]:
     """Snapshots with trade_date in [start, end], oldest first."""
-    conn = await _connect()
-    try:
-        cursor = await conn.execute(
-            """
-            SELECT * FROM daily_snapshots
-            WHERE trade_date >= ? AND trade_date <= ?
-            ORDER BY trade_date ASC
-            """,
-            (start.isoformat(), end.isoformat()),
-        )
-        rows = await cursor.fetchall()
-        return [_row_to_snapshot(row) for row in rows]
-    finally:
-        await conn.close()
+    cursor = await _conn().execute(
+        """
+        SELECT * FROM daily_snapshots
+        WHERE trade_date >= ? AND trade_date <= ?
+        ORDER BY trade_date ASC
+        """,
+        (start.isoformat(), end.isoformat()),
+    )
+    rows = await cursor.fetchall()
+    return [_row_to_snapshot(row) for row in rows]

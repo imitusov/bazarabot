@@ -6,9 +6,9 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-import aiosqlite
 import pytest
 
+from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.snapshots import DailySnapshot, write_daily
 from zarabot.models import (
@@ -65,9 +65,12 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
-    async with aiosqlite.connect(path) as conn:
-        await apply(conn)
-    return path
+    conn = await connect(str(path))
+    await apply(conn)
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 def test_realised_pnl_includes_commission() -> None:

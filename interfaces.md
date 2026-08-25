@@ -361,8 +361,8 @@ Empty list when none. Access before `connect` or after `disconnect` raises
 
 ## `zarabot.db.snapshots`
 
-Sole owner of `daily_snapshots`. Write failures are logged at ERROR and not
-propagated (rule 12).
+Sole owner of `daily_snapshots`. All SQL runs on `db.connection.shared()`.
+Never calls `aiosqlite.connect` and never closes the connection.
 
 **`DailySnapshot(trade_date: date, opening_equity: Decimal, closing_equity: Decimal | None, cash: Decimal, realised_pnl: Decimal, unrealised_pnl: Decimal, open_positions: int, orders_placed: int, benchmark_value: Decimal | None)`**
 Frozen snapshot row. `benchmark_value` is `None` when unavailable, never stored
@@ -370,10 +370,13 @@ as a stand-in zero by this module.
 
 **`async write_daily(snapshot: DailySnapshot) → None`**
 Upserts on `trade_date`. A second write for the same date updates the row.
-Never raises.
+Write failures are logged at ERROR and not propagated (rule 12). Access before
+`connect` or after `disconnect` raises `DatabaseNotOpenError` (rule 30).
 
 **`async list_for_period(start: date, end: date) → list[DailySnapshot]`**
 Rows with `trade_date` in `[start, end]`, oldest first. Empty list when none.
+Access before `connect` or after `disconnect` raises `DatabaseNotOpenError`
+(rule 30).
 
 ## `zarabot.risk.sizing`
 
