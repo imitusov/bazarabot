@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from zarabot.db.connection import DatabaseNotOpenError, connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.snapshots import DailySnapshot, list_for_period, write_daily
 
@@ -30,9 +32,12 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
-    async with aiosqlite.connect(path) as conn:
-        await apply(conn)
-    return path
+    conn = await connect(str(path))
+    await apply(conn)
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 def _snap(**overrides: object) -> DailySnapshot:
@@ -79,3 +84,38 @@ async def test_second_write_for_same_date_updates_not_duplicates(db: Path) -> No
     assert isinstance(snap.opening_equity, Decimal)
     empty = await list_for_period(date(2026, 3, 17), date(2026, 3, 18))
     assert empty == []
+
+
+async def test_access_without_connect_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "zarabot.db"
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DB_PATH", str(path))
+    with pytest.raises(DatabaseNotOpenError):
+        await write_daily(_snap())
+    with pytest.raises(DatabaseNotOpenError):
+        await list_for_period(DAY, DAY)
+
+
+async def test_module_never_calls_aiosqlite_connect(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zarabot.db.snapshots as module
+
+    source = inspect.getsource(module)
+    assert "aiosqlite.connect" not in source
+    assert "_connect" not in source
+    calls: list[object] = []
+    real_connect = aiosqlite.connect
+
+    async def tracking_connect(*args: object, **kwargs: object) -> aiosqlite.Connection:
+        calls.append((args, kwargs))
+        return await real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
+    await write_daily(_snap())
+    rows = await list_for_period(DAY, DAY)
+    assert len(rows) == 1
+    assert calls == []
