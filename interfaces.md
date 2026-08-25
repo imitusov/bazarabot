@@ -255,9 +255,13 @@ That position's events, oldest first, or `[]`. Never `None`.
 
 ## `zarabot.db.orders`
 
-Sole owner of `orders` rows and status transitions. Reads `DB_PATH` via
-`config.load()`. `record_submitting` must complete before any broker call with
-the same key. Never resubmit; recover by querying the key.
+Sole owner of `orders` rows and status transitions. All SQL runs on
+`db.connection.shared()`. Never calls `aiosqlite.connect` and never closes the
+connection. `record_submitting` must complete before any broker call with the
+same key. Never resubmit; recover by querying the key. Mutations
+(`record_submitting`, `settle`, `record_commission`) run inside
+`BEGIN IMMEDIATE`. `get` does not commit, so it can run inside another
+repository's open transaction.
 
 **`DuplicateOrderError`**
 Raised when the idempotency key already exists.
