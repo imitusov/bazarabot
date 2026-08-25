@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import aiosqlite
 
-from zarabot.db.connection import shared
+from zarabot.db.connection import shared, transaction
 
 _LOG = logging.getLogger(__name__)
 
@@ -65,38 +65,37 @@ def _money(value: Decimal | None) -> str | None:
 
 async def write_daily(snapshot: DailySnapshot) -> None:
     """Upsert on the Moscow trade date. Write failures are not propagated."""
-    conn = _conn()
     try:
-        await conn.execute(
-            """
-            INSERT INTO daily_snapshots (
-                trade_date, opening_equity, closing_equity, cash,
-                realised_pnl, unrealised_pnl, open_positions, orders_placed,
-                benchmark_value
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(trade_date) DO UPDATE SET
-                opening_equity = excluded.opening_equity,
-                closing_equity = excluded.closing_equity,
-                cash = excluded.cash,
-                realised_pnl = excluded.realised_pnl,
-                unrealised_pnl = excluded.unrealised_pnl,
-                open_positions = excluded.open_positions,
-                orders_placed = excluded.orders_placed,
-                benchmark_value = excluded.benchmark_value
-            """,
-            (
-                snapshot.trade_date.isoformat(),
-                str(snapshot.opening_equity),
-                _money(snapshot.closing_equity),
-                str(snapshot.cash),
-                str(snapshot.realised_pnl),
-                str(snapshot.unrealised_pnl),
-                snapshot.open_positions,
-                snapshot.orders_placed,
-                _money(snapshot.benchmark_value),
-            ),
-        )
-        await conn.commit()
+        async with transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO daily_snapshots (
+                    trade_date, opening_equity, closing_equity, cash,
+                    realised_pnl, unrealised_pnl, open_positions, orders_placed,
+                    benchmark_value
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date) DO UPDATE SET
+                    opening_equity = excluded.opening_equity,
+                    closing_equity = excluded.closing_equity,
+                    cash = excluded.cash,
+                    realised_pnl = excluded.realised_pnl,
+                    unrealised_pnl = excluded.unrealised_pnl,
+                    open_positions = excluded.open_positions,
+                    orders_placed = excluded.orders_placed,
+                    benchmark_value = excluded.benchmark_value
+                """,
+                (
+                    snapshot.trade_date.isoformat(),
+                    str(snapshot.opening_equity),
+                    _money(snapshot.closing_equity),
+                    str(snapshot.cash),
+                    str(snapshot.realised_pnl),
+                    str(snapshot.unrealised_pnl),
+                    snapshot.open_positions,
+                    snapshot.orders_placed,
+                    _money(snapshot.benchmark_value),
+                ),
+            )
     except aiosqlite.Error:
         _LOG.exception("snapshot write failed for %s", snapshot.trade_date)
 

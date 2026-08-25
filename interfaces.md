@@ -184,12 +184,23 @@ Raised when `connect` is called while a process connection is already open.
 **`async connect(path: str) → aiosqlite.Connection`**
 Opens the SQLite file at `path`, stores it as the process connection, and issues
 `PRAGMA journal_mode = WAL`, `PRAGMA foreign_keys = ON`, and
-`PRAGMA busy_timeout = 30000`. Raises `DatabaseAlreadyOpenError` if already open.
-Does not apply migrations.
+`PRAGMA busy_timeout = 30000`, and sets `row_factory` to `aiosqlite.Row` once
+for the process. Raises `DatabaseAlreadyOpenError` if already open. Does not
+apply migrations.
 
 **`shared() → aiosqlite.Connection`**
 Returns the open process connection. Raises `DatabaseNotOpenError` when none is
 open. Must never open a connection as a side effect.
+
+**`transaction() → async context manager yielding aiosqlite.Connection`**
+The sole transaction owner: `async with transaction() as conn:`. Holds one
+process-wide lock, issues `BEGIN IMMEDIATE`, commits on clean exit and rolls
+back on exception. **Reentrant** — a nested acquisition on the same task joins
+the outer transaction and only the outermost exit commits, so
+`broker.reconcile` can call `db.positions` writers from inside its own
+transaction. No other module issues `BEGIN`, `commit` or `rollback` (rule 31),
+and reads take no transaction. Raises `DatabaseNotOpenError` when no connection
+is open.
 
 **`async disconnect() → None`**
 Closes the process connection and forgets it. Idempotent when already closed.

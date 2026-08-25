@@ -884,6 +884,10 @@ Owns schema creation and version tracking.
 - Raises `MigrationError` if the recorded version exceeds the highest known
   migration, and makes no modification in that case.
 - Idempotent: applying twice is a no-op the second time.
+- **The one module exempt from rule 31.** It commits and rolls back the
+  connection it is given, one transaction per migration file, because §6 requires
+  each file to be applied atomically and because it runs before any other task
+  exists. Every other module writes through `db.connection.transaction()`.
 - Called by `app.startup` before any repository function, on
   `db.connection.shared()`. This module never calls `aiosqlite.connect` and never
   closes the connection it is given.
@@ -2311,6 +2315,12 @@ Applies across all modules. Every external failure mode has exactly one rule.
     commits whatever another module has in flight, and that module's `rollback()`
     then undoes nothing. This is not a runtime condition to handle — it is a rule
     the code must not violate, and §3.2 pins it per module.
+
+    **`db.migrations` is the single exemption**, and it is narrow: `apply`
+    receives a connection rather than taking one, applies each file in its own
+    transaction as §6 requires, and runs during `app.startup` step 3 — before any
+    other task exists, so there is nothing in flight for it to commit. Every
+    other module, without exception, uses `transaction()`.
 
 ---
 

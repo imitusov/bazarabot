@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import aiosqlite
 
-from zarabot.db.connection import shared
+from zarabot.db.connection import shared, transaction
 
 _LOG = logging.getLogger(__name__)
 
@@ -36,26 +36,25 @@ async def _started_at(ticker: str) -> datetime | None:
 async def start(ticker: str, at: datetime) -> None:
     """Record the cooldown start, keeping the newer instant if one exists."""
     _reject_naive(at)
-    conn = _conn()
     try:
-        cursor = await conn.execute(
-            "SELECT started_at FROM cooldowns WHERE ticker = ?", (ticker,)
-        )
-        row = await cursor.fetchone()
-        if row is not None:
-            existing = datetime.fromisoformat(row["started_at"])
-            if existing >= at:
-                return
-            await conn.execute(
-                "UPDATE cooldowns SET started_at = ? WHERE ticker = ?",
-                (at.isoformat(), ticker),
+        async with transaction() as conn:
+            cursor = await conn.execute(
+                "SELECT started_at FROM cooldowns WHERE ticker = ?", (ticker,)
             )
-        else:
-            await conn.execute(
-                "INSERT INTO cooldowns (ticker, started_at) VALUES (?, ?)",
-                (ticker, at.isoformat()),
-            )
-        await conn.commit()
+            row = await cursor.fetchone()
+            if row is not None:
+                existing = datetime.fromisoformat(row["started_at"])
+                if existing >= at:
+                    return
+                await conn.execute(
+                    "UPDATE cooldowns SET started_at = ? WHERE ticker = ?",
+                    (at.isoformat(), ticker),
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO cooldowns (ticker, started_at) VALUES (?, ?)",
+                    (ticker, at.isoformat()),
+                )
     except aiosqlite.Error:
         _LOG.exception("cooldown write failed for %s", ticker)
 

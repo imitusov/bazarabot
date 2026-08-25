@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from decimal import Decimal
 
 import aiosqlite
 
 from zarabot.clock import now
-from zarabot.db.connection import shared
+from zarabot.db.connection import shared, transaction
 from zarabot.db.orders import DuplicateOrderError, OrderStateError
 from zarabot.models import StopOrderRecord, StopOrderStatus
 
@@ -21,7 +20,6 @@ _TERMINAL = frozenset(
         StopOrderStatus.FAILED,
     }
 )
-_write_lock = asyncio.Lock()
 
 
 def _reject_naive(moment: datetime) -> None:
@@ -75,75 +73,59 @@ async def record_placing(
     key: str, position_id: int, ticker: str, lots: int, stop_price: Decimal
 ) -> StopOrderRecord:
     """Persist intent before the broker is called."""
-    async with _write_lock:
-        conn = _conn()
-        await conn.execute("BEGIN IMMEDIATE")
+    async with transaction() as conn:
+        existing = await _load(conn, key)
+        if existing is not None:
+            raise DuplicateOrderError(f"stop order key already exists: {key}")
         try:
-            existing = await _load(conn, key)
-            if existing is not None:
-                raise DuplicateOrderError(f"stop order key already exists: {key}")
-            try:
-                await conn.execute(
-                    """
-                    INSERT INTO stop_orders (
-                        key, stop_order_id, position_id, ticker, lots, stop_price,
-                        status, created_at, settled_at
-                    ) VALUES (?, NULL, ?, ?, ?, ?, 'PLACING', ?, NULL)
-                    """,
-                    (
-                        key,
-                        position_id,
-                        ticker,
-                        lots,
-                        str(stop_price),
-                        now().isoformat(),
-                    ),
-                )
-            except aiosqlite.IntegrityError as exc:
-                if "stop_orders.key" in str(exc):
-                    raise DuplicateOrderError(
-                        f"stop order key already exists: {key}"
-                    ) from exc
-                raise
-            loaded = await _load(conn, key)
-            if loaded is None:
-                raise OrderStateError(f"stop order {key} could not be read back")
-            await conn.commit()
-            return loaded
-        except Exception:
-            await conn.rollback()
+            await conn.execute(
+                """
+                INSERT INTO stop_orders (
+                    key, stop_order_id, position_id, ticker, lots, stop_price,
+                    status, created_at, settled_at
+                ) VALUES (?, NULL, ?, ?, ?, ?, 'PLACING', ?, NULL)
+                """,
+                (
+                    key,
+                    position_id,
+                    ticker,
+                    lots,
+                    str(stop_price),
+                    now().isoformat(),
+                ),
+            )
+        except aiosqlite.IntegrityError as exc:
+            if "stop_orders.key" in str(exc):
+                raise DuplicateOrderError(
+                    f"stop order key already exists: {key}"
+                ) from exc
             raise
+        loaded = await _load(conn, key)
+        if loaded is None:
+            raise OrderStateError(f"stop order {key} could not be read back")
+        return loaded
 
 
 async def activate(key: str, stop_order_id: str) -> StopOrderRecord:
     """Record the broker identifier once the stop is standing."""
-    async with _write_lock:
-        conn = _conn()
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            current = await _load(conn, key)
-            if current is None:
-                raise OrderStateError(f"stop order {key} is absent")
-            if current.status in _TERMINAL:
-                raise OrderStateError(
-                    f"stop order {key} is already {current.status.value}"
-                )
-            await conn.execute(
-                """
-                UPDATE stop_orders
-                SET status = 'ACTIVE', stop_order_id = ?
-                WHERE key = ?
-                """,
-                (stop_order_id, key),
-            )
-            loaded = await _load(conn, key)
-            if loaded is None:
-                raise OrderStateError(f"stop order {key} is absent")
-            await conn.commit()
-            return loaded
-        except Exception:
-            await conn.rollback()
-            raise
+    async with transaction() as conn:
+        current = await _load(conn, key)
+        if current is None:
+            raise OrderStateError(f"stop order {key} is absent")
+        if current.status in _TERMINAL:
+            raise OrderStateError(f"stop order {key} is already {current.status.value}")
+        await conn.execute(
+            """
+            UPDATE stop_orders
+            SET status = 'ACTIVE', stop_order_id = ?
+            WHERE key = ?
+            """,
+            (stop_order_id, key),
+        )
+        loaded = await _load(conn, key)
+        if loaded is None:
+            raise OrderStateError(f"stop order {key} is absent")
+        return loaded
 
 
 async def settle(
@@ -153,33 +135,24 @@ async def settle(
     _reject_naive(settled_at)
     if status not in _TERMINAL:
         raise OrderStateError(f"{status} is not a terminal stop-order status")
-    async with _write_lock:
-        conn = _conn()
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            current = await _load(conn, key)
-            if current is None:
-                raise OrderStateError(f"stop order {key} is absent")
-            if current.status in _TERMINAL:
-                raise OrderStateError(
-                    f"stop order {key} is already {current.status.value}"
-                )
-            await conn.execute(
-                """
-                UPDATE stop_orders
-                SET status = ?, settled_at = ?
-                WHERE key = ?
-                """,
-                (status.value, settled_at.isoformat(), key),
-            )
-            loaded = await _load(conn, key)
-            if loaded is None:
-                raise OrderStateError(f"stop order {key} is absent")
-            await conn.commit()
-            return loaded
-        except Exception:
-            await conn.rollback()
-            raise
+    async with transaction() as conn:
+        current = await _load(conn, key)
+        if current is None:
+            raise OrderStateError(f"stop order {key} is absent")
+        if current.status in _TERMINAL:
+            raise OrderStateError(f"stop order {key} is already {current.status.value}")
+        await conn.execute(
+            """
+            UPDATE stop_orders
+            SET status = ?, settled_at = ?
+            WHERE key = ?
+            """,
+            (status.value, settled_at.isoformat(), key),
+        )
+        loaded = await _load(conn, key)
+        if loaded is None:
+            raise OrderStateError(f"stop order {key} is absent")
+        return loaded
 
 
 async def active_for_position(position_id: int) -> StopOrderRecord | None:

@@ -9,7 +9,7 @@ from decimal import Decimal
 import aiosqlite
 
 from zarabot.clock import moscow_date
-from zarabot.db.connection import shared
+from zarabot.db.connection import shared, transaction
 from zarabot.models import RejectionReason, RiskDecision, Side, Signal
 
 _LOG = logging.getLogger(__name__)
@@ -63,18 +63,17 @@ async def record(signal: Signal, decision: RiskDecision) -> None:
             reason,
             None,
         )
-    conn = _conn()
     try:
-        await conn.execute(
-            """
-            INSERT INTO signals (
-                ticker, strategy, generated_at, reference_price,
-                decision, rejection_reason, lots, order_key
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-            """,
-            values,
-        )
-        await conn.commit()
+        async with transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO signals (
+                    ticker, strategy, generated_at, reference_price,
+                    decision, rejection_reason, lots, order_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                values,
+            )
     except aiosqlite.Error:
         _LOG.exception("signal write failed for %s", signal.ticker)
 

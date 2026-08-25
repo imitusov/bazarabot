@@ -190,9 +190,33 @@ async def test_get_does_not_commit_outer_transaction(db: Path) -> None:
     assert after.ticker == "SBER"
 
 
-async def test_settle_uses_begin_immediate() -> None:
+async def test_settle_owns_no_transaction_and_is_atomic(db: Path) -> None:
+    """Spec §4: `settle` runs inside `db.connection.transaction()`.
+
+    The previous version asserted `"BEGIN IMMEDIATE" in inspect.getsource(...)`,
+    which pinned the implementation rather than the contract.
+    """
     source = inspect.getsource(settle)
-    assert "BEGIN IMMEDIATE" in source
+    assert "BEGIN" not in source
+    assert "conn.commit()" not in source
+    assert "conn.rollback()" not in source
+
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    conn = shared()
+    original = conn.execute
+
+    async def failing(sql: str, parameters: object = ()) -> aiosqlite.Cursor:
+        if "UPDATE orders" in sql:
+            raise RuntimeError("injected")
+        return await original(sql, parameters)
+
+    conn.execute = failing  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="injected"):
+        await settle(KEY, OrderStatus.FILLED, Decimal("10"), 2, NOW, None)
+    conn.execute = original  # type: ignore[method-assign]
+    still = await get(KEY)
+    assert still is not None
+    assert still.status is OrderStatus.SUBMITTING
 
 
 async def test_access_without_connect_raises(

@@ -14,7 +14,7 @@ from zarabot.broker.client import (
     get_portfolio,
     list_stop_orders,
 )
-from zarabot.db.connection import shared
+from zarabot.db.connection import transaction
 from zarabot.db.cooldowns import start as start_cooldown
 from zarabot.db.positions import adopt, close, list_open, update_lots
 from zarabot.models import (
@@ -177,12 +177,11 @@ def _stop_adjustments(
 
 
 async def _persist(moment: datetime, adjustments: list[dict[str, object]]) -> None:
-    conn = shared()
-    await conn.execute(
-        "INSERT INTO reconciliations (ran_at, adjustments) VALUES (?, ?)",
-        (moment.isoformat(), json.dumps(adjustments)),
-    )
-    await conn.commit()
+    async with transaction() as conn:
+        await conn.execute(
+            "INSERT INTO reconciliations (ran_at, adjustments) VALUES (?, ?)",
+            (moment.isoformat(), json.dumps(adjustments)),
+        )
 
 
 async def reconcile(now: datetime) -> ReconciliationReport:

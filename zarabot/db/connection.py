@@ -6,9 +6,19 @@ Must never connect at import.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 import aiosqlite
 
 _connection: aiosqlite.Connection | None = None
+# The transaction lock belongs to the connection, not to the module: a lock
+# created at import binds to whichever event loop first acquires it, and every
+# later loop then fails with "bound to a different event loop".
+_txn_lock: asyncio.Lock | None = None
+_depth: contextvars.ContextVar[int] = contextvars.ContextVar("_depth", default=0)
 
 
 class DatabaseNotOpenError(Exception):
@@ -25,6 +35,11 @@ async def connect(path: str) -> aiosqlite.Connection:
     if _connection is not None:
         raise DatabaseAlreadyOpenError("process database connection is already open")
     conn = await aiosqlite.connect(path)
+    global _txn_lock
+    _txn_lock = asyncio.Lock()
+    # Set once, here: the row factory is a property of the connection, and seven
+    # modules assigning it on a connection they share is a race waiting to happen.
+    conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA journal_mode = WAL")
     await conn.execute("PRAGMA foreign_keys = ON")
     await conn.execute("PRAGMA busy_timeout = 30000")
@@ -44,7 +59,40 @@ def shared() -> aiosqlite.Connection:
 async def disconnect() -> None:
     """Close the process connection and forget it. Idempotent when already closed."""
     global _connection
+    global _txn_lock
     if _connection is None:
         return
     await _connection.close()
     _connection = None
+    _txn_lock = None
+
+
+@asynccontextmanager
+async def transaction() -> AsyncIterator[aiosqlite.Connection]:
+    """The sole transaction owner. Every write runs inside this (rule 31).
+
+    Reentrant: a nested acquisition on the same task joins the outer
+    transaction, because `broker.reconcile` calls `db.positions` writers while
+    doing work of its own. Only the outermost exit commits.
+    """
+    if _depth.get() > 0:
+        yield shared()
+        return
+    lock = _txn_lock
+    if lock is None:
+        raise DatabaseNotOpenError(
+            "database is not open; call db.connection.connect first"
+        )
+    async with lock:
+        conn = shared()
+        await conn.execute("BEGIN IMMEDIATE")
+        token = _depth.set(1)
+        try:
+            yield conn
+        except BaseException:
+            await conn.rollback()
+            raise
+        else:
+            await conn.commit()
+        finally:
+            _depth.reset(token)

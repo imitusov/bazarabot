@@ -328,10 +328,34 @@ async def test_settle_all_terminal_statuses(db: Path) -> None:
         assert settled.settled_at == AWARE
 
 
-async def test_mutations_use_begin_immediate() -> None:
-    assert "BEGIN IMMEDIATE" in inspect.getsource(record_placing)
-    assert "BEGIN IMMEDIATE" in inspect.getsource(activate)
-    assert "BEGIN IMMEDIATE" in inspect.getsource(settle_stop)
+async def test_mutations_are_atomic_and_own_no_transaction(db: Path) -> None:
+    """Spec §4: writes run inside `db.connection.transaction()`.
+
+    Asserts the contract — the mutation is atomic and this module touches no
+    transaction state — rather than asserting that a particular SQL string
+    appears in the source, which pinned the implementation and would have gone
+    red for the fix rather than for a defect.
+    """
+    for func in (record_placing, activate, settle_stop):
+        source = inspect.getsource(func)
+        assert "BEGIN" not in source
+        assert "conn.commit()" not in source
+        assert "conn.rollback()" not in source
+
+    position_id = await _position_id()
+    conn = shared()
+    original = conn.execute
+
+    async def failing(sql: str, parameters: object = ()) -> aiosqlite.Cursor:
+        if "INSERT INTO stop_orders" in sql:
+            raise RuntimeError("injected")
+        return await original(sql, parameters)
+
+    conn.execute = failing  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="injected"):
+        await record_placing("k-atomic", position_id, "SBER", 1, Decimal("9.00"))
+    conn.execute = original  # type: ignore[method-assign]
+    assert await active_for_position(position_id) is None
 
 
 async def test_access_without_connect_raises(

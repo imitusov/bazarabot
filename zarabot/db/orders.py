@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from decimal import Decimal
 
 import aiosqlite
 
 from zarabot.clock import now
-from zarabot.db.connection import shared
+from zarabot.db.connection import shared, transaction
 from zarabot.models import ExitTrigger, OrderRecord, OrderStatus, Side
 
 _TERMINAL = frozenset({OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED})
-_write_lock = asyncio.Lock()
 
 
 def _reject_naive(moment: datetime) -> None:
@@ -99,42 +97,35 @@ async def record_submitting(
             raise ValueError("EXIT exit_trigger cannot be EXTERNAL")
     elif exit_trigger is not None:
         raise ValueError("ENTRY forbids exit_trigger")
-    async with _write_lock:
-        conn = _conn()
-        await conn.execute("BEGIN IMMEDIATE")
+    async with transaction() as conn:
         try:
-            try:
-                await conn.execute(
-                    """
-                    INSERT INTO orders (
-                        key, ticker, figi, side, intent, lots, status,
-                        filled_lots, filled_price, commission, broker_reason,
-                        created_at, settled_at, exit_trigger
-                    ) VALUES (
-                        ?, ?, '', ?, ?, ?, 'SUBMITTING',
-                        NULL, NULL, NULL, NULL, ?, NULL, ?
-                    )
-                    """,
-                    (
-                        key,
-                        ticker,
-                        side.value,
-                        intent,
-                        lots,
-                        now().isoformat(),
-                        exit_trigger.value if exit_trigger is not None else None,
-                    ),
+            await conn.execute(
+                """
+                INSERT INTO orders (
+                    key, ticker, figi, side, intent, lots, status,
+                    filled_lots, filled_price, commission, broker_reason,
+                    created_at, settled_at, exit_trigger
+                ) VALUES (
+                    ?, ?, '', ?, ?, ?, 'SUBMITTING',
+                    NULL, NULL, NULL, NULL, ?, NULL, ?
                 )
-            except aiosqlite.IntegrityError as exc:
-                raise DuplicateOrderError(f"order key already exists: {key}") from exc
-            loaded = await _load(conn, key)
-            if loaded is None:
-                raise OrderStateError(f"order {key} could not be read back")
-            await conn.commit()
-            return loaded
-        except Exception:
-            await conn.rollback()
-            raise
+                """,
+                (
+                    key,
+                    ticker,
+                    side.value,
+                    intent,
+                    lots,
+                    now().isoformat(),
+                    exit_trigger.value if exit_trigger is not None else None,
+                ),
+            )
+        except aiosqlite.IntegrityError as exc:
+            raise DuplicateOrderError(f"order key already exists: {key}") from exc
+        loaded = await _load(conn, key)
+        if loaded is None:
+            raise OrderStateError(f"order {key} could not be read back")
+        return loaded
 
 
 async def settle(
@@ -148,40 +139,33 @@ async def settle(
     """Record a terminal outcome. Raises if the row is already terminal."""
     if status not in _TERMINAL:
         raise OrderStateError(f"{status} is not a terminal status")
-    async with _write_lock:
-        conn = _conn()
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            current = await _load(conn, key)
-            if current is None:
-                raise OrderStateError(f"order {key} is absent")
-            if current.status in _TERMINAL:
-                raise OrderStateError(f"order {key} is already {current.status.value}")
-            await conn.execute(
-                """
-                UPDATE orders
-                SET status = ?, filled_lots = ?, filled_price = ?,
-                    commission = ?, broker_reason = ?, settled_at = ?
-                WHERE key = ?
-                """,
-                (
-                    status.value,
-                    filled_lots,
-                    str(filled_price) if filled_price is not None else None,
-                    str(commission) if commission is not None else None,
-                    broker_reason,
-                    now().isoformat(),
-                    key,
-                ),
-            )
-            loaded = await _load(conn, key)
-            if loaded is None:
-                raise OrderStateError(f"order {key} is absent")
-            await conn.commit()
-            return loaded
-        except Exception:
-            await conn.rollback()
-            raise
+    async with transaction() as conn:
+        current = await _load(conn, key)
+        if current is None:
+            raise OrderStateError(f"order {key} is absent")
+        if current.status in _TERMINAL:
+            raise OrderStateError(f"order {key} is already {current.status.value}")
+        await conn.execute(
+            """
+            UPDATE orders
+            SET status = ?, filled_lots = ?, filled_price = ?,
+                commission = ?, broker_reason = ?, settled_at = ?
+            WHERE key = ?
+            """,
+            (
+                status.value,
+                filled_lots,
+                str(filled_price) if filled_price is not None else None,
+                str(commission) if commission is not None else None,
+                broker_reason,
+                now().isoformat(),
+                key,
+            ),
+        )
+        loaded = await _load(conn, key)
+        if loaded is None:
+            raise OrderStateError(f"order {key} is absent")
+        return loaded
 
 
 async def get(key: str) -> OrderRecord | None:
@@ -191,27 +175,20 @@ async def get(key: str) -> OrderRecord | None:
 
 async def record_commission(key: str, commission: Decimal) -> OrderRecord:
     """Write commission onto an already-terminal order."""
-    async with _write_lock:
-        conn = _conn()
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            current = await _load(conn, key)
-            if current is None:
-                raise OrderStateError(f"order {key} is absent")
-            if current.status not in _TERMINAL:
-                raise OrderStateError(f"order {key} is {current.status.value}")
-            await conn.execute(
-                "UPDATE orders SET commission = ? WHERE key = ?",
-                (str(commission), key),
-            )
-            loaded = await _load(conn, key)
-            if loaded is None:
-                raise OrderStateError(f"order {key} is absent")
-            await conn.commit()
-            return loaded
-        except Exception:
-            await conn.rollback()
-            raise
+    async with transaction() as conn:
+        current = await _load(conn, key)
+        if current is None:
+            raise OrderStateError(f"order {key} is absent")
+        if current.status not in _TERMINAL:
+            raise OrderStateError(f"order {key} is {current.status.value}")
+        await conn.execute(
+            "UPDATE orders SET commission = ? WHERE key = ?",
+            (str(commission), key),
+        )
+        loaded = await _load(conn, key)
+        if loaded is None:
+            raise OrderStateError(f"order {key} is absent")
+        return loaded
 
 
 async def list_missing_commission(

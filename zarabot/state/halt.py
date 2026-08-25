@@ -6,7 +6,7 @@ from datetime import datetime
 
 import aiosqlite
 
-from zarabot.db.connection import shared
+from zarabot.db.connection import shared, transaction
 from zarabot.models import HaltReason, HaltState
 
 
@@ -55,20 +55,20 @@ async def halt(reason: HaltReason, detail: str, at: datetime) -> None:
     row = await cursor.fetchone()
     if row is not None and row["halted"]:
         return
-    await conn.execute(
-        """
-        UPDATE halt_state
-        SET halted = 1,
-            reason = ?,
-            detail = ?,
-            halted_at = ?,
-            resumed_at = NULL,
-            resumed_by = NULL
-        WHERE id = 1
-        """,
-        (reason.value, detail, at.isoformat()),
-    )
-    await conn.commit()
+    async with transaction() as conn:
+        await conn.execute(
+            """
+            UPDATE halt_state
+            SET halted = 1,
+                reason = ?,
+                detail = ?,
+                halted_at = ?,
+                resumed_at = NULL,
+                resumed_by = NULL
+            WHERE id = 1
+            """,
+            (reason.value, detail, at.isoformat()),
+        )
 
 
 async def resume(actor: str, at: datetime) -> bool:
@@ -78,15 +78,15 @@ async def resume(actor: str, at: datetime) -> bool:
     row = await cursor.fetchone()
     if row is None or not row["halted"]:
         return False
-    await conn.execute(
-        """
-        UPDATE halt_state
-        SET halted = 0,
-            resumed_at = ?,
-            resumed_by = ?
-        WHERE id = 1
-        """,
-        (at.isoformat(), actor),
-    )
-    await conn.commit()
+    async with transaction() as conn:
+        await conn.execute(
+            """
+            UPDATE halt_state
+            SET halted = 0,
+                resumed_at = ?,
+                resumed_by = ?
+            WHERE id = 1
+            """,
+            (at.isoformat(), actor),
+        )
     return True
