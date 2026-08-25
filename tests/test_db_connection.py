@@ -11,12 +11,15 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from decimal import Decimal
+
 from zarabot.db.connection import (
     DatabaseAlreadyOpenError,
     DatabaseNotOpenError,
     connect,
     disconnect,
     shared,
+    transaction,
 )
 from zarabot.db.migrations import apply
 
@@ -172,3 +175,119 @@ async def test_second_sequential_test_sees_none_of_the_first_rows(
     await apply(conn)
     cursor = await conn.execute("SELECT COUNT(*) FROM cooldowns")
     assert await cursor.fetchone() == (0,)
+
+
+async def _seed(conn: aiosqlite.Connection) -> None:
+    await apply(conn)
+
+
+async def test_two_writers_in_different_modules_run_concurrently(
+    tmp_path: Path,
+) -> None:
+    """Spec §3.2: the transaction is serialised process-wide, not per module.
+
+    Before v1.24 these collided with `cannot start a transaction within a
+    transaction` on the first attempt (#40).
+    """
+    from zarabot.db import orders, stop_orders
+    from zarabot.models import Side
+
+    path = tmp_path / "zarabot.db"
+    conn = await connect(str(path))
+    await _seed(conn)
+    await conn.execute(
+        "INSERT INTO orders (key,ticker,figi,side,intent,lots,status,created_at)"
+        " VALUES ('seed','SBER','BBG1','BUY','ENTRY',1,'FILLED','2026-03-16T12:00:00+00:00')"
+    )
+    await conn.execute(
+        "INSERT INTO positions (id,ticker,figi,strategy,lots,lot_size,entry_price,"
+        "entry_at,stop_price,target_price,status,adopted,open_order_key,"
+        "stop_protection) VALUES (1,'SBER','BBG1','ma',1,10,'100',"
+        "'2026-03-16T12:00:00+00:00','95','110','OPEN',0,'seed','LOCAL')"
+    )
+    await conn.commit()
+
+    async def writer_orders(i: int) -> None:
+        await orders.record_submitting(f"k-a{i}", "SBER", Side.BUY, 1, "ENTRY")
+
+    async def writer_stops(i: int) -> None:
+        await stop_orders.record_placing(f"k-b{i}", 1, "SBER", 1, Decimal("95"))
+
+    for i in range(5):
+        await asyncio.gather(writer_orders(i), writer_stops(i))
+
+    cursor = await shared().execute("SELECT COUNT(*) FROM orders")
+    assert (await cursor.fetchone())[0] == 6
+    cursor = await shared().execute("SELECT COUNT(*) FROM stop_orders")
+    assert (await cursor.fetchone())[0] == 5
+
+
+async def test_nested_transaction_joins_the_outer_one(tmp_path: Path) -> None:
+    """A nested acquisition must not commit early, and must not deadlock."""
+    path = tmp_path / "zarabot.db"
+    conn = await connect(str(path))
+    await _seed(conn)
+
+    with pytest.raises(RuntimeError, match="outer failure"):
+        async with transaction() as outer:
+            await outer.execute(
+                "INSERT INTO cooldowns (ticker, until) VALUES ('SBER', 'x')"
+            )
+            async with transaction() as inner:
+                await inner.execute(
+                    "INSERT INTO cooldowns (ticker, until) VALUES ('GAZP', 'y')"
+                )
+            # the inner block exiting must NOT have committed
+            raise RuntimeError("outer failure")
+
+    cursor = await shared().execute("SELECT COUNT(*) FROM cooldowns")
+    assert (await cursor.fetchone())[0] == 0
+
+
+async def test_write_does_not_survive_rollback_despite_another_module_writing(
+    tmp_path: Path,
+) -> None:
+    """Spec §3.2: a foreign write can no longer make half-written rows durable.
+
+    This is #40's second reproduction: `state.halt` committing the shared
+    connection made another module's in-flight rows permanent, so its own
+    `rollback()` undid nothing.
+    """
+    from datetime import UTC, datetime
+
+    from zarabot.models import HaltReason
+    from zarabot.state.halt import halt
+
+    path = tmp_path / "zarabot.db"
+    conn = await connect(str(path))
+    await _seed(conn)
+    moment = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        async with transaction() as txn:
+            await txn.execute(
+                "INSERT INTO orders (key,ticker,figi,side,intent,lots,status,"
+                "created_at) VALUES ('half-written','SBER','BBG1','BUY','ENTRY',1,"
+                "'SUBMITTING','2026-03-16T12:00:00+00:00')"
+            )
+            await halt(HaltReason.MANUAL, "unrelated", moment)
+            raise RuntimeError("injected")
+
+    cursor = await shared().execute(
+        "SELECT COUNT(*) FROM orders WHERE key = 'half-written'"
+    )
+    assert (await cursor.fetchone())[0] == 0
+
+
+async def test_reads_do_not_need_a_transaction(tmp_path: Path) -> None:
+    """A read path takes no transaction and is not blocked by one."""
+    path = tmp_path / "zarabot.db"
+    conn = await connect(str(path))
+    await _seed(conn)
+
+    async with transaction() as txn:
+        await txn.execute(
+            "INSERT INTO cooldowns (ticker, until) VALUES ('SBER', 'x')"
+        )
+        cursor = await shared().execute("SELECT COUNT(*) FROM cooldowns")
+        assert (await cursor.fetchone())[0] == 1
