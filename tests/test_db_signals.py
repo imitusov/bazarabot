@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from zarabot.db.connection import DatabaseNotOpenError, connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.signals import list_for_period, record
 from zarabot.models import RejectionReason, RiskDecision, Side, Signal
@@ -31,9 +33,12 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
-    async with aiosqlite.connect(path) as conn:
-        await apply(conn)
-    return path
+    conn = await connect(str(path))
+    await apply(conn)
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 def _signal() -> Signal:
@@ -74,3 +79,44 @@ async def test_approved_signal_is_stored_with_lots(db: Path) -> None:
     assert stored.approved is True
     assert stored.lots == 3
     assert stored.reason is None
+
+
+async def test_access_without_connect_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "zarabot.db"
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DB_PATH", str(path))
+    decision = RiskDecision(
+        approved=False, lots=None, reason=RejectionReason.COOLDOWN_ACTIVE
+    )
+    with pytest.raises(DatabaseNotOpenError):
+        await record(_signal(), decision)
+    with pytest.raises(DatabaseNotOpenError):
+        await list_for_period(date(2026, 3, 16), date(2026, 3, 16))
+
+
+async def test_module_never_calls_aiosqlite_connect(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zarabot.db.signals as module
+
+    source = inspect.getsource(module)
+    assert "aiosqlite.connect" not in source
+    assert "_connect" not in source
+    calls: list[object] = []
+    real_connect = aiosqlite.connect
+
+    async def tracking_connect(*args: object, **kwargs: object) -> aiosqlite.Connection:
+        calls.append((args, kwargs))
+        return await real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
+    await record(
+        _signal(),
+        RiskDecision(approved=True, lots=1, reason=None),
+    )
+    rows = await list_for_period(date(2026, 3, 16), date(2026, 3, 16))
+    assert len(rows) == 1
+    assert calls == []
