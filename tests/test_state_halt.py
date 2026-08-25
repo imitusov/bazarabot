@@ -14,7 +14,13 @@ from zarabot.config import load
 from zarabot.db.connection import DatabaseNotOpenError, connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.lifecycle.exits import evaluate
-from zarabot.models import ExitTrigger, HaltReason, Position, SessionInfo, StopProtection
+from zarabot.models import (
+    ExitTrigger,
+    HaltReason,
+    Position,
+    SessionInfo,
+    StopProtection,
+)
 from zarabot.state.halt import current, halt, is_halted, resume
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)

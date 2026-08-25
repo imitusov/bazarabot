@@ -564,7 +564,10 @@ naive `now`.
 
 ## `zarabot.state.halt`
 
-Sole owner of `halt_state`. A halt suspends entries only.
+Sole owner of `halt_state`. A halt suspends entries only. All SQL runs on
+`db.connection.shared()`. Never calls `aiosqlite.connect` and never closes the
+connection. Access before `connect` or after `disconnect` raises
+`DatabaseNotOpenError` (rule 30).
 
 **`async is_halted() → bool`**
 **`async current() → HaltState | None`**
