@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -10,14 +12,17 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from zarabot.db.connection import connect, disconnect, shared
 from zarabot.db.migrations import apply
 from zarabot.db.orders import record_commission
 from zarabot.db.positions import (
+    PositionEvent,
     PositionStateError,
     adopt,
     close,
     get,
     list_closed,
+    list_events,
     list_open,
     open,
     recompute_realised,
@@ -40,6 +45,7 @@ STOP = Decimal("95.00")
 TARGET = Decimal("110.00")
 KEY = "11111111-1111-4111-8111-111111111111"
 EXIT_KEY = "22222222-2222-4222-8222-222222222222"
+ADOPTED_KEY = "ADOPTED-BBG000000001"
 
 REQUIRED_ENV = {
     "TINVEST_TOKEN": "token",
@@ -93,31 +99,31 @@ def _order(**overrides: object) -> OrderRecord:
     return OrderRecord(**fields)  # type: ignore[arg-type]
 
 
-async def _insert_order(db: Path, order: OrderRecord) -> None:
-    async with aiosqlite.connect(db) as conn:
-        await conn.execute(
-            """
-            INSERT INTO orders (
-                key, ticker, figi, side, intent, lots, status,
-                filled_lots, filled_price, commission, created_at, settled_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                order.key,
-                order.ticker,
-                order.figi,
-                order.side.value,
-                order.intent,
-                order.lots,
-                order.status.value,
-                order.filled_lots,
-                str(order.filled_price) if order.filled_price is not None else None,
-                str(order.commission) if order.commission is not None else None,
-                order.created_at.isoformat(),
-                order.settled_at.isoformat() if order.settled_at else None,
-            ),
-        )
-        await conn.commit()
+async def _insert_order(order: OrderRecord) -> None:
+    conn = shared()
+    await conn.execute(
+        """
+        INSERT INTO orders (
+            key, ticker, figi, side, intent, lots, status,
+            filled_lots, filled_price, commission, created_at, settled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            order.key,
+            order.ticker,
+            order.figi,
+            order.side.value,
+            order.intent,
+            order.lots,
+            order.status.value,
+            order.filled_lots,
+            str(order.filled_price) if order.filled_price is not None else None,
+            str(order.commission) if order.commission is not None else None,
+            order.created_at.isoformat(),
+            order.settled_at.isoformat() if order.settled_at else None,
+        ),
+    )
+    await conn.commit()
 
 
 @pytest.fixture
@@ -126,11 +132,16 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
-    async with aiosqlite.connect(path) as conn:
-        await apply(conn)
-        await conn.commit()
-    await _insert_order(path, _order())
-    return path
+    monkeypatch.setattr("zarabot.clock.now", lambda: AWARE)
+    monkeypatch.setattr("zarabot.db.positions.now", lambda: AWARE, raising=False)
+    conn = await connect(str(path))
+    await apply(conn)
+    await _insert_order(_order())
+    await _insert_order(_order(key=ADOPTED_KEY, commission=None))
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 async def test_open_then_list_open_returns_it(db: Path) -> None:
@@ -152,7 +163,7 @@ async def test_close_removes_from_open_and_preserves_history(db: Path) -> None:
         filled_price=Decimal("110.00"),
         commission=Decimal("1.50"),
     )
-    await _insert_order(db, exit_order)
+    await _insert_order(exit_order)
     closed = await close(
         position.id,
         ExitTrigger.TAKE_PROFIT,
@@ -167,6 +178,10 @@ async def test_close_removes_from_open_and_preserves_history(db: Path) -> None:
     assert stored.exit_trigger is ExitTrigger.TAKE_PROFIT
     assert stored.exit_price == Decimal("110.00")
     assert closed.exit_trigger is ExitTrigger.TAKE_PROFIT
+    history = await list_closed()
+    assert len(history) == 1
+    assert history[0].id == position.id
+    assert history[0].exit_trigger is ExitTrigger.TAKE_PROFIT
 
 
 async def test_closing_already_closed_raises(db: Path) -> None:
@@ -177,7 +192,7 @@ async def test_closing_already_closed_raises(db: Path) -> None:
         intent="EXIT",
         filled_price=Decimal("110.00"),
     )
-    await _insert_order(db, exit_order)
+    await _insert_order(exit_order)
     await close(
         position.id, ExitTrigger.TAKE_PROFIT, Decimal("110.00"), AWARE, exit_order
     )
@@ -190,6 +205,7 @@ async def test_closing_already_closed_raises(db: Path) -> None:
 async def test_list_open_on_empty_returns_empty_list(db: Path) -> None:
     result = await list_open()
     assert result == []
+    assert result is not None
 
 
 async def test_round_trip_prices_are_decimal(db: Path) -> None:
@@ -200,6 +216,7 @@ async def test_round_trip_prices_are_decimal(db: Path) -> None:
     assert position.target_price == TARGET
     assert isinstance(position.entry_price, Decimal)
     assert isinstance(position.stop_price, Decimal)
+    assert isinstance(position.target_price, Decimal)
 
 
 async def test_concurrent_close_exactly_one_success(db: Path) -> None:
@@ -211,7 +228,7 @@ async def test_concurrent_close_exactly_one_success(db: Path) -> None:
         filled_price=Decimal("96.00"),
         commission=Decimal("1.00"),
     )
-    await _insert_order(db, exit_order)
+    await _insert_order(exit_order)
 
     async def attempt() -> str:
         try:
@@ -231,6 +248,130 @@ async def test_concurrent_close_exactly_one_success(db: Path) -> None:
     stored = await get(position.id)
     assert stored is not None
     assert stored.status == "CLOSED"
+
+
+async def test_mutations_write_one_event_each(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    opened_events = await list_events(position.id)
+    assert len(opened_events) == 1
+    assert opened_events[0].event == "OPENED"
+    assert opened_events[0].position_id == position.id
+    assert opened_events[0].occurred_at == AWARE
+    assert opened_events[0].occurred_at.tzinfo is not None
+
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "stop-key")
+    await update_lots(position.id, 1)
+    exit_order = _order(
+        key=EXIT_KEY,
+        side=Side.SELL,
+        intent="EXIT",
+        filled_price=Decimal("110.00"),
+        commission=Decimal("1.50"),
+    )
+    await _insert_order(exit_order)
+    await close(
+        position.id, ExitTrigger.TAKE_PROFIT, Decimal("110.00"), AWARE, exit_order
+    )
+    await record_commission(KEY, Decimal("3.00"))
+    await recompute_realised(position.id)
+
+    events = await list_events(position.id)
+    kinds = [item.event for item in events]
+    assert kinds == [
+        "OPENED",
+        "STOP_PROTECTION_CHANGED",
+        "LOTS_ADJUSTED",
+        "CLOSED",
+        "REALISED_RECOMPUTED",
+    ]
+    assert all(isinstance(item, PositionEvent) for item in events)
+    assert all(item.position_id == position.id for item in events)
+
+    adopted = await adopt(_instrument(), 3, PRICE, AWARE)
+    adopted_events = await list_events(adopted.id)
+    assert len(adopted_events) == 1
+    assert adopted_events[0].event == "ADOPTED"
+
+
+async def test_close_rollback_leaves_no_event(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    exit_order = _order(
+        key=EXIT_KEY,
+        side=Side.SELL,
+        intent="EXIT",
+        filled_price=Decimal("110.00"),
+        commission=Decimal("1.50"),
+    )
+    await _insert_order(exit_order)
+    conn = shared()
+    original = conn.execute
+
+    async def failing(
+        sql: str, parameters: object = ()
+    ) -> aiosqlite.Cursor:
+        if "position_events" in sql and "CLOSED" in str(parameters):
+            raise RuntimeError("injected event failure")
+        return await original(sql, parameters)
+
+    conn.execute = failing  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="injected event failure"):
+        await close(
+            position.id, ExitTrigger.TAKE_PROFIT, Decimal("110.00"), AWARE, exit_order
+        )
+    stored = await get(position.id)
+    assert stored is not None
+    assert stored.status == "OPEN"
+    assert [item.event for item in await list_events(position.id)] == ["OPENED"]
+
+
+async def test_list_events_reconstructs_stop_ownership_history(db: Path) -> None:
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "stop-a")
+    await set_stop_protection(position.id, StopProtection.LOCAL, None)
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "stop-b")
+    events = await list_events(position.id)
+    assert [item.event for item in events] == [
+        "OPENED",
+        "STOP_PROTECTION_CHANGED",
+        "STOP_PROTECTION_CHANGED",
+        "STOP_PROTECTION_CHANGED",
+    ]
+    details = [json.loads(item.detail) for item in events[1:]]
+    assert details[0]["previous_protection"] == "LOCAL"
+    assert details[0]["new_protection"] == "EXCHANGE"
+    assert details[0]["new_stop_order_key"] == "stop-a"
+    assert details[1]["previous_protection"] == "EXCHANGE"
+    assert details[1]["new_protection"] == "LOCAL"
+    assert details[1]["new_stop_order_key"] is None
+    assert details[2]["new_stop_order_key"] == "stop-b"
+    assert await list_events(999_999) == []
+
+
+async def test_module_never_calls_aiosqlite_connect(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zarabot.db.positions as module
+
+    source = inspect.getsource(module)
+    assert "aiosqlite.connect" not in source
+    calls: list[object] = []
+    real_connect = aiosqlite.connect
+
+    async def tracking_connect(
+        *args: object, **kwargs: object
+    ) -> aiosqlite.Connection:
+        calls.append((args, kwargs))
+        return await real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    await list_open()
+    await get(position.id)
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "stop-key")
+    await update_lots(position.id, 1)
+    await list_events(position.id)
+    await list_closed()
+    assert calls == []
 
 
 async def test_set_stop_protection_pairing(db: Path) -> None:
@@ -276,6 +417,9 @@ async def test_update_lots_writes_broker_count(db: Path) -> None:
     assert stored is not None
     assert stored.lots == 1
     assert stored.status == "OPEN"
+    assert stored.entry_price == PRICE
+    assert stored.stop_price == STOP
+    assert stored.target_price == TARGET
 
 
 async def test_update_lots_absent_or_closed_raises(db: Path) -> None:
@@ -283,7 +427,7 @@ async def test_update_lots_absent_or_closed_raises(db: Path) -> None:
         await update_lots(999, 1)
     position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
     exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
-    await _insert_order(db, exit_order)
+    await _insert_order(exit_order)
     await close(position.id, ExitTrigger.TAKE_PROFIT, PRICE, AWARE, exit_order)
     with pytest.raises(PositionStateError):
         await update_lots(position.id, 1)
@@ -300,7 +444,7 @@ async def test_list_closed_returns_closed_newest_first(db: Path) -> None:
     position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
     assert await list_closed() == []
     exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
-    await _insert_order(db, exit_order)
+    await _insert_order(exit_order)
     closed = await close(
         position.id, ExitTrigger.TAKE_PROFIT, Decimal("110.00"), AWARE, exit_order
     )
@@ -321,7 +465,7 @@ async def test_close_nets_commission_on_both_legs(db: Path) -> None:
         filled_price=Decimal("110.00"),
         commission=Decimal("1.50"),
     )
-    await _insert_order(db, exit_order)
+    await _insert_order(exit_order)
     closed = await close(
         position.id,
         ExitTrigger.TAKE_PROFIT,
@@ -379,7 +523,7 @@ async def test_close_reads_opening_commission_through_orders_get(
         filled_price=Decimal("110.00"),
         commission=Decimal("1.50"),
     )
-    await _insert_order(db, exit_order)
+    await _insert_order(exit_order)
     closed = await close(
         position.id,
         ExitTrigger.TAKE_PROFIT,
@@ -400,7 +544,7 @@ async def test_recompute_realised_rewrites_closed_pnl(db: Path) -> None:
         filled_price=Decimal("110.00"),
         commission=Decimal("1.50"),
     )
-    await _insert_order(db, exit_order)
+    await _insert_order(exit_order)
     closed = await close(
         position.id,
         ExitTrigger.TAKE_PROFIT,
