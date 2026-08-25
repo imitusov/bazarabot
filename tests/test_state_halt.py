@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -9,16 +10,11 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from zarabot.config import Config
+from zarabot.config import load
+from zarabot.db.connection import DatabaseNotOpenError, connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.lifecycle.exits import evaluate
-from zarabot.models import (
-    ExitTrigger,
-    HaltReason,
-    Position,
-    SessionInfo,
-    StopProtection,
-)
+from zarabot.models import ExitTrigger, HaltReason, Position, SessionInfo, StopProtection
 from zarabot.state.halt import current, halt, is_halted, resume
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
@@ -38,9 +34,12 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
-    async with aiosqlite.connect(path) as conn:
-        await apply(conn)
-    return path
+    conn = await connect(str(path))
+    await apply(conn)
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 async def test_halt_then_read_reports_reason(db: Path) -> None:
@@ -54,13 +53,40 @@ async def test_halt_then_read_reports_reason(db: Path) -> None:
     assert state.halted_at == NOW
 
 
-async def test_halt_survives_reread(db: Path) -> None:
+async def test_halt_survives_disconnect_then_connect_restart(db: Path) -> None:
     await halt(HaltReason.DAILY_LOSS_LIMIT, "loss", NOW)
+    await disconnect()
+    await connect(str(db))
     assert await is_halted() is True
     again = await current()
     assert again is not None
     assert again.halted is True
     assert again.reason is HaltReason.DAILY_LOSS_LIMIT
+    assert again.detail == "loss"
+    assert again.halted_at == NOW
+
+
+async def test_module_never_calls_aiosqlite_connect(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zarabot.state.halt as module
+
+    source = inspect.getsource(module)
+    assert "aiosqlite.connect" not in source
+    assert "_connect" not in source
+    calls: list[object] = []
+    real_connect = aiosqlite.connect
+
+    async def tracking_connect(*args: object, **kwargs: object) -> aiosqlite.Connection:
+        calls.append((args, kwargs))
+        return await real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
+    await halt(HaltReason.MANUAL, "stop", NOW)
+    assert await is_halted() is True
+    assert await current() is not None
+    assert await resume("owner", NOW + timedelta(minutes=1)) is True
+    assert calls == []
 
 
 async def test_resume_clears_halt_and_records_actor(db: Path) -> None:
@@ -76,9 +102,14 @@ async def test_resume_clears_halt_and_records_actor(db: Path) -> None:
 
 
 async def test_resume_when_not_halted_returns_false(db: Path) -> None:
+    before = await current()
     assert await is_halted() is False
     assert await resume("owner", NOW) is False
     assert await is_halted() is False
+    after = await current()
+    assert after is not None
+    assert before is not None
+    assert after == before
 
 
 async def test_second_halt_is_idempotent(db: Path) -> None:
@@ -90,7 +121,7 @@ async def test_second_halt_is_idempotent(db: Path) -> None:
     assert state.detail == "first"
 
 
-async def test_halt_does_not_block_exit_evaluation(db: Path) -> None:
+async def test_halt_does_not_block_exits_or_exit_orders(db: Path) -> None:
     await halt(HaltReason.MANUAL, "entries off", NOW)
     position = Position(
         id=1,
@@ -119,30 +150,29 @@ async def test_halt_does_not_block_exit_evaluation(db: Path) -> None:
         end=NOW + timedelta(hours=4),
         is_trading_day=True,
     )
-    config = Config(
-        tinvest_token="t",  # noqa: S106
-        tinvest_account_id="a",
-        trading_mode="live",
-        telegram_bot_token="tg",  # noqa: S106
-        telegram_chat_id=1,
-        allocated_capital=Decimal("100000"),
-        position_size_pct=Decimal("10"),
-        max_position_pct=Decimal("20"),
-        stop_loss_pct=Decimal("5"),
-        take_profit_pct=Decimal("10"),
-        max_holding_days=3,
-        max_open_positions=10,
-        reentry_cooldown_minutes=120,
-        daily_loss_limit_pct=Decimal("5"),
-        watchlist=("SBER",),
-        enabled_strategies=("ma_crossover",),
-        ml_model_path=None,
-        poll_interval_seconds=60,
-        db_path=Path("zarabot.db"),
-        backup_dir=Path("backups"),
-        log_level="INFO",
-        tz="Europe/Moscow",
-    )
-    trigger = evaluate(position, Decimal("95"), NOW, session, 0, config)
+    trigger = evaluate(position, Decimal("95"), NOW, session, 0, load())
     assert trigger is ExitTrigger.STOP_LOSS
     assert await is_halted() is True
+
+    from zarabot.execution.orders import close_position
+    from zarabot.lifecycle import exits as exits_mod
+
+    assert "is_halted" not in inspect.getsource(exits_mod)
+    assert "is_halted" not in inspect.getsource(close_position)
+
+
+async def test_access_without_connect_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "zarabot.db"
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DB_PATH", str(path))
+    with pytest.raises(DatabaseNotOpenError):
+        await is_halted()
+    with pytest.raises(DatabaseNotOpenError):
+        await current()
+    with pytest.raises(DatabaseNotOpenError):
+        await halt(HaltReason.MANUAL, "x", NOW)
+    with pytest.raises(DatabaseNotOpenError):
+        await resume("owner", NOW)
