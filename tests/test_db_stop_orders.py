@@ -9,6 +9,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.orders import DuplicateOrderError, OrderStateError
 from zarabot.db.positions import open as open_position
@@ -61,7 +62,11 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             (AWARE.isoformat(), AWARE.isoformat()),
         )
         await conn.commit()
-    return path
+    await connect(str(path))
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 async def _position_id() -> int:

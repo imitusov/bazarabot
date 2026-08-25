@@ -12,6 +12,7 @@ import aiosqlite
 import pytest
 
 from zarabot.config import load
+from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.snapshots import DailySnapshot, write_daily
 from zarabot.models import (
@@ -155,7 +156,11 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("zarabot.telegram.commands.get_last_price", _price)
     monkeypatch.setattr("zarabot.telegram.commands.benchmark_return", _benchmark)
     set_report_builder(None)
-    return path
+    await connect(str(path))
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 async def _reply(handler: Any, chat_id: int = AUTH_CHAT) -> str:

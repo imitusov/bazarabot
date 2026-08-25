@@ -1,13 +1,18 @@
-"""Sole owner of position row mutation. Rows are never deleted."""
+"""Sole owner of position rows and of ``position_events``. Rows are never deleted."""
 
 from __future__ import annotations
 
+import asyncio
+import json
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
 import aiosqlite
 
+from zarabot.clock import now
 from zarabot.config import load
+from zarabot.db.connection import shared
 from zarabot.db.orders import get as get_order
 from zarabot.models import (
     ExitTrigger,
@@ -19,10 +24,21 @@ from zarabot.models import (
 )
 
 _HUNDRED = Decimal("100")
+_write_lock = asyncio.Lock()
 
 
 class PositionStateError(Exception):
     """Illegal position state transition or invariant violation."""
+
+
+@dataclass(frozen=True)
+class PositionEvent:
+    """One append-only mutation of a position, oldest-first via ``list_events``."""
+
+    position_id: int
+    occurred_at: datetime
+    event: str
+    detail: str
 
 
 def _reject_naive(moment: datetime) -> None:
@@ -30,8 +46,8 @@ def _reject_naive(moment: datetime) -> None:
         raise ValueError("datetime must be timezone-aware")
 
 
-async def _connect() -> aiosqlite.Connection:
-    conn = await aiosqlite.connect(load().db_path, timeout=30)
+def _conn() -> aiosqlite.Connection:
+    conn = shared()
     conn.row_factory = aiosqlite.Row
     return conn
 
@@ -51,13 +67,19 @@ def _dec_opt(value: object) -> Decimal | None:
 def _dt(value: object) -> datetime:
     if not isinstance(value, str):
         raise PositionStateError("expected a timestamp")
-    return datetime.fromisoformat(value)
+    parsed = datetime.fromisoformat(value)
+    _reject_naive(parsed)
+    return parsed
 
 
 def _dt_opt(value: object) -> datetime | None:
     if value is None:
         return None
     return _dt(value)
+
+
+def _detail(payload: dict[str, object]) -> str:
+    return json.dumps(payload, default=str)
 
 
 def _row_to_position(row: aiosqlite.Row) -> Position:
@@ -86,6 +108,59 @@ def _row_to_position(row: aiosqlite.Row) -> Position:
     )
 
 
+def _row_to_event(row: aiosqlite.Row) -> PositionEvent:
+    return PositionEvent(
+        position_id=int(row["position_id"]),
+        occurred_at=_dt(row["occurred_at"]),
+        event=str(row["event"]),
+        detail=str(row["detail"]),
+    )
+
+
+async def _load(conn: aiosqlite.Connection, position_id: int) -> Position | None:
+    cursor = await conn.execute("SELECT * FROM positions WHERE id = ?", (position_id,))
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return _row_to_position(row)
+
+
+async def _insert_event(
+    conn: aiosqlite.Connection,
+    position_id: int,
+    event: str,
+    detail: dict[str, object],
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO position_events (position_id, occurred_at, event, detail)
+        VALUES (?, ?, ?, ?)
+        """,
+        (position_id, now().isoformat(), event, _detail(detail)),
+    )
+
+
+async def _order_commission(key: str | None) -> Decimal:
+    if not key:
+        return Decimal("0")
+    order = await get_order(key)
+    if order is None or order.commission is None:
+        return Decimal("0")
+    return order.commission
+
+
+def _realised(
+    entry_price: Decimal,
+    exit_price: Decimal,
+    lots: int,
+    lot_size: int,
+    entry_commission: Decimal,
+    exit_commission: Decimal,
+) -> Decimal:
+    units = Decimal(lots * lot_size)
+    return (exit_price - entry_price) * units - entry_commission - exit_commission
+
+
 async def open(
     signal: Signal,
     order: OrderRecord,
@@ -100,46 +175,62 @@ async def open(
     lots = order.filled_lots if order.filled_lots is not None else order.lots
     if order.filled_price is None:
         raise PositionStateError("cannot open a position without a fill price")
-    conn = await _connect()
-    try:
+    async with _write_lock:
+        conn = _conn()
+        await conn.execute("BEGIN IMMEDIATE")
         try:
-            cursor = await conn.execute(
-                """
-                INSERT INTO positions (
-                    ticker, figi, strategy, lots, lot_size, entry_price, entry_at,
-                    stop_price, target_price, status, adopted, open_order_key,
-                    close_order_key, exit_trigger, exit_price, exit_at,
-                    realised_pnl, stop_protection, stop_order_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 0, ?, NULL, NULL,
-                          NULL, NULL, NULL, 'LOCAL', NULL)
-                """,
-                (
-                    signal.ticker,
-                    instrument.figi,
-                    signal.strategy,
-                    lots,
-                    instrument.lot,
-                    str(order.filled_price),
-                    opened_at.isoformat(),
-                    str(stop),
-                    str(target),
-                    order.key,
-                ),
+            try:
+                cursor = await conn.execute(
+                    """
+                    INSERT INTO positions (
+                        ticker, figi, strategy, lots, lot_size, entry_price, entry_at,
+                        stop_price, target_price, status, adopted, open_order_key,
+                        close_order_key, exit_trigger, exit_price, exit_at,
+                        realised_pnl, stop_protection, stop_order_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 0, ?, NULL, NULL,
+                              NULL, NULL, NULL, 'LOCAL', NULL)
+                    """,
+                    (
+                        signal.ticker,
+                        instrument.figi,
+                        signal.strategy,
+                        lots,
+                        instrument.lot,
+                        str(order.filled_price),
+                        opened_at.isoformat(),
+                        str(stop),
+                        str(target),
+                        order.key,
+                    ),
+                )
+            except aiosqlite.IntegrityError as exc:
+                raise PositionStateError(
+                    f"open position already exists for {signal.ticker}"
+                ) from exc
+            position_id = cursor.lastrowid
+            if position_id is None:
+                raise PositionStateError("insert did not assign an id")
+            await _insert_event(
+                conn,
+                int(position_id),
+                "OPENED",
+                {
+                    "ticker": signal.ticker,
+                    "lots": lots,
+                    "entry_price": str(order.filled_price),
+                    "open_order_key": order.key,
+                    "stop_price": str(stop),
+                    "target_price": str(target),
+                },
             )
+            loaded = await _load(conn, int(position_id))
+            if loaded is None:
+                raise PositionStateError("inserted position could not be read back")
             await conn.commit()
-        except aiosqlite.IntegrityError as exc:
-            raise PositionStateError(
-                f"open position already exists for {signal.ticker}"
-            ) from exc
-        position_id = cursor.lastrowid
-        if position_id is None:
-            raise PositionStateError("insert did not assign an id")
-        loaded = await get(position_id)
-        if loaded is None:
-            raise PositionStateError("inserted position could not be read back")
-        return loaded
-    finally:
-        await conn.close()
+            return loaded
+        except Exception:
+            await conn.rollback()
+            raise
 
 
 async def set_stop_protection(
@@ -152,34 +243,42 @@ async def set_stop_protection(
         raise PositionStateError("EXCHANGE stop protection requires a stop order key")
     if protection is StopProtection.LOCAL and stop_order_key:
         raise PositionStateError("LOCAL stop protection forbids a stop order key")
-    conn = await _connect()
-    try:
-        cursor = await conn.execute(
-            """
-            UPDATE positions
-            SET stop_protection = ?, stop_order_key = ?
-            WHERE id = ?
-            """,
-            (protection.value, stop_order_key, position_id),
-        )
-        await conn.commit()
-        if cursor.rowcount != 1:
-            raise PositionStateError(f"position {position_id} is absent")
-        loaded = await get(position_id)
-        if loaded is None:
-            raise PositionStateError(f"position {position_id} is absent")
-        return loaded
-    finally:
-        await conn.close()
-
-
-async def _order_commission(key: str | None) -> Decimal:
-    if not key:
-        return Decimal("0")
-    order = await get_order(key)
-    if order is None or order.commission is None:
-        return Decimal("0")
-    return order.commission
+    async with _write_lock:
+        conn = _conn()
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = await _load(conn, position_id)
+            if existing is None:
+                raise PositionStateError(f"position {position_id} is absent")
+            cursor = await conn.execute(
+                """
+                UPDATE positions
+                SET stop_protection = ?, stop_order_key = ?
+                WHERE id = ?
+                """,
+                (protection.value, stop_order_key, position_id),
+            )
+            if cursor.rowcount != 1:
+                raise PositionStateError(f"position {position_id} is absent")
+            await _insert_event(
+                conn,
+                position_id,
+                "STOP_PROTECTION_CHANGED",
+                {
+                    "previous_protection": existing.stop_protection.value,
+                    "new_protection": protection.value,
+                    "previous_stop_order_key": existing.stop_order_key,
+                    "new_stop_order_key": stop_order_key,
+                },
+            )
+            loaded = await _load(conn, position_id)
+            if loaded is None:
+                raise PositionStateError(f"position {position_id} is absent")
+            await conn.commit()
+            return loaded
+        except Exception:
+            await conn.rollback()
+            raise
 
 
 async def close(
@@ -196,82 +295,94 @@ async def close(
             raise ValueError("EXTERNAL close forbids an order")
     elif order is None:
         raise ValueError("non-EXTERNAL close requires an order")
-    existing = await get(position_id)
-    if existing is None:
-        raise PositionStateError(f"position {position_id} is absent")
-    if existing.status != "OPEN":
-        raise PositionStateError(f"position {position_id} is already closed")
-    units = Decimal(existing.lots * existing.lot_size)
-    exit_commission = (
-        order.commission
-        if order is not None and order.commission is not None
-        else Decimal("0")
-    )
-    entry_commission = await _order_commission(existing.open_order_key)
-    realised = (
-        (exit_price - existing.entry_price) * units - entry_commission - exit_commission
-    )
-    conn = await _connect()
-    try:
+    async with _write_lock:
+        conn = _conn()
         await conn.execute("BEGIN IMMEDIATE")
-        cursor = await conn.execute(
-            """
-            UPDATE positions
-            SET status = 'CLOSED',
-                exit_trigger = ?,
-                exit_price = ?,
-                exit_at = ?,
-                realised_pnl = ?,
-                close_order_key = ?,
-                stop_protection = 'LOCAL',
-                stop_order_key = NULL
-            WHERE id = ? AND status = 'OPEN'
-            """,
-            (
-                trigger.value,
-                str(exit_price),
-                closed_at.isoformat(),
-                str(realised),
-                order.key if order is not None else None,
-                position_id,
-            ),
-        )
-        if cursor.rowcount != 1:
-            await conn.rollback()
-            raise PositionStateError(
-                f"position {position_id} is already closed or absent"
+        try:
+            existing = await _load(conn, position_id)
+            if existing is None:
+                raise PositionStateError(f"position {position_id} is absent")
+            if existing.status != "OPEN":
+                raise PositionStateError(f"position {position_id} is already closed")
+            exit_commission = (
+                order.commission
+                if order is not None and order.commission is not None
+                else Decimal("0")
             )
-        await conn.commit()
-        loaded = await get(position_id)
-        if loaded is None:
-            raise PositionStateError(f"position {position_id} is absent")
-        return loaded
-    except PositionStateError:
-        raise
-    except Exception:
-        await conn.rollback()
-        raise
-    finally:
-        await conn.close()
+            entry_commission = await _order_commission(existing.open_order_key)
+            realised = _realised(
+                existing.entry_price,
+                exit_price,
+                existing.lots,
+                existing.lot_size,
+                entry_commission,
+                exit_commission,
+            )
+            close_key = order.key if order is not None else None
+            cursor = await conn.execute(
+                """
+                UPDATE positions
+                SET status = 'CLOSED',
+                    exit_trigger = ?,
+                    exit_price = ?,
+                    exit_at = ?,
+                    realised_pnl = ?,
+                    close_order_key = ?,
+                    stop_protection = 'LOCAL',
+                    stop_order_key = NULL
+                WHERE id = ? AND status = 'OPEN'
+                """,
+                (
+                    trigger.value,
+                    str(exit_price),
+                    closed_at.isoformat(),
+                    str(realised),
+                    close_key,
+                    position_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise PositionStateError(
+                    f"position {position_id} is already closed or absent"
+                )
+            await _insert_event(
+                conn,
+                position_id,
+                "CLOSED",
+                {
+                    "exit_trigger": trigger.value,
+                    "exit_price": str(exit_price),
+                    "realised_pnl": str(realised),
+                    "close_order_key": close_key,
+                    "previous_stop_protection": existing.stop_protection.value,
+                    "new_stop_protection": StopProtection.LOCAL.value,
+                },
+            )
+            loaded = await _load(conn, position_id)
+            if loaded is None:
+                raise PositionStateError(f"position {position_id} is absent")
+            await conn.commit()
+            return loaded
+        except Exception:
+            await conn.rollback()
+            raise
 
 
 async def list_open() -> list[Position]:
     """All open positions. Empty list when none; never None."""
-    conn = await _connect()
-    try:
+    async with _write_lock:
+        conn = _conn()
         cursor = await conn.execute(
             "SELECT * FROM positions WHERE status = 'OPEN' ORDER BY id"
         )
         rows = await cursor.fetchall()
         return [_row_to_position(row) for row in rows]
-    finally:
-        await conn.close()
 
 
 async def list_closed() -> list[Position]:
     """Closed positions, newest exit first. Empty list when none; never None."""
-    conn = await _connect()
-    try:
+    async with _write_lock:
+        conn = _conn()
         cursor = await conn.execute(
             """
             SELECT * FROM positions
@@ -281,57 +392,60 @@ async def list_closed() -> list[Position]:
         )
         rows = await cursor.fetchall()
         return [_row_to_position(row) for row in rows]
-    finally:
-        await conn.close()
 
 
 async def get(position_id: int) -> Position | None:
     """Return the position or None when absent."""
-    conn = await _connect()
-    try:
-        cursor = await conn.execute(
-            "SELECT * FROM positions WHERE id = ?", (position_id,)
-        )
-        row = await cursor.fetchone()
-        if row is None:
-            return None
-        return _row_to_position(row)
-    finally:
-        await conn.close()
+    async with _write_lock:
+        return await _load(_conn(), position_id)
 
 
 async def recompute_realised(position_id: int) -> Position:
     """Rewrite realised_pnl for a closed position from current order commissions."""
-    existing = await get(position_id)
-    if existing is None:
-        raise PositionStateError(f"position {position_id} is absent")
-    if existing.status != "CLOSED" or existing.exit_price is None:
-        raise PositionStateError(f"position {position_id} is not closed")
-    units = Decimal(existing.lots * existing.lot_size)
-    realised = (
-        (existing.exit_price - existing.entry_price) * units
-        - await _order_commission(existing.open_order_key)
-        - await _order_commission(existing.close_order_key)
-    )
-    conn = await _connect()
-    try:
-        cursor = await conn.execute(
-            """
-            UPDATE positions
-            SET realised_pnl = ?
-            WHERE id = ? AND status = 'CLOSED'
-            """,
-            (str(realised), position_id),
-        )
-        await conn.commit()
-        if cursor.rowcount != 1:
-            raise PositionStateError(f"position {position_id} is not closed")
-        loaded = await get(position_id)
-        if loaded is None:
-            raise PositionStateError(f"position {position_id} is absent")
-        return loaded
-    finally:
-        await conn.close()
+    async with _write_lock:
+        conn = _conn()
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = await _load(conn, position_id)
+            if existing is None:
+                raise PositionStateError(f"position {position_id} is absent")
+            if existing.status != "CLOSED" or existing.exit_price is None:
+                raise PositionStateError(f"position {position_id} is not closed")
+            realised = _realised(
+                existing.entry_price,
+                existing.exit_price,
+                existing.lots,
+                existing.lot_size,
+                await _order_commission(existing.open_order_key),
+                await _order_commission(existing.close_order_key),
+            )
+            cursor = await conn.execute(
+                """
+                UPDATE positions
+                SET realised_pnl = ?
+                WHERE id = ? AND status = 'CLOSED'
+                """,
+                (str(realised), position_id),
+            )
+            if cursor.rowcount != 1:
+                raise PositionStateError(f"position {position_id} is not closed")
+            await _insert_event(
+                conn,
+                position_id,
+                "REALISED_RECOMPUTED",
+                {
+                    "previous_realised_pnl": str(existing.realised_pnl),
+                    "new_realised_pnl": str(realised),
+                },
+            )
+            loaded = await _load(conn, position_id)
+            if loaded is None:
+                raise PositionStateError(f"position {position_id} is absent")
+            await conn.commit()
+            return loaded
+        except Exception:
+            await conn.rollback()
+            raise
 
 
 async def adopt(
@@ -342,73 +456,121 @@ async def adopt(
 ) -> Position:
     """Open a LOCAL position for a broker holding unknown locally."""
     _reject_naive(adopted_at)
+    if lots <= 0:
+        raise PositionStateError("lots must be positive")
     cfg = load()
     stop = average_price * (_HUNDRED - cfg.stop_loss_pct) / _HUNDRED
     target = average_price * (_HUNDRED + cfg.take_profit_pct) / _HUNDRED
-    conn = await _connect()
-    try:
+    open_key = f"ADOPTED-{instrument.figi}"
+    async with _write_lock:
+        conn = _conn()
+        await conn.execute("BEGIN IMMEDIATE")
         try:
-            cursor = await conn.execute(
-                """
-                INSERT INTO positions (
-                    ticker, figi, strategy, lots, lot_size, entry_price, entry_at,
-                    stop_price, target_price, status, adopted, open_order_key,
-                    close_order_key, exit_trigger, exit_price, exit_at,
-                    realised_pnl, stop_protection, stop_order_key
-                ) VALUES (?, ?, 'ADOPTED', ?, ?, ?, ?, ?, ?, 'OPEN', 1, ?, NULL,
-                          NULL, NULL, NULL, NULL, 'LOCAL', NULL)
-                """,
-                (
-                    instrument.ticker,
-                    instrument.figi,
-                    lots,
-                    instrument.lot,
-                    str(average_price),
-                    adopted_at.isoformat(),
-                    str(stop),
-                    str(target),
-                    f"ADOPTED-{instrument.figi}",
-                ),
+            try:
+                cursor = await conn.execute(
+                    """
+                    INSERT INTO positions (
+                        ticker, figi, strategy, lots, lot_size, entry_price, entry_at,
+                        stop_price, target_price, status, adopted, open_order_key,
+                        close_order_key, exit_trigger, exit_price, exit_at,
+                        realised_pnl, stop_protection, stop_order_key
+                    ) VALUES (?, ?, 'ADOPTED', ?, ?, ?, ?, ?, ?, 'OPEN', 1, ?, NULL,
+                              NULL, NULL, NULL, NULL, 'LOCAL', NULL)
+                    """,
+                    (
+                        instrument.ticker,
+                        instrument.figi,
+                        lots,
+                        instrument.lot,
+                        str(average_price),
+                        adopted_at.isoformat(),
+                        str(stop),
+                        str(target),
+                        open_key,
+                    ),
+                )
+            except aiosqlite.IntegrityError as exc:
+                raise PositionStateError(
+                    f"open position already exists for {instrument.ticker}"
+                ) from exc
+            position_id = cursor.lastrowid
+            if position_id is None:
+                raise PositionStateError("insert did not assign an id")
+            await _insert_event(
+                conn,
+                int(position_id),
+                "ADOPTED",
+                {
+                    "ticker": instrument.ticker,
+                    "lots": lots,
+                    "average_price": str(average_price),
+                    "open_order_key": open_key,
+                    "stop_price": str(stop),
+                    "target_price": str(target),
+                },
             )
+            loaded = await _load(conn, int(position_id))
+            if loaded is None:
+                raise PositionStateError("inserted position could not be read back")
             await conn.commit()
-        except aiosqlite.IntegrityError as exc:
-            raise PositionStateError(
-                f"open position already exists for {instrument.ticker}"
-            ) from exc
-        position_id = cursor.lastrowid
-        if position_id is None:
-            raise PositionStateError("insert did not assign an id")
-        loaded = await get(position_id)
-        if loaded is None:
-            raise PositionStateError("inserted position could not be read back")
-        return loaded
-    finally:
-        await conn.close()
+            return loaded
+        except Exception:
+            await conn.rollback()
+            raise
 
 
 async def update_lots(position_id: int, lots: int) -> Position:
     """Write the broker's lot count onto an open position."""
     if lots <= 0:
         raise PositionStateError("lots must be positive")
-    existing = await get(position_id)
-    if existing is None:
-        raise PositionStateError(f"position {position_id} is absent")
-    if existing.status != "OPEN":
-        raise PositionStateError(f"position {position_id} is already closed")
-    conn = await _connect()
-    try:
-        cursor = await conn.execute(
-            "UPDATE positions SET lots = ? WHERE id = ? AND status = 'OPEN'",
-            (lots, position_id),
-        )
-        await conn.commit()
-        if cursor.rowcount != 1:
-            raise PositionStateError(
-                f"position {position_id} is already closed or absent"
+    async with _write_lock:
+        conn = _conn()
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = await _load(conn, position_id)
+            if existing is None:
+                raise PositionStateError(f"position {position_id} is absent")
+            if existing.status != "OPEN":
+                raise PositionStateError(f"position {position_id} is already closed")
+            cursor = await conn.execute(
+                "UPDATE positions SET lots = ? WHERE id = ? AND status = 'OPEN'",
+                (lots, position_id),
             )
-        loaded = await get(position_id)
-        if loaded is None:
-            raise PositionStateError(f"position {position_id} is absent")
-        return loaded
-    finally:
-        await conn.close()
+            if cursor.rowcount != 1:
+                raise PositionStateError(
+                    f"position {position_id} is already closed or absent"
+                )
+            await _insert_event(
+                conn,
+                position_id,
+                "LOTS_ADJUSTED",
+                {
+                    "previous_lots": existing.lots,
+                    "new_lots": lots,
+                },
+            )
+            loaded = await _load(conn, position_id)
+            if loaded is None:
+                raise PositionStateError(f"position {position_id} is absent")
+            await conn.commit()
+            return loaded
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def list_events(position_id: int) -> list[PositionEvent]:
+    """Events for a position, oldest first. Empty list when none; never None."""
+    async with _write_lock:
+        conn = _conn()
+        cursor = await conn.execute(
+            """
+            SELECT position_id, occurred_at, event, detail
+            FROM position_events
+            WHERE position_id = ?
+            ORDER BY id ASC
+            """,
+            (position_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_event(row) for row in rows]

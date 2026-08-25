@@ -11,6 +11,7 @@ import aiosqlite
 import pytest
 
 from zarabot.broker.client import OrderNotFound
+from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.orders import get as get_order
 from zarabot.db.orders import record_submitting, settle
@@ -116,12 +117,16 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, obje
     monkeypatch.setattr(
         "zarabot.ops.commissions.get_order_state", _get_order_state, raising=False
     )
-    return {
-        "alerts": alerts,
-        "broker_calls": broker_calls,
-        "states": states,
-        "monkeypatch": monkeypatch,
-    }
+    await connect(str(path))
+    try:
+        yield {
+            "alerts": alerts,
+            "broker_calls": broker_calls,
+            "states": states,
+            "monkeypatch": monkeypatch,
+        }
+    finally:
+        await disconnect()
 
 
 async def _round_trip() -> int:

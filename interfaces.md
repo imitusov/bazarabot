@@ -197,10 +197,17 @@ After it returns, `shared()` raises `DatabaseNotOpenError`.
 
 ## `zarabot.db.positions`
 
-Sole owner of `positions` rows. Never deletes. Reads `DB_PATH` via `config.load()`.
+Sole owner of `positions` rows and of `position_events`. Never deletes. All SQL
+runs on `db.connection.shared()`. Every mutation writes one `position_events`
+row in the same transaction.
 
 **`PositionStateError`**
 Illegal transition, pairing violation, or duplicate open ticker.
+
+**`PositionEvent(position_id: int, occurred_at: datetime, event: str, detail: str)`**
+Frozen dataclass. `event` is one of `OPENED`, `STOP_PROTECTION_CHANGED`,
+`LOTS_ADJUSTED`, `CLOSED`, `REALISED_RECOMPUTED`, `ADOPTED`. `detail` is a JSON
+object as text. `occurred_at` is timezone-aware UTC.
 
 **`async open(signal: Signal, order: OrderRecord, instrument: Instrument, stop: Decimal, target: Decimal, opened_at: datetime) → Position`**
 Inserts an open position with `stop_protection=LOCAL` and `stop_order_key=None`.
@@ -242,6 +249,9 @@ at configured `stop_loss_pct` / `take_profit_pct`. `open_order_key` is
 **`async update_lots(position_id: int, lots: int) → Position`**
 Writes the broker's lot count onto an open row. Raises `PositionStateError` if
 the row is absent, already closed, or `lots` is not positive.
+
+**`async list_events(position_id: int) → list[PositionEvent]`**
+That position's events, oldest first, or `[]`. Never `None`.
 
 ## `zarabot.db.orders`
 

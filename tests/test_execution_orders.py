@@ -19,6 +19,7 @@ from zarabot.broker.client import (
     OrderRejected,
     StopOrderRejected,
 )
+from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.orders import get as get_order
 from zarabot.db.orders import list_unresolved
@@ -211,7 +212,11 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
         broker.alerts.append(text)
 
     monkeypatch.setattr(f"{module}.alert", _alert, raising=False)
-    return broker
+    await connect(str(path))
+    try:
+        yield broker
+    finally:
+        await disconnect()
 
 
 async def test_entry_writes_before_broker_and_fills(env: _Broker) -> None:

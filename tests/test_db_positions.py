@@ -306,9 +306,7 @@ async def test_close_rollback_leaves_no_event(db: Path) -> None:
     conn = shared()
     original = conn.execute
 
-    async def failing(
-        sql: str, parameters: object = ()
-    ) -> aiosqlite.Cursor:
+    async def failing(sql: str, parameters: object = ()) -> aiosqlite.Cursor:
         if "position_events" in sql and "CLOSED" in str(parameters):
             raise RuntimeError("injected event failure")
         return await original(sql, parameters)
@@ -357,9 +355,7 @@ async def test_module_never_calls_aiosqlite_connect(
     calls: list[object] = []
     real_connect = aiosqlite.connect
 
-    async def tracking_connect(
-        *args: object, **kwargs: object
-    ) -> aiosqlite.Connection:
+    async def tracking_connect(*args: object, **kwargs: object) -> aiosqlite.Connection:
         calls.append((args, kwargs))
         return await real_connect(*args, **kwargs)
 

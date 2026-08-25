@@ -10,6 +10,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.signals import record
 from zarabot.models import (
@@ -76,7 +77,11 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         return Decimal("1.50")
 
     monkeypatch.setattr("zarabot.reporter.weekly.benchmark_return", _benchmark)
-    return path
+    await connect(str(path))
+    try:
+        yield path
+    finally:
+        await disconnect()
 
 
 async def test_week_with_trades_contains_every_documented_section(

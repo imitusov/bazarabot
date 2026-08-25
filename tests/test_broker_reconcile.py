@@ -11,6 +11,7 @@ import pytest
 
 from zarabot.broker.client import BrokerUnavailable
 from zarabot.broker.reconcile import reconcile
+from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.positions import get, list_open, set_stop_protection
 from zarabot.db.positions import open as open_position
@@ -139,7 +140,20 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
             """,
             (NOW.isoformat(), NOW.isoformat()),
         )
+        await conn.execute(
+            """
+            INSERT INTO orders (
+                key, ticker, figi, side, intent, lots, status,
+                filled_lots, filled_price, created_at, settled_at
+            ) VALUES (
+                'ADOPTED-BBG000000001', 'SBER', 'BBG000000001', 'BUY', 'ENTRY', 3,
+                'FILLED', 3, '123.45', ?, ?
+            )
+            """,
+            (NOW.isoformat(), NOW.isoformat()),
+        )
         await conn.commit()
+    await connect(str(path))
     broker = _Broker()
     module = "zarabot.broker.reconcile"
     monkeypatch.setattr(f"{module}.get_portfolio", broker.get_portfolio)
@@ -152,7 +166,10 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
         broker.alerts.append(text)
 
     monkeypatch.setattr(f"{module}.alert", _alert)
-    return broker
+    try:
+        yield broker
+    finally:
+        await disconnect()
 
 
 async def _open_local() -> Position:
