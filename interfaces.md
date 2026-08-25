@@ -296,21 +296,24 @@ none. Raises `ValueError` on naive datetimes.
 
 ## `zarabot.db.stop_orders`
 
-Sole owner of `stop_orders` rows. Reuses `DuplicateOrderError` and
-`OrderStateError` from `zarabot.db.orders`.
+Sole owner of `stop_orders` rows. All SQL runs on `db.connection.shared()`.
+Never calls `aiosqlite.connect` and never closes the connection. Reuses
+`DuplicateOrderError` and `OrderStateError` from `zarabot.db.orders`.
+Mutations (`record_placing`, `activate`, `settle`) run inside `BEGIN IMMEDIATE`.
 
 **`async record_placing(key: str, position_id: int, ticker: str, lots: int, stop_price: Decimal) → StopOrderRecord`**
 Inserts `PLACING` with `created_at=clock.now()`. Raises `DuplicateOrderError`
-on a repeated key.
+on a repeated key. Foreign-key and live-stop unique-index violations propagate
+as `IntegrityError`.
 
 **`async activate(key: str, stop_order_id: str) → StopOrderRecord`**
 Sets status `ACTIVE` and stores the broker identifier. Raises `OrderStateError`
-if already terminal.
+if the row is missing or already terminal.
 
 **`async settle(key: str, status: StopOrderStatus, settled_at: datetime) → StopOrderRecord`**
 Terminal statuses: `CANCELLED`, `EXECUTED`, `ORPHANED`, `FAILED`. Raises
-`OrderStateError` on a transition out of a terminal status or a non-terminal
-target. Raises `ValueError` on naive `settled_at`.
+`OrderStateError` on a missing row, a transition out of a terminal status, or a
+non-terminal target. Raises `ValueError` on naive `settled_at`.
 
 **`async active_for_position(position_id: int) → StopOrderRecord | None`**
 The single `PLACING` or `ACTIVE` stop for the position, or `None`. Raises
