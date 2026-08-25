@@ -426,9 +426,7 @@ async def test_module_never_calls_aiosqlite_connect(
     env.holdings = (_broker_position(lots=3, price=Decimal("123.45")),)
     report = await reconcile(NOW)
     assert any(item["type"] == "ADOPTED" for item in report.adjustments)
-    cursor = await shared().execute(
-        "SELECT ran_at, adjustments FROM reconciliations"
-    )
+    cursor = await shared().execute("SELECT ran_at, adjustments FROM reconciliations")
     rows = await cursor.fetchall()
     assert len(rows) == 1
     assert calls == []
@@ -448,4 +446,3 @@ async def test_access_without_connect_raises(
     monkeypatch.setattr("zarabot.broker.reconcile.get_portfolio", fake_portfolio)
     with pytest.raises(DatabaseNotOpenError):
         await reconcile(NOW)
-

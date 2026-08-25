@@ -647,7 +647,9 @@ the cooldown. Never submits a sell.
 
 Observes and records. Never places or cancels an order. SQL for `reconciliations`
 lives here (same ownership pattern as `state.halt` / `halt_state`). Alerts go
-through `telegram.notifier.alert`.
+through `telegram.notifier.alert`. All SQL runs on `db.connection.shared()`.
+Never calls `aiosqlite.connect` and never closes the connection. Access before
+`connect` or after `disconnect` raises `DatabaseNotOpenError` (rule 30).
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
 Compares `get_portfolio()` to `list_open()`. Local-only → close `EXTERNAL` at

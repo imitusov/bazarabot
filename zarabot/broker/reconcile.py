@@ -7,8 +7,6 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 
-import aiosqlite
-
 from zarabot.broker.client import (
     BrokerUnavailable,
     get_instrument,
@@ -16,7 +14,7 @@ from zarabot.broker.client import (
     get_portfolio,
     list_stop_orders,
 )
-from zarabot.config import load
+from zarabot.db.connection import shared
 from zarabot.db.cooldowns import start as start_cooldown
 from zarabot.db.positions import adopt, close, list_open, update_lots
 from zarabot.models import (
@@ -179,15 +177,12 @@ def _stop_adjustments(
 
 
 async def _persist(moment: datetime, adjustments: list[dict[str, object]]) -> None:
-    conn = await aiosqlite.connect(load().db_path, timeout=30)
-    try:
-        await conn.execute(
-            "INSERT INTO reconciliations (ran_at, adjustments) VALUES (?, ?)",
-            (moment.isoformat(), json.dumps(adjustments)),
-        )
-        await conn.commit()
-    finally:
-        await conn.close()
+    conn = shared()
+    await conn.execute(
+        "INSERT INTO reconciliations (ran_at, adjustments) VALUES (?, ?)",
+        (moment.isoformat(), json.dumps(adjustments)),
+    )
+    await conn.commit()
 
 
 async def reconcile(now: datetime) -> ReconciliationReport:
