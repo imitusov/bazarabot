@@ -344,17 +344,20 @@ exactly at the boundary. Raises `ValueError` on a naive `now`. Access before
 
 ## `zarabot.db.signals`
 
-Sole owner of `signals` rows. Write failures are logged at ERROR and not
-propagated (rule 12).
+Sole owner of `signals` rows. All SQL runs on `db.connection.shared()`.
+Never calls `aiosqlite.connect` and never closes the connection.
 
 **`async record(signal: Signal, decision: RiskDecision) → None`**
 Inserts the signal with `APPROVED`/`REJECTED`, lots or rejection reason, and
 `order_key=None`. Reconstructed signals use `Side.BUY` (strategies are
-entry-only). Never raises.
+entry-only). Write failures are logged at ERROR and not propagated (rule 12).
+Access before `connect` or after `disconnect` raises `DatabaseNotOpenError`
+(rule 30).
 
 **`async list_for_period(start: date, end: date) → list[tuple[Signal, RiskDecision]]`**
 Signals whose Moscow calendar date falls in `[start, end]`, oldest first.
-Empty list when none.
+Empty list when none. Access before `connect` or after `disconnect` raises
+`DatabaseNotOpenError` (rule 30).
 
 ## `zarabot.db.snapshots`
 

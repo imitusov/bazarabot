@@ -9,14 +9,14 @@ from decimal import Decimal
 import aiosqlite
 
 from zarabot.clock import moscow_date
-from zarabot.config import load
+from zarabot.db.connection import shared
 from zarabot.models import RejectionReason, RiskDecision, Side, Signal
 
 _LOG = logging.getLogger(__name__)
 
 
-async def _connect() -> aiosqlite.Connection:
-    conn = await aiosqlite.connect(load().db_path, timeout=30)
+def _conn() -> aiosqlite.Connection:
+    conn = shared()
     conn.row_factory = aiosqlite.Row
     return conn
 
@@ -41,7 +41,7 @@ def _row_to_pair(row: aiosqlite.Row) -> tuple[Signal, RiskDecision]:
 
 
 async def record(signal: Signal, decision: RiskDecision) -> None:
-    """Store every signal, approved or rejected, with its reason. Never raises."""
+    """Store every signal, approved or rejected, with its reason."""
     if decision.approved:
         values: tuple[str | int | None, ...] = (
             signal.ticker,
@@ -63,7 +63,7 @@ async def record(signal: Signal, decision: RiskDecision) -> None:
             reason,
             None,
         )
-    conn = await _connect()
+    conn = _conn()
     try:
         await conn.execute(
             """
@@ -77,24 +77,18 @@ async def record(signal: Signal, decision: RiskDecision) -> None:
         await conn.commit()
     except aiosqlite.Error:
         _LOG.exception("signal write failed for %s", signal.ticker)
-    finally:
-        await conn.close()
 
 
 async def list_for_period(start: date, end: date) -> list[tuple[Signal, RiskDecision]]:
     """Signals whose Moscow date falls in [start, end], oldest first."""
-    conn = await _connect()
-    try:
-        cursor = await conn.execute(
-            "SELECT * FROM signals ORDER BY generated_at ASC, id ASC"
-        )
-        rows = await cursor.fetchall()
-        found: list[tuple[Signal, RiskDecision]] = []
-        for row in rows:
-            generated = datetime.fromisoformat(row["generated_at"])
-            day = moscow_date(generated)
-            if start <= day <= end:
-                found.append(_row_to_pair(row))
-        return found
-    finally:
-        await conn.close()
+    cursor = await _conn().execute(
+        "SELECT * FROM signals ORDER BY generated_at ASC, id ASC"
+    )
+    rows = await cursor.fetchall()
+    found: list[tuple[Signal, RiskDecision]] = []
+    for row in rows:
+        generated = datetime.fromisoformat(row["generated_at"])
+        day = moscow_date(generated)
+        if start <= day <= end:
+            found.append(_row_to_pair(row))
+    return found
