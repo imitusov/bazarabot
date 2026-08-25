@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-import aiosqlite
 import pytest
 
+from zarabot.db.connection import connect, disconnect, shared
 from zarabot.db.migrations import apply
 from zarabot.models import HaltReason, ReconciliationReport
 from zarabot.state.halt import halt, is_halted
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_ENV = {
     "TINVEST_TOKEN": "tinvest-secret-token",
     "TINVEST_ACCOUNT_ID": "acct",
@@ -24,14 +27,18 @@ REQUIRED_ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+async def _close_process_connection() -> None:
+    yield
+    await disconnect()
+
+
 @pytest.fixture
 async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     path = tmp_path / "zarabot.db"
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
-    async with aiosqlite.connect(path) as conn:
-        await apply(conn)
     calls: list[str] = []
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
 
@@ -163,7 +170,10 @@ async def test_reconciliation_runs_before_first_entry_is_permitted(
 async def test_halted_at_shutdown_starts_halted(env: list[str]) -> None:
     from zarabot.app.startup import start
 
+    await connect(os.environ["DB_PATH"])
+    await apply(shared())
     await halt(HaltReason.MANUAL, "left halted", NOW)
+    await disconnect()
     ctx = await start()
     assert await is_halted() is True
     assert ctx.halt is not None
@@ -369,3 +379,60 @@ async def test_ssl_verify_true_does_not_alert_about_certificates(
         for item in env
         if item.startswith("alert:") and "certificate" in item.lower()
     ]
+
+
+async def test_start_connects_before_apply_and_apply_receives_shared(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zarabot.app.startup import start
+    from zarabot.db.connection import connect as real_connect
+    from zarabot.db.migrations import apply as real_apply
+
+    order: list[str] = []
+    applied_on: list[object] = []
+
+    async def _connect(path: str) -> object:
+        order.append("connect")
+        return await real_connect(path)
+
+    async def _apply(conn: object) -> int:
+        order.append("apply")
+        applied_on.append(conn)
+        assert conn is shared()
+        return await real_apply(conn)
+
+    monkeypatch.setattr("zarabot.app.startup.connect", _connect, raising=False)
+    monkeypatch.setattr("zarabot.app.startup.apply", _apply)
+    await start()
+    assert order[:2] == ["connect", "apply"]
+    assert applied_on[0] is shared()
+
+
+def test_importing_app_startup_opens_no_database_file(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_REPO_ROOT)
+    env["DB_PATH"] = str(tmp_path / "zarabot.db")
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-c",
+            "from zarabot.db.connection import DatabaseNotOpenError, shared\n"
+            "import zarabot.app.startup  # noqa: F401\n"
+            "raised = False\n"
+            "try:\n"
+            "    shared()\n"
+            "except DatabaseNotOpenError:\n"
+            "    raised = True\n"
+            "assert raised\n"
+            "from pathlib import Path\n"
+            f"db = Path({str(tmp_path / 'zarabot.db')!r})\n"
+            "assert not db.exists()\n"
+            f"assert list(Path({str(tmp_path)!r}).glob('*.db')) == []\n",
+        ],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
