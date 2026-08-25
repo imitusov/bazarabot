@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -11,7 +12,7 @@ import pytest
 
 from zarabot.broker.client import BrokerUnavailable
 from zarabot.broker.reconcile import reconcile
-from zarabot.db.connection import connect, disconnect
+from zarabot.db.connection import DatabaseNotOpenError, connect, disconnect, shared
 from zarabot.db.migrations import apply
 from zarabot.db.positions import get, list_open, set_stop_protection
 from zarabot.db.positions import open as open_position
@@ -275,8 +276,28 @@ async def test_reconcile_is_idempotent(env: _Broker) -> None:
     first = await reconcile(NOW)
     assert first.adjustments
     second = await reconcile(NOW)
-    assert second.adjustments == ()
+    write_types = {"CLOSED_EXTERNALLY", "ADOPTED", "LOTS_ADJUSTED"}
+    assert not any(item["type"] in write_types for item in second.adjustments)
     assert await list_open() == []
+
+
+async def test_stop_findings_are_re_reported_until_remedied(env: _Broker) -> None:
+    await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("90"))]
+    first = await reconcile(NOW)
+    second = await reconcile(NOW)
+    first_stops = tuple(
+        item for item in first.adjustments if str(item["type"]).startswith("STOP_")
+    )
+    second_stops = tuple(
+        item for item in second.adjustments if str(item["type"]).startswith("STOP_")
+    )
+    assert first_stops
+    assert second_stops == first_stops
+    write_types = {"CLOSED_EXTERNALLY", "ADOPTED", "LOTS_ADJUSTED"}
+    assert not any(item["type"] in write_types for item in first.adjustments)
+    assert not any(item["type"] in write_types for item in second.adjustments)
 
 
 def _stop(
@@ -384,4 +405,47 @@ async def test_two_live_stops_report_duplicate_naming_both(env: _Broker) -> None
     assert "stop-b" in rendered
     assert dup["position_id"] == position.id
     assert dup["ticker"] == "SBER"
+
+
+async def test_module_never_calls_aiosqlite_connect(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zarabot.broker.reconcile as module
+
+    source = inspect.getsource(module)
+    assert "aiosqlite.connect" not in source
+    assert "_connect" not in source
+    calls: list[object] = []
+    real_connect = aiosqlite.connect
+
+    async def tracking_connect(*args: object, **kwargs: object) -> aiosqlite.Connection:
+        calls.append((args, kwargs))
+        return await real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
+    env.holdings = (_broker_position(lots=3, price=Decimal("123.45")),)
+    report = await reconcile(NOW)
+    assert any(item["type"] == "ADOPTED" for item in report.adjustments)
+    cursor = await shared().execute(
+        "SELECT ran_at, adjustments FROM reconciliations"
+    )
+    rows = await cursor.fetchall()
+    assert len(rows) == 1
+    assert calls == []
+
+
+async def test_access_without_connect_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "zarabot.db"
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DB_PATH", str(path))
+
+    async def fake_portfolio() -> PortfolioState:
+        return PortfolioState(cash=Decimal("100000"), positions=())
+
+    monkeypatch.setattr("zarabot.broker.reconcile.get_portfolio", fake_portfolio)
+    with pytest.raises(DatabaseNotOpenError):
+        await reconcile(NOW)
 
