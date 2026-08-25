@@ -788,7 +788,9 @@ settled or left `SUBMITTING`; positions are neither cancelled nor liquidated.
 **`async shutdown(ctx: AppContext, signal: int) → None`**
 Waits up to 30 seconds for unresolved orders to reach a known state via
 `resolve_unfinished`. Remaining `SUBMITTING` rows are left for the next startup.
-Never cancels a stop or submits a sell. Alerts, then returns.
+Never cancels a stop or submits a sell. Alerts, then calls
+`db.connection.disconnect()` so `shared()` raises `DatabaseNotOpenError`.
+Closing the database is that call and nothing else.
 
 ## `zarabot.__main__`
 

@@ -7,6 +7,7 @@ import logging
 
 from zarabot.app.startup import AppContext
 from zarabot.clock import now
+from zarabot.db.connection import disconnect
 from zarabot.db.orders import list_unresolved
 from zarabot.db.positions import list_open
 from zarabot.execution.orders import resolve_unfinished
@@ -42,3 +43,4 @@ async def shutdown(ctx: AppContext, signal: int) -> None:
         f"zarabot shutting down signal={signal} "
         f"unresolved={len(remaining)} positions={len(opened)}"
     )
+    await disconnect()

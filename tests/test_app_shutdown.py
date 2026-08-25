@@ -230,10 +230,9 @@ async def test_shutdown_leaves_submitting_orders_after_timeout(
 async def test_shutdown_disconnects_so_shared_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import zarabot.app.shutdown as shutdown_mod
     from zarabot.app.shutdown import shutdown
     from zarabot.db import connection as db_connection
-
-    import zarabot.app.shutdown as shutdown_mod
 
     await connect(str(tmp_path / "zarabot.db"))
     shared()
