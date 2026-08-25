@@ -746,10 +746,12 @@ Frozen: `config`, `strategies`, `halt`, `reconciliation`. Lives here, not in
 `config.load` → write `SSL_TBANK_VERIFY` from `config.ssl_tbank_verify` into
 `os.environ` (`"true"` / `"false"`) → urgent `alert` when verification is
 disabled, before any broker call and carrying no token → `logging_setup.configure` →
-`db.migrations.apply` → `strategies.registry.enabled` →
+`db.connection.connect(config.db_path)` then
+`db.migrations.apply(db.connection.shared())` → `strategies.registry.enabled` →
 `market.session.refresh` → `execution.orders.resolve_unfinished` →
 `broker.reconcile.reconcile` plus stop remedies → restore halt → ready `alert`.
-The TLS env write precedes every broker call.
+The connection is opened here, not at import. The TLS env write precedes every
+broker call.
 
 ## `zarabot.app.loops`
 

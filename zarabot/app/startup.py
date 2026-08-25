@@ -6,12 +6,11 @@ import os
 from dataclasses import dataclass
 from typing import NoReturn
 
-import aiosqlite
-
 from zarabot.broker.client import get_instrument, list_stop_orders
 from zarabot.broker.reconcile import reconcile
 from zarabot.clock import now
 from zarabot.config import Config, ConfigError, load
+from zarabot.db.connection import connect, shared
 from zarabot.db.migrations import MigrationError, apply
 from zarabot.db.positions import list_open
 from zarabot.execution.orders import (
@@ -149,8 +148,8 @@ async def start() -> AppContext:
 
     configure(cfg.log_level, [cfg.tinvest_token, cfg.telegram_bot_token])
     try:
-        async with aiosqlite.connect(cfg.db_path) as conn:
-            await apply(conn)
+        await connect(str(cfg.db_path))
+        await apply(shared())
         strategies = tuple(enabled(cfg))
         await refresh(_SCHEDULE_DAYS)
         moment = now()
