@@ -12,6 +12,12 @@ import pytest
 
 from zarabot.app.startup import AppContext
 from zarabot.config import Config
+from zarabot.db.connection import (
+    DatabaseNotOpenError,
+    connect,
+    disconnect,
+    shared,
+)
 from zarabot.models import (
     OrderRecord,
     OrderStatus,
@@ -22,6 +28,12 @@ from zarabot.models import (
 )
 
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+async def _close_process_connection() -> None:
+    yield
+    await disconnect()
 
 
 def _config() -> Config:
@@ -213,3 +225,46 @@ async def test_shutdown_leaves_submitting_orders_after_timeout(
     monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
     await shutdown(_ctx(), signal.SIGTERM)
     assert resolves >= 1
+
+
+async def test_shutdown_disconnects_so_shared_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zarabot.app.shutdown import shutdown
+    from zarabot.db import connection as db_connection
+
+    import zarabot.app.shutdown as shutdown_mod
+
+    await connect(str(tmp_path / "zarabot.db"))
+    shared()
+
+    calls: list[str] = []
+    real_disconnect = db_connection.disconnect
+
+    async def _disconnect() -> None:
+        calls.append("disconnect")
+        await real_disconnect()
+
+    async def _unresolved() -> list[OrderRecord]:
+        return []
+
+    async def _resolve(moment: datetime) -> list[OrderRecord]:
+        return []
+
+    async def _open() -> list[object]:
+        return []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr(db_connection, "disconnect", _disconnect)
+    monkeypatch.setattr(shutdown_mod, "disconnect", _disconnect, raising=False)
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    await shutdown(_ctx(), signal.SIGTERM)
+    assert calls == ["disconnect"]
+    with pytest.raises(DatabaseNotOpenError):
+        shared()
