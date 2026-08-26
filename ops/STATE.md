@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-26 · spec v1.26 · brief v1.8 · 27 open issues
+Updated: 2026-08-26 · spec v1.27 · brief v1.8 · 25 open issues
 
 ## What this is
 
@@ -14,7 +14,32 @@ module) → code. **When the brief and the spec conflict, the brief wins.**
 
 39 modules implemented. `make check` green. All gates pass.
 
-## The one fact that reframes everything else
+## The fact that reframed everything, and what replaced it
+
+**The bot could never have traded, and now it can.** `broker.client` sent a
+trading-calendar request the broker rejects — `from=now, to=now+14d`, where the
+horizon is measured from the start of the day — so the cache was always empty and
+`is_open()` was always false. 29 hours of uptime, a heartbeat reporting health,
+and not one trading-related broker call. That was #39, and it was invisible
+because #23 turned the `INVALID_ARGUMENT` into `BrokerUnavailable` and #31's
+empty-cache bug kept the alert quiet.
+
+Fixed and **verified against the live account** on 2026-08-26: the bot's own code
+returned 15 days, 11 trading, 10:00–18:54:59 MSK, weekends closed.
+
+Confirming it turned up #43: the calendar was read from whichever of the 53
+MOEX-prefixed exchanges came back first — an extended session running to 23:49
+MSK that reports **Saturday and Sunday as trading days**. Fixing #39 alone would
+have had the bot trading on a Saturday evening. The two masked each other
+exactly.
+
+**What this says about the remaining backlog.** Every finding before #39 came
+from reading code. #39 and #43 came from fifteen minutes against a live account,
+and neither was reachable by inspection — one needed the broker to reject a
+request, the other needed to see what 147 exchanges actually contain. `make
+verify` and a sandbox session are still the highest-information action available.
+
+## Still true
 
 **The bot has never traded.** The database exists at schema version 2 with zero
 positions, zero orders, zero signals, zero snapshots. The verification suite
