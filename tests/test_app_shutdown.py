@@ -227,6 +227,180 @@ async def test_shutdown_leaves_submitting_orders_after_timeout(
     assert resolves >= 1
 
 
+async def test_shutdown_closes_the_broker_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The process holds one AsyncClient (#18); shutdown is what closes it."""
+    import zarabot.app.shutdown as shutdown_mod
+    from zarabot.app.shutdown import shutdown
+
+    closes: list[str] = []
+
+    async def _broker_close() -> None:
+        closes.append("broker_close")
+
+    async def _unresolved() -> list[OrderRecord]:
+        return []
+
+    async def _resolve(moment: datetime) -> list[OrderRecord]:
+        return []
+
+    async def _open() -> list[object]:
+        return []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr("zarabot.broker.client.close", _broker_close)
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    await shutdown(_ctx(), signal.SIGTERM)
+    assert closes == ["broker_close"]
+
+
+async def test_shutdown_closes_the_broker_only_after_settling_orders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settlement talks to the broker, so the channel must outlive the drain."""
+    import zarabot.app.shutdown as shutdown_mod
+    from zarabot.app.shutdown import shutdown
+
+    calls: list[str] = []
+    broker_closed = False
+    pending = [_order()]
+
+    async def _broker_close() -> None:
+        nonlocal broker_closed
+        broker_closed = True
+        calls.append("broker_close")
+
+    async def _unresolved() -> list[OrderRecord]:
+        assert not broker_closed, "queried orders after closing the broker channel"
+        calls.append("unresolved")
+        return list(pending)
+
+    async def _resolve(moment: datetime) -> list[OrderRecord]:
+        assert not broker_closed, "settled an order after closing the broker channel"
+        calls.append("resolve")
+        pending.clear()
+        return []
+
+    async def _open() -> list[object]:
+        return []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        calls.append("alert")
+
+    async def _disconnect() -> None:
+        calls.append("disconnect")
+
+    monkeypatch.setattr("zarabot.broker.client.close", _broker_close)
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    monkeypatch.setattr(shutdown_mod, "disconnect", _disconnect)
+    await shutdown(_ctx(), signal.SIGTERM)
+    assert calls.index("broker_close") > calls.index("resolve")
+    assert calls.index("broker_close") > calls.index("alert")
+    assert calls.index("broker_close") > calls.index("disconnect")
+    assert calls[-1] == "broker_close"
+
+
+async def test_shutdown_closes_the_broker_when_orders_stay_submitting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out drain still releases the channel; rows stay SUBMITTING."""
+    import zarabot.app.shutdown as shutdown_mod
+    from zarabot.app.shutdown import shutdown
+
+    closes: list[str] = []
+    stuck = [_order()]
+
+    async def _broker_close() -> None:
+        closes.append("broker_close")
+
+    async def _unresolved() -> list[OrderRecord]:
+        return list(stuck)
+
+    async def _resolve(moment: datetime) -> list[OrderRecord]:
+        return []
+
+    async def _open() -> list[object]:
+        return []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    async def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("zarabot.broker.client.close", _broker_close)
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+    await shutdown(_ctx(), signal.SIGTERM)
+    assert closes == ["broker_close"]
+    assert stuck[0].status is OrderStatus.SUBMITTING
+
+
+async def test_shutdown_closing_the_broker_does_not_touch_positions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Releasing the channel is not an excuse to flatten the book."""
+    import zarabot.app.shutdown as shutdown_mod
+    from zarabot.app.shutdown import shutdown
+
+    forbidden: list[str] = []
+    closes: list[str] = []
+    opened = [_position()]
+
+    async def _broker_close() -> None:
+        closes.append("broker_close")
+
+    async def _unresolved() -> list[OrderRecord]:
+        return []
+
+    async def _resolve(moment: datetime) -> list[OrderRecord]:
+        return []
+
+    async def _open() -> list[Position]:
+        return list(opened)
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    async def _cancel(*_a: object, **_k: object) -> None:
+        forbidden.append("cancel")
+
+    async def _post(*_a: object, **_k: object) -> None:
+        forbidden.append("post")
+
+    async def _close_position(*_a: object, **_k: object) -> None:
+        forbidden.append("close_position")
+
+    monkeypatch.setattr("zarabot.broker.client.close", _broker_close)
+    monkeypatch.setattr("zarabot.broker.client.cancel_stop_order", _cancel)
+    monkeypatch.setattr("zarabot.broker.client.post_market_order", _post)
+    monkeypatch.setattr("zarabot.execution.orders.close_position", _close_position)
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "resolve_unfinished", _resolve)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    await shutdown(_ctx(), signal.SIGINT)
+    assert closes == ["broker_close"]
+    assert forbidden == []
+    assert opened[0].status == "OPEN"
+
+
 async def test_shutdown_disconnects_so_shared_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
