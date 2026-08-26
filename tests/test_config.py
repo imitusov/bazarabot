@@ -49,6 +49,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None = None) -
         "SSL_TBANK_VERIFY",
         "PRICE_MAX_AGE_SECONDS",
         "PRICE_MAX_MOVE_PCT",
+        "ALLOW_FOREIGN_HOLDINGS",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in REQUIRED.items():
@@ -237,6 +238,49 @@ def test_ssl_tbank_verify_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> Non
     _env(monkeypatch, {"SSL_TBANK_VERIFY": "maybe"})
     with pytest.raises(ConfigError, match="SSL_TBANK_VERIFY"):
         load()
+
+
+def test_allow_foreign_holdings_defaults_to_false_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch)
+    assert load().allow_foreign_holdings is False
+
+
+def test_allow_foreign_holdings_blank_takes_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"ALLOW_FOREIGN_HOLDINGS": "   "})
+    assert load().allow_foreign_holdings is False
+
+
+def test_allow_foreign_holdings_true_and_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"ALLOW_FOREIGN_HOLDINGS": "true"})
+    assert load().allow_foreign_holdings is True
+    _env(monkeypatch, {"ALLOW_FOREIGN_HOLDINGS": "false"})
+    assert load().allow_foreign_holdings is False
+
+
+@pytest.mark.parametrize("raw", ["1", "yes", "TRUE", "True", "on", "maybe"])
+def test_allow_foreign_holdings_invalid_raises_rather_than_enabling(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    # The flag must be awkward to set by accident: no near-miss spelling may
+    # quietly acknowledge foreign holdings, and none may quietly be ignored.
+    _env(monkeypatch, {"ALLOW_FOREIGN_HOLDINGS": raw})
+    with pytest.raises(ConfigError, match="ALLOW_FOREIGN_HOLDINGS"):
+        load()
+
+
+def test_allow_foreign_holdings_appears_in_the_string_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"ALLOW_FOREIGN_HOLDINGS": "true"})
+    cfg = load()
+    text = str(cfg) + repr(cfg)
+    assert "allow_foreign_holdings=True" in text
 
 
 def test_unreadable_ml_model_path_raises(
