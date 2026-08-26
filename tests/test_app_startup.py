@@ -436,3 +436,312 @@ def test_importing_app_startup_opens_no_database_file(tmp_path: Path) -> None:
         text=True,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def _position(
+    ticker: str = "SBER",
+    position_id: int = 1,
+    stop_order_key: str | None = None,
+) -> object:
+    from decimal import Decimal
+
+    from zarabot.models import Position, StopProtection
+
+    return Position(
+        id=position_id,
+        ticker=ticker,
+        figi="BBG000000001",
+        strategy="ma_crossover",
+        lots=1,
+        lot_size=10,
+        entry_price=Decimal("100"),
+        entry_at=NOW,
+        stop_price=Decimal("95"),
+        target_price=Decimal("110"),
+        status="OPEN",
+        adopted=False,
+        open_order_key=f"open-{position_id}",
+        close_order_key=None,
+        exit_trigger=None,
+        exit_price=None,
+        exit_at=None,
+        realised_pnl=None,
+        stop_protection=StopProtection.EXCHANGE,
+        stop_order_key=stop_order_key,
+    )
+
+
+def _stop(
+    key: str,
+    stop_order_id: str | None,
+    position_id: int = 1,
+    ticker: str = "SBER",
+) -> object:
+    from decimal import Decimal
+
+    from zarabot.models import StopOrderRecord, StopOrderStatus
+
+    return StopOrderRecord(
+        key=key,
+        stop_order_id=stop_order_id,
+        position_id=position_id,
+        ticker=ticker,
+        lots=1,
+        stop_price=Decimal("95"),
+        status=StopOrderStatus.ACTIVE,
+        created_at=NOW,
+        settled_at=None,
+    )
+
+
+def _report_of(*adjustments: dict[str, object]) -> object:
+    return ReconciliationReport(ran_at=NOW, adjustments=tuple(adjustments))
+
+
+def _install_report(
+    monkeypatch: pytest.MonkeyPatch, report: object, calls: list[str]
+) -> None:
+    async def _reconcile(moment: datetime) -> object:
+        calls.append("reconcile")
+        return report
+
+    monkeypatch.setattr("zarabot.app.startup.reconcile", _reconcile)
+
+
+async def test_stop_duplicate_cancels_every_identifier_and_retains_keep(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §3.2: every identifier in `cancel` is cancelled, `keep` retained.
+
+    Two live stops against one position is the double-sell condition. It was
+    detected, reported, and dropped by an executor with no branch for it (#35).
+    """
+    from zarabot.app.startup import start
+
+    keep = _stop("keep-k", "keep-id")
+    dup_one = _stop("dup-1", "dup-id-1")
+    dup_two = _stop("dup-2", None)
+    position = _position(stop_order_key="keep-k")
+    cancelled: list[str] = []
+
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "STOP_DUPLICATE",
+                "ticker": "SBER",
+                "position_id": 1,
+                "keep": "keep-id",
+                "cancel": ["dup-id-1", "dup-2"],
+            },
+            {"type": "STOP_MISSING", "ticker": "GAZP", "position_id": 2},
+        ),
+        env,
+    )
+
+    async def _opened() -> list[object]:
+        return [position]
+
+    async def _stops() -> list[object]:
+        return [keep, dup_one, dup_two]
+
+    async def _cancel(stop: object) -> None:
+        cancelled.append(stop.key)
+
+    async def _instrument(ticker: str) -> object:
+        raise AssertionError("no instrument lookup for a duplicate")
+
+    async def _place(pos: object, inst: object) -> object:
+        raise AssertionError("a duplicate is not remedied by a new stop")
+
+    monkeypatch.setattr("zarabot.app.startup.list_open", _opened)
+    monkeypatch.setattr("zarabot.app.startup.list_stop_orders", _stops)
+    monkeypatch.setattr("zarabot.app.startup.cancel_orphaned_stop", _cancel)
+    monkeypatch.setattr("zarabot.app.startup.get_instrument", _instrument)
+    monkeypatch.setattr("zarabot.app.startup.place_protective_stop", _place)
+
+    await start()
+
+    assert sorted(cancelled) == ["dup-1", "dup-2"]
+    assert keep.key not in cancelled
+
+
+async def test_report_with_only_a_stop_duplicate_is_still_applied(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §3.2: the remedy gate must not skip a lone `STOP_DUPLICATE`."""
+    from zarabot.app.startup import start
+
+    keep = _stop("keep-k", "keep-id")
+    dup = _stop("dup-1", "dup-id-1")
+    cancelled: list[str] = []
+    listed: list[str] = []
+
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "STOP_DUPLICATE",
+                "ticker": "SBER",
+                "position_id": 1,
+                "keep": "keep-id",
+                "cancel": ["dup-id-1"],
+            }
+        ),
+        env,
+    )
+
+    async def _opened() -> list[object]:
+        listed.append("list_open")
+        return [_position(stop_order_key="keep-k")]
+
+    async def _stops() -> list[object]:
+        listed.append("list_stop_orders")
+        return [keep, dup]
+
+    async def _cancel(stop: object) -> None:
+        cancelled.append(stop.key)
+
+    monkeypatch.setattr("zarabot.app.startup.list_open", _opened)
+    monkeypatch.setattr("zarabot.app.startup.list_stop_orders", _stops)
+    monkeypatch.setattr("zarabot.app.startup.cancel_orphaned_stop", _cancel)
+
+    await start()
+
+    assert listed, "the remedy gate returned before positions were listed"
+    assert cancelled == ["dup-1"]
+
+
+async def test_unrecognised_adjustment_type_alerts(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §3.2: a report the executor cannot act on must be loud."""
+    from zarabot.app.startup import start
+
+    _install_report(
+        monkeypatch,
+        _report_of({"type": "STOP_TELEPORTED", "ticker": "SBER", "position_id": 1}),
+        env,
+    )
+
+    async def _opened() -> list[object]:
+        return []
+
+    async def _stops() -> list[object]:
+        return []
+
+    monkeypatch.setattr("zarabot.app.startup.list_open", _opened)
+    monkeypatch.setattr("zarabot.app.startup.list_stop_orders", _stops)
+
+    await start()
+
+    alerts = [item for item in env if item.startswith("alert:")]
+    assert [text for text in alerts if "STOP_TELEPORTED" in text], alerts
+
+
+async def test_known_non_stop_adjustments_do_not_alert_as_unrecognised(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loud path is for types the executor does not know, not every type."""
+    from zarabot.app.startup import start
+
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {"type": "CLOSED_EXTERNALLY", "ticker": "SBER", "position_id": 1},
+            {"type": "ADOPTED", "ticker": "GAZP", "position_id": 2},
+            {"type": "LOTS_ADJUSTED", "ticker": "LKOH", "position_id": 3},
+        ),
+        env,
+    )
+
+    await start()
+
+    alerts = [item for item in env if item.startswith("alert:")]
+    assert not [text for text in alerts if "does not" in text.lower()], alerts
+
+
+async def test_foreign_holding_refuses_to_start_naming_every_ticker(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 32: the account is the bot's alone (brief v1.8). Refuse to start."""
+    from zarabot.app.startup import StartupError, start
+
+    entries: list[str] = []
+
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "FOREIGN_HOLDING",
+                "ticker": "LKOH",
+                "lots": 3,
+                "average_price": "6200.5",
+            },
+            {
+                "type": "FOREIGN_HOLDING",
+                "ticker": "GMKN",
+                "lots": 1,
+                "average_price": "140.0",
+            },
+        ),
+        env,
+    )
+
+    async def _open(*args: object, **kwargs: object) -> None:
+        entries.append("open_position")
+
+    monkeypatch.setattr("zarabot.execution.orders.open_position", _open)
+
+    with pytest.raises(StartupError) as excinfo:
+        await start()
+
+    message = str(excinfo.value)
+    assert "LKOH" in message
+    assert "GMKN" in message
+    assert entries == []
+    alerts = [item for item in env if item.startswith("alert:")]
+    assert [text for text in alerts if "LKOH" in text and "GMKN" in text], alerts
+    assert not [text for text in alerts if "running" in text.lower()]
+    assert all(REQUIRED_ENV["TINVEST_TOKEN"] not in text for text in alerts)
+
+
+async def test_allow_foreign_holdings_starts_observe_only(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 32: acknowledged holdings are named in the ready alert, not traded."""
+    from zarabot.app.startup import start
+
+    monkeypatch.setenv("ALLOW_FOREIGN_HOLDINGS", "true")
+    traded: list[str] = []
+
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "FOREIGN_HOLDING",
+                "ticker": "LKOH",
+                "lots": 3,
+                "average_price": "6200.5",
+            }
+        ),
+        env,
+    )
+
+    async def _place(pos: object, inst: object) -> object:
+        traded.append("place_protective_stop")
+        return pos
+
+    async def _close(*args: object, **kwargs: object) -> None:
+        traded.append("close_position")
+
+    monkeypatch.setattr("zarabot.app.startup.place_protective_stop", _place)
+    monkeypatch.setattr("zarabot.execution.orders.close_position", _close)
+
+    ctx = await start()
+
+    assert ctx.config.allow_foreign_holdings is True
+    ready = [item for item in env if item.startswith("alert:") and "running" in item]
+    assert ready, [item for item in env if item.startswith("alert:")]
+    assert "LKOH" in ready[0]
+    assert traded == []
