@@ -1292,3 +1292,40 @@ async def test_match_is_on_the_persisted_broker_id_not_our_key(
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
 
     assert booked == []
+
+
+async def test_live_stop_keyed_only_by_broker_id_is_not_reported_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5 verification 3: order_request_id absent, so our UUID matches nothing.
+
+    list_stop_orders then keys the stop by the broker's own id. The stop is
+    alive; treating it as missing would alert on a healthy position every cycle.
+    """
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    booked: list[object] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    standing = [
+        StopOrderRecord(
+            key="broker-stop",  # no order_request_id: keyed by the broker id
+            stop_order_id="broker-stop",
+            position_id=1,
+            ticker="SBER",
+            lots=2,
+            stop_price=Decimal("95"),
+            status=StopOrderStatus.ACTIVE,
+            created_at=NOW,
+            settled_at=None,
+        )
+    ]
+    _arrange_stop_detection(
+        monkeypatch, _exchange_position(), standing, {}, booked, alerts
+    )
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+
+    assert booked == []
+    assert [a for a in alerts if "no confirmed execution" in a] == []
