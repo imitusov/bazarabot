@@ -29,6 +29,7 @@ from zarabot.db.positions import (
     list_open,
     set_stop_protection,
 )
+from zarabot.db.positions import get as get_position
 from zarabot.db.signals import record
 from zarabot.db.stop_orders import list_active
 from zarabot.execution.orders import (
@@ -479,7 +480,7 @@ async def test_max_lots_zero_records_rejection(env: _Broker) -> None:
 async def test_close_executed_stop_does_not_sell(env: _Broker) -> None:
     position = await open_position(_signal(), 2, _instrument())
     env.calls.clear()
-    closed = await close_executed_stop(position, Decimal("95"))
+    closed = await close_executed_stop(position, _stop_fill(Decimal("95")))
     assert closed.status == "CLOSED"
     assert closed.exit_trigger is ExitTrigger.STOP_LOSS
     assert "post:SELL" not in env.calls
@@ -708,13 +709,13 @@ async def test_unknown_exit_outcome_raises_exit_failed(env: _Broker) -> None:
 async def test_close_executed_stop_on_local_position(env: _Broker) -> None:
     env.stop_failures_left = 3
     position = await open_position(_signal(), 2, _instrument())
-    closed = await close_executed_stop(position, Decimal("95"))
+    closed = await close_executed_stop(position, _stop_fill(Decimal("95")))
     assert closed.exit_trigger is ExitTrigger.STOP_LOSS
 
 
 async def test_close_executed_missing_position(env: _Broker) -> None:
     with pytest.raises(PositionStateError):
-        await close_executed_stop(_ghost_position(), Decimal("95"))
+        await close_executed_stop(_ghost_position(), _stop_fill(Decimal("95")))
 
 
 async def test_resolve_naive_datetime_rejected(env: _Broker) -> None:
@@ -989,3 +990,57 @@ async def test_halt_failure_after_db_error_is_logged(
     monkeypatch.setattr("zarabot.execution.orders.halt", halt_boom)
     with pytest.raises(aiosqlite.Error):
         await open_position(_signal(), 2, _instrument())
+
+
+def _stop_fill(
+    price: Decimal | None,
+    lots: int = 2,
+    commission: Decimal | None = Decimal("1.25"),
+) -> OrderRecord:
+    """The broker's record of an exchange stop execution (spec §4, rule 33)."""
+    return OrderRecord(
+        key="exch-1",
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.SELL,
+        intent="EXIT",
+        lots=lots,
+        status=OrderStatus.FILLED,
+        filled_lots=lots,
+        filled_price=price,
+        commission=commission,
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+
+
+async def test_executed_stop_books_the_brokers_price_not_a_quote(
+    env: _Broker,
+) -> None:
+    """#4: a fill at 95.00 is recorded as 95.00 even if the market says 92.00."""
+    position = await open_position(_signal(), 2, _instrument())
+    closed = await close_executed_stop(position, _stop_fill(Decimal("95.00")))
+    assert closed.exit_price == Decimal("95.00")
+
+
+async def test_executed_stop_records_the_brokers_commission(env: _Broker) -> None:
+    """The exit commission is the broker's, never zero and never estimated."""
+    from zarabot.db.orders import get as get_order
+
+    position = await open_position(_signal(), 2, _instrument())
+    closed = await close_executed_stop(position, _stop_fill(Decimal("95.00")))
+    assert closed.close_order_key is not None
+    exit_order = await get_order(closed.close_order_key)
+    assert exit_order is not None
+    assert exit_order.commission == Decimal("1.25")
+
+
+async def test_executed_stop_without_a_price_refuses_to_book(env: _Broker) -> None:
+    """No fallback price exists: an unpriced stop exit is not bookable."""
+    position = await open_position(_signal(), 2, _instrument())
+    with pytest.raises(ValueError):
+        await close_executed_stop(position, _stop_fill(None))
+    still = await get_position(position.id)
+    assert still is not None
+    assert still.status == "OPEN"
