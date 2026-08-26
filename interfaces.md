@@ -520,25 +520,54 @@ The only module that calls the broker. Sandbox is selected by
 `INVEST_GRPC_API_SANDBOX` endpoint, never `post_sandbox_*`. Never passes
 `confirm_margin_trade=True`. Never logs or raises the token. Prices are `Decimal`.
 
+**One `AsyncClient` and one `Config` per process.** The client is created lazily
+on first call — never at import — and reused for every later call; configuration
+is read through `config.get()`, once, and held alongside it (#18).
+
+**Errors are typed by what they are, not by where they were caught (#23).** Only
+`UNAVAILABLE` / `DEADLINE_EXCEEDED` become `BrokerUnavailable`;
+`RESOURCE_EXHAUSTED` becomes `BrokerRateLimited`; `NOT_FOUND` becomes the
+caller's not-found type where one exists. **Every other gRPC status —
+`INVALID_ARGUMENT` foremost — and every non-SDK exception (`AttributeError`,
+`TypeError`) propagates as itself**, cause and traceback intact. Callers that
+retry on `BrokerUnavailable` must therefore expect a defect to surface rather
+than loop forever. `from None` is never used.
+
 **Exceptions:** `InstrumentNotFound`, `BrokerUnavailable`, `PriceRejected`
 (quote arrived but is not usable — distinct from `BrokerUnavailable`),
 `BrokerRateLimited` (with `retry_after: Decimal | None`), `OrderRejected` /
 `StopOrderRejected` (with `reason: str`), `OrderNotFound`.
 
+**`async close() → None`**
+Closes the process client and forgets it. Idempotent; a no-op when none is
+open. A later call creates a new one, so closing is not a one-way door. Called
+only by `app.shutdown`.
 **`async get_instrument(ticker: str) → Instrument`**
-**`async get_candles(figi: str, interval, since: datetime, until: datetime) → list[Candle]`**
+**`async get_candles(figi: str, interval: CandleInterval, since: datetime, until: datetime) → list[Candle]`**
 Oldest-first. Empty list when none. `ValueError` on naive datetimes.
 **`async get_last_price(figi: str) → Decimal`**
-Rejects non-positive prices, quotes older than `price_max_age_seconds`, and
-moves beyond `price_max_move_pct` from the last accepted price for that
-instrument (`PriceRejected`). A rejected quote does not update the last
-accepted price.
+Rejects non-positive prices, quotes older than `price_max_age_seconds`, quotes
+with a missing or naive timestamp, and moves beyond `price_max_move_pct` from
+the last accepted price for that instrument (`PriceRejected`). A rejected quote
+does not update the last accepted price.
 **`async get_portfolio() → PortfolioState`**
 Broker-authoritative cash and holdings.
 **`async get_trading_schedule(days: int) → list[SessionInfo]`**
+Requests `exchange="MOEX"` by name — the main equity board, weekends closed —
+never a substring match over the 53 MOEX-prefixed exchanges (#43). The range is
+anchored to the start of the current UTC day and `days` may not exceed 14;
+`ValueError` if it does, because the broker rejects a longer horizon with
+`INVALID_ARGUMENT` / `30002` (#39). One `SessionInfo` per day returned, in
+order. A day that is not a session — `is_trading_day` false, or `1970-01-01`
+timestamps whatever the flag says — comes back as
+`SessionInfo(start=None, end=None, is_trading_day=False)`. Empty list when the
+exchange is absent from the response.
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 `confirm_margin_trade=False`. Raises `OrderRejected`. `commission` is
 `executed_commission` converted with `money_to_decimal`, or `None` until filled.
+`EXECUTION_REPORT_STATUS_PARTIALLYFILL` maps to `SUBMITTED` — still live at the
+broker — with `filled_lots` below `lots` and `settled_at` null; `FILLED` means
+`filled_lots == lots` (#10).
 **`async post_stop_loss(key: str, figi: str, lots: int, stop_price: Decimal) → StopOrderRecord`**
 GTC market stop-loss, `confirm_margin_trade=False`.
 **`async cancel_stop_order(stop_order_id: str) → None`**
@@ -552,6 +581,7 @@ Period cost reconciliation only. Not the per-order commission source —
 **`async get_order_state(key: str) → OrderRecord`**
 Lookup by `order_id_type=ORDER_ID_TYPE_REQUEST`. Raises `OrderNotFound`.
 `commission` is `executed_commission` via `money_to_decimal`, or `None` until filled.
+Same partial-fill mapping as `post_market_order`.
 
 ## `zarabot.market.session`
 

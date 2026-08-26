@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from decimal import Decimal
+import asyncio
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, NoReturn
 
 from t_tech.invest import AsyncClient
+from t_tech.invest.async_services import AsyncServices
 from t_tech.invest.constants import INVEST_GRPC_API_SANDBOX
 from t_tech.invest.exceptions import (  # type: ignore[attr-defined]
     AioRequestError,
     StatusCode,
 )
 from t_tech.invest.schemas import (
+    CandleInterval,
     ExchangeOrderType,
     GetMaxLotsRequest,
     InstrumentIdType,
@@ -28,6 +33,7 @@ from t_tech.invest.schemas import (
 from t_tech.invest.utils import decimal_to_quotation
 
 from zarabot import clock, config
+from zarabot.config import Config
 from zarabot.models import (
     Candle,
     Instrument,
@@ -44,8 +50,35 @@ from zarabot.models import (
 )
 
 _CLASS_CODE = "TQBR"
-_EXCHANGE_HINT = "MOEX"
 _STATUS_PREFIX = "SECURITY_TRADING_STATUS_"
+
+# The main equity board: 10:00-18:54:59 MSK, weekends closed. Requested by
+# name, because the response carries 147 exchanges and 53 of them contain the
+# substring "MOEX" — the first match was in practice MOEX_MRNG_EVNG_E_WKND_D,
+# an extended session running to 23:49 MSK that reports Saturday and Sunday as
+# trading days (#43).
+_EXCHANGE = "MOEX"
+
+# The broker measures the calendar horizon from the START OF THE DAY of `from_`,
+# not from the instant of the call, and rejects anything longer with
+# INVALID_ARGUMENT / 30002. Confirmed against the live account: from=now +14d
+# fails, from=now +13d succeeds, from=midnight +14d succeeds (#39).
+_MAX_SCHEDULE_DAYS = 14
+
+# A closed day carries 1970-01-01 in both timestamps, and some exchanges report
+# is_trading_day=True alongside those epoch values. Either read as a session is
+# another way to believe the market is open.
+_EPOCH_GUARD = datetime(1971, 1, 1, tzinfo=UTC)
+
+# Only these mean "the broker could not be reached", which is the one condition
+# where the caller's retry-with-backoff is the right answer. Every other status
+# is a fact about the request, not about the weather (#23).
+_TRANSPORT_STATUSES = frozenset({StatusCode.UNAVAILABLE, StatusCode.DEADLINE_EXCEEDED})
+
+_NANO = Decimal("1000000000")
+
+# The only state this module holds: the last accepted price per instrument,
+# which is what makes the implausible-move check possible.
 _last_accepted: dict[str, Decimal] = {}
 
 
@@ -89,57 +122,118 @@ class OrderNotFound(Exception):
     """Broker has no record for this idempotency key — the order was never accepted."""
 
 
+@dataclass
+class _Connection:
+    """One channel and one `Config` for the life of the process (#18)."""
+
+    stack: AsyncExitStack
+    services: AsyncServices
+    config: Config
+
+
+_connection: _Connection | None = None
+_open_lock = asyncio.Lock()
+
+
+async def _open() -> _Connection:
+    """Return the process client, creating it on first use. Never at import."""
+    global _connection
+    if _connection is not None:
+        return _connection
+    async with _open_lock:
+        if _connection is None:
+            cfg = config.get()
+            target = INVEST_GRPC_API_SANDBOX if cfg.trading_mode == "sandbox" else None
+            stack = AsyncExitStack()
+            services = await stack.enter_async_context(
+                AsyncClient(cfg.tinvest_token, target=target)
+            )
+            _connection = _Connection(stack=stack, services=services, config=cfg)
+    return _connection
+
+
+async def _connect() -> _Connection:
+    """Open or reuse the process client, typing a transport failure."""
+    try:
+        return await _open()
+    except AioRequestError as exc:
+        _translate(exc, _token(), not_found=None)
+
+
+async def close() -> None:
+    """Close the process client and forget it. Idempotent.
+
+    Called only by `app.shutdown`. A later call creates a new client, so this
+    is not a one-way door for a long-lived process that must reconnect.
+    """
+    global _connection
+    conn = _connection
+    _connection = None
+    if conn is not None:
+        await conn.stack.aclose()
+
+
+def _token() -> str:
+    return config.get().tinvest_token
+
+
 def _redact(text: str, token: str) -> str:
     return text.replace(token, "") if token else text
 
 
 def _retry_after(metadata: Any) -> Decimal | None:
+    """The broker's back-off hint, from whichever shape the SDK hands back."""
     if metadata is None:
         return None
-    mapping: dict[str, Any]
-    if isinstance(metadata, dict):
-        mapping = {str(key).lower(): value for key, value in metadata.items()}
-    else:
-        try:
-            mapping = {str(key).lower(): value for key, value in metadata}
-        except TypeError:
-            return None
-    raw = mapping.get("retry-after") or mapping.get("ratelimit-reset")
+    raw: Any = getattr(metadata, "ratelimit_reset", None)
+    if raw is None and isinstance(metadata, dict):
+        lowered = {str(key).lower(): value for key, value in metadata.items()}
+        raw = (
+            lowered.get("retry-after")
+            or lowered.get("x-ratelimit-reset")
+            or lowered.get("ratelimit-reset")
+        )
     if raw is None:
         return None
-    return Decimal(str(raw))
+    try:
+        return Decimal(str(raw))
+    except InvalidOperation:
+        return None
 
 
 def _translate(
-    exc: BaseException, token: str, *, not_found: type[Exception] | None
+    exc: AioRequestError, token: str, *, not_found: type[Exception] | None
 ) -> NoReturn:
-    if isinstance(exc, AioRequestError):
-        if exc.code is StatusCode.RESOURCE_EXHAUSTED:
-            raise BrokerRateLimited(_retry_after(exc.metadata)) from None
-        if exc.code is StatusCode.NOT_FOUND and not_found is not None:
-            raise not_found(_redact(exc.details or "not found", token)) from None
-        raise BrokerUnavailable(_redact("broker unavailable", token)) from None
-    raise BrokerUnavailable(_redact("broker unavailable", token)) from None
+    """Type the failure by what it is, never by where it was caught (#23).
 
-
-def _connect() -> AsyncClient:
-    cfg = config.load()
-    if cfg.trading_mode == "sandbox":
-        return AsyncClient(cfg.tinvest_token, target=INVEST_GRPC_API_SANDBOX)
-    return AsyncClient(cfg.tinvest_token)
-
-
-def _token() -> str:
-    return config.load().tinvest_token
-
-
-def _account() -> str:
-    return config.load().tinvest_account_id
+    Only a transport failure becomes `BrokerUnavailable`. Everything else that
+    is not a rate limit or an expected not-found — `INVALID_ARGUMENT` foremost
+    — propagates as itself, because retry-with-backoff is the right answer for
+    an outage and useless for a malformed request. `from None` is never used:
+    it discards the traceback naming the real fault, and the redaction filter
+    is what makes preserving the cause safe.
+    """
+    if exc.code is StatusCode.RESOURCE_EXHAUSTED:
+        raise BrokerRateLimited(_retry_after(exc.metadata)) from exc
+    if exc.code is StatusCode.NOT_FOUND and not_found is not None:
+        raise not_found(_redact(exc.details or "not found", token)) from exc
+    if exc.code in _TRANSPORT_STATUSES:
+        name = getattr(exc.code, "name", str(exc.code))
+        raise BrokerUnavailable(_redact(f"broker unavailable: {name}", token)) from exc
+    raise exc
 
 
 def _reject_naive(moment: datetime) -> None:
     if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
         raise ValueError("datetime must be timezone-aware")
+
+
+def _aware(value: object) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        return None
+    return value
 
 
 def _trading_status(raw: object) -> str:
@@ -157,7 +251,9 @@ def _order_status(raw: object) -> OrderStatus:
     if raw is OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_CANCELLED:
         return OrderStatus.CANCELLED
     if raw is OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_PARTIALLYFILL:
-        return OrderStatus.FILLED
+        # A partial fill is not a fill: the order is still live at the broker
+        # and `filled_lots` carries what has filled so far (#10).
+        return OrderStatus.SUBMITTED
     if raw is OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW:
         return OrderStatus.SUBMITTED
     return OrderStatus.UNKNOWN
@@ -167,9 +263,6 @@ def _side_from_direction(raw: object) -> Side:
     if raw is OrderDirection.ORDER_DIRECTION_SELL:
         return Side.SELL
     return Side.BUY
-
-
-_NANO = Decimal("1000000000")
 
 
 def _as_decimal(raw: object | None) -> Decimal:
@@ -204,16 +297,15 @@ def _lots_from_quote(raw: object | None) -> int:
 
 
 async def get_instrument(ticker: str) -> Instrument:
-    token = _token()
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            response = await client.instruments.share_by(
-                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                class_code=_CLASS_CODE,
-                id=ticker,
-            )
-    except Exception as exc:
-        _translate(exc, token, not_found=InstrumentNotFound)
+        response = await conn.services.instruments.share_by(
+            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+            class_code=_CLASS_CODE,
+            id=ticker,
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=InstrumentNotFound)
     share = response.instrument
     return Instrument(
         figi=share.figi,
@@ -227,21 +319,20 @@ async def get_instrument(ticker: str) -> Instrument:
 
 
 async def get_candles(
-    figi: str, interval: object, since: datetime, until: datetime
+    figi: str, interval: CandleInterval, since: datetime, until: datetime
 ) -> list[Candle]:
     _reject_naive(since)
     _reject_naive(until)
-    token = _token()
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            response = await client.market_data.get_candles(
-                instrument_id=figi,
-                from_=since,
-                to=until,
-                interval=interval,
-            )
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.market_data.get_candles(
+            instrument_id=figi,
+            from_=since,
+            to=until,
+            interval=interval,
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
     candles = [
         Candle(
             timestamp=item.time,
@@ -261,21 +352,22 @@ def _quote_time(raw: object) -> datetime | None:
     moment = getattr(raw, "time", None)
     if moment is None:
         moment = getattr(raw, "timestamp", None)
-    if not isinstance(moment, datetime):
-        return None
-    return moment
+    return moment if isinstance(moment, datetime) else None
 
 
-def _reject_quote(figi: str, price: Decimal, quoted_at: datetime | None) -> None:
+def _reject_quote(
+    figi: str, price: Decimal, quoted_at: datetime | None, cfg: Config
+) -> None:
+    """Validate the quote at the single point prices enter the system."""
     if price <= 0:
         raise PriceRejected("price is not strictly positive")
     if quoted_at is None:
         raise PriceRejected("quote timestamp is missing")
-    if quoted_at.tzinfo is None or quoted_at.tzinfo.utcoffset(quoted_at) is None:
+    if _aware(quoted_at) is None:
+        # Data from an outside system: unusable, not an internal contract
+        # breach, so it is rejected rather than raised as a ValueError.
         raise PriceRejected("quote timestamp is naive")
-    cfg = config.load()
-    age = clock.now() - quoted_at
-    if age > timedelta(seconds=cfg.price_max_age_seconds):
+    if clock.now() - quoted_at > timedelta(seconds=cfg.price_max_age_seconds):
         raise PriceRejected("quote is older than price_max_age_seconds")
     last = _last_accepted.get(figi)
     if last is not None and last > 0:
@@ -285,32 +377,37 @@ def _reject_quote(figi: str, price: Decimal, quoted_at: datetime | None) -> None
 
 
 async def get_last_price(figi: str) -> Decimal:
-    token = _token()
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            response = await client.market_data.get_last_prices(instrument_id=[figi])
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.market_data.get_last_prices(instrument_id=[figi])
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
     prices = list(response.last_prices)
     if not prices:
-        raise BrokerUnavailable("broker unavailable")
+        # No quote at all is neither of the two documented shapes: nothing
+        # arrived to reject, and the broker was plainly reachable. Left as the
+        # pre-existing BrokerUnavailable so the caller retries — `reconcile`
+        # falls back to the entry price on exactly this type — rather than
+        # changing another module's behaviour from inside this one.
+        raise BrokerUnavailable("broker returned no quote for this instrument")
     quote = prices[0]
     price = _decimal_quote(quote.price)
-    _reject_quote(figi, price, _quote_time(quote))
+    _reject_quote(figi, price, _quote_time(quote), conn.config)
+    # A rejected quote never reaches here, so it cannot become the baseline
+    # that makes the next implausible value look reasonable.
     _last_accepted[figi] = price
     return price
 
 
 async def get_portfolio() -> PortfolioState:
-    token = _token()
-    cfg = config.load()
+    conn = await _connect()
+    cfg = conn.config
     try:
-        async with _connect() as client:
-            response = await client.operations.get_portfolio(
-                account_id=cfg.tinvest_account_id
-            )
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.operations.get_portfolio(
+            account_id=cfg.tinvest_account_id
+        )
+    except AioRequestError as exc:
+        _translate(exc, cfg.tinvest_token, not_found=None)
     cash = _decimal_money(response.total_amount_currencies)
     holdings: list[Position] = []
     for raw in response.positions:
@@ -353,28 +450,44 @@ async def get_portfolio() -> PortfolioState:
     return PortfolioState(cash=cash, positions=tuple(holdings))
 
 
+def _session_from_day(day: object) -> SessionInfo:
+    """One calendar day. A day that is not a session is marked, never invented."""
+    start = _aware(getattr(day, "start_time", None))
+    end = _aware(getattr(day, "end_time", None))
+    trading = bool(getattr(day, "is_trading_day", False))
+    if start is None or end is None or start < _EPOCH_GUARD or end < _EPOCH_GUARD:
+        # 1970-01-01 in both is what a closed day carries; believing it would
+        # be another way to believe the market is open.
+        trading = False
+    if not trading:
+        return SessionInfo(start=None, end=None, is_trading_day=False)
+    return SessionInfo(start=start, end=end, is_trading_day=True)
+
+
 async def get_trading_schedule(days: int) -> list[SessionInfo]:
-    token = _token()
-    start = clock.now()
+    if days > _MAX_SCHEDULE_DAYS:
+        raise ValueError(
+            f"days must not exceed {_MAX_SCHEDULE_DAYS}; the broker rejects a "
+            "longer horizon with INVALID_ARGUMENT / 30002"
+        )
+    # Anchored to the start of the current UTC day, because the broker measures
+    # the horizon from there and not from the instant of the call (#39).
+    start = (
+        clock.now().astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    )
     until = start + timedelta(days=days)
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            response = await client.instruments.trading_schedules(from_=start, to=until)
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.instruments.trading_schedules(
+            exchange=_EXCHANGE, from_=start, to=until
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
     sessions: list[SessionInfo] = []
     for exchange in response.exchanges:
-        if _EXCHANGE_HINT not in str(exchange.exchange).upper():
+        if str(exchange.exchange).upper() != _EXCHANGE:
             continue
-        for day in exchange.days:
-            sessions.append(
-                SessionInfo(
-                    start=day.start_time if day.is_trading_day else None,
-                    end=day.end_time if day.is_trading_day else None,
-                    is_trading_day=bool(day.is_trading_day),
-                )
-            )
-        break
+        sessions.extend(_session_from_day(day) for day in exchange.days)
     return sessions
 
 
@@ -411,27 +524,29 @@ def _order_record(
 
 
 async def post_market_order(key: str, figi: str, side: Side, lots: int) -> OrderRecord:
-    token = _token()
+    conn = await _connect()
     direction = (
         OrderDirection.ORDER_DIRECTION_BUY
         if side is Side.BUY
         else OrderDirection.ORDER_DIRECTION_SELL
     )
     try:
-        async with _connect() as client:
-            response = await client.orders.post_order(
-                instrument_id=figi,
-                quantity=lots,
-                direction=direction,
-                account_id=_account(),
-                order_type=OrderType.ORDER_TYPE_MARKET,
-                order_id=key,
-                confirm_margin_trade=False,
-            )
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.orders.post_order(
+            instrument_id=figi,
+            quantity=lots,
+            direction=direction,
+            account_id=conn.config.tinvest_account_id,
+            order_type=OrderType.ORDER_TYPE_MARKET,
+            order_id=key,
+            # Never True. The brief's no-leverage guarantee is what bounds the
+            # maximum loss to the allocated capital, and this is the one place
+            # it can be broken.
+            confirm_margin_trade=False,
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
     status = _order_status(response.execution_report_status)
-    reason = _redact(getattr(response, "message", "") or "", token)
+    reason = _redact(getattr(response, "message", "") or "", conn.config.tinvest_token)
     if status is OrderStatus.REJECTED:
         raise OrderRejected(reason or "rejected")
     filled = response.lots_executed or None
@@ -460,25 +575,26 @@ async def post_market_order(key: str, figi: str, side: Side, lots: int) -> Order
 async def post_stop_loss(
     key: str, figi: str, lots: int, stop_price: Decimal
 ) -> StopOrderRecord:
-    token = _token()
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            response = await client.stop_orders.post_stop_order(
-                instrument_id=figi,
-                quantity=lots,
-                stop_price=decimal_to_quotation(stop_price),
-                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
-                account_id=_account(),
-                stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
-                expiration_type=(
-                    StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL
-                ),
-                exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_MARKET,
-                order_id=key,
-                confirm_margin_trade=False,
-            )
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.stop_orders.post_stop_order(
+            instrument_id=figi,
+            quantity=lots,
+            stop_price=decimal_to_quotation(stop_price),
+            direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+            account_id=conn.config.tinvest_account_id,
+            stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+            # Good-till-cancel: a day-expiring stop would stop protecting the
+            # position overnight, which is precisely when it is needed.
+            expiration_type=(
+                StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL
+            ),
+            exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_MARKET,
+            order_id=key,
+            confirm_margin_trade=False,
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
     stop_id = getattr(response, "stop_order_id", None) or None
     if not stop_id:
         raise StopOrderRejected("rejected")
@@ -496,16 +612,17 @@ async def post_stop_loss(
 
 
 async def cancel_stop_order(stop_order_id: str) -> None:
-    token = _token()
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            await client.stop_orders.cancel_stop_order(
-                account_id=_account(), stop_order_id=stop_order_id
-            )
-    except Exception as exc:
-        if isinstance(exc, AioRequestError) and exc.code is StatusCode.NOT_FOUND:
+        await conn.services.stop_orders.cancel_stop_order(
+            account_id=conn.config.tinvest_account_id, stop_order_id=stop_order_id
+        )
+    except AioRequestError as exc:
+        # The executor calls this while racing the exchange, so an
+        # already-cancelled or already-executed stop order is not an error.
+        if exc.code is StatusCode.NOT_FOUND:
             return
-        _translate(exc, token, not_found=None)
+        _translate(exc, conn.config.tinvest_token, not_found=None)
 
 
 def _stop_status(raw: object) -> StopOrderStatus:
@@ -514,21 +631,18 @@ def _stop_status(raw: object) -> StopOrderStatus:
         return StopOrderStatus.EXECUTED
     if "CANCELED" in name or "CANCELLED" in name or "EXPIRED" in name:
         return StopOrderStatus.CANCELLED
-    if "ACTIVE" in name:
-        return StopOrderStatus.ACTIVE
     return StopOrderStatus.ACTIVE
 
 
 async def list_stop_orders() -> list[StopOrderRecord]:
-    token = _token()
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            response = await client.stop_orders.get_stop_orders(
-                account_id=_account(),
-                status=StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE,
-            )
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.stop_orders.get_stop_orders(
+            account_id=conn.config.tinvest_account_id,
+            status=StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE,
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
     records: list[StopOrderRecord] = []
     for raw in response.stop_orders:
         lots = int(raw.lots_requested)
@@ -552,27 +666,28 @@ async def list_stop_orders() -> list[StopOrderRecord]:
 
 
 async def get_max_lots(figi: str) -> int:
-    token = _token()
-    request = GetMaxLotsRequest(account_id=_account(), instrument_id=figi)
+    conn = await _connect()
+    request = GetMaxLotsRequest(
+        account_id=conn.config.tinvest_account_id, instrument_id=figi
+    )
     try:
-        async with _connect() as client:
-            response = await client.orders.get_max_lots(request)
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.orders.get_max_lots(request)
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
+    # The non-margin limit. buy_margin_limits is never read.
     return int(response.buy_limits.buy_max_market_lots)
 
 
 async def get_operations(since: datetime, until: datetime) -> list[OperationRecord]:
     _reject_naive(since)
     _reject_naive(until)
-    token = _token()
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            response = await client.operations.get_operations(
-                account_id=_account(), from_=since, to=until
-            )
-    except Exception as exc:
-        _translate(exc, token, not_found=None)
+        response = await conn.services.operations.get_operations(
+            account_id=conn.config.tinvest_account_id, from_=since, to=until
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
     records: list[OperationRecord] = []
     for raw in response.operations:
         payment = _decimal_money(raw.payment)
@@ -597,16 +712,17 @@ async def get_operations(since: datetime, until: datetime) -> list[OperationReco
 
 
 async def get_order_state(key: str) -> OrderRecord:
-    token = _token()
+    conn = await _connect()
     try:
-        async with _connect() as client:
-            response = await client.orders.get_order_state(
-                account_id=_account(),
-                order_id=key,
-                order_id_type=OrderIdType.ORDER_ID_TYPE_REQUEST,
-            )
-    except Exception as exc:
-        _translate(exc, token, not_found=OrderNotFound)
+        response = await conn.services.orders.get_order_state(
+            account_id=conn.config.tinvest_account_id,
+            # By the client key alone: after a crash the exchange identifier is
+            # precisely what was lost.
+            order_id=key,
+            order_id_type=OrderIdType.ORDER_ID_TYPE_REQUEST,
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=OrderNotFound)
     side = _side_from_direction(response.direction)
     status = _order_status(response.execution_report_status)
     filled = response.lots_executed or None
