@@ -407,12 +407,12 @@ def test_get_does_not_reread_the_environment_after_the_first_call(
     # The point of the memo (#18): a per-order read on the latency-critical
     # path must not re-parse every variable. A later environment change is
     # therefore invisible to `get()` until the memo is cleared.
-    _env(monkeypatch, {"POSITION_SIZE_PCT": "10"})
+    _env(monkeypatch, {"POSITION_SIZE_PCT": "5"})
     first = get()
-    assert first.position_size_pct == Decimal("10")
-    monkeypatch.setenv("POSITION_SIZE_PCT", "15")
+    assert first.position_size_pct == Decimal("5")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "10")
     assert get() is first
-    assert get().position_size_pct == Decimal("10")
+    assert get().position_size_pct == Decimal("5")
 
 
 def test_load_still_rereads_the_environment_on_every_call(
@@ -420,10 +420,10 @@ def test_load_still_rereads_the_environment_on_every_call(
 ) -> None:
     # `load()` is unchanged: `app.startup` calls it so a bad configuration
     # fails before anything else, and it must see the environment as it is.
-    _env(monkeypatch, {"POSITION_SIZE_PCT": "10"})
+    _env(monkeypatch, {"POSITION_SIZE_PCT": "5"})
+    assert load().position_size_pct == Decimal("5")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "10")
     assert load().position_size_pct == Decimal("10")
-    monkeypatch.setenv("POSITION_SIZE_PCT", "15")
-    assert load().position_size_pct == Decimal("15")
     first = load()
     assert load() is not first
 
@@ -431,11 +431,11 @@ def test_load_still_rereads_the_environment_on_every_call(
 def test_get_reflects_the_environment_after_the_memo_is_cleared(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _env(monkeypatch, {"POSITION_SIZE_PCT": "10"})
-    assert get().position_size_pct == Decimal("10")
-    monkeypatch.setenv("POSITION_SIZE_PCT", "15")
+    _env(monkeypatch, {"POSITION_SIZE_PCT": "5"})
+    assert get().position_size_pct == Decimal("5")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "10")
     get.cache_clear()
-    assert get().position_size_pct == Decimal("15")
+    assert get().position_size_pct == Decimal("10")
 
 
 def test_get_raises_config_error_on_an_invalid_environment(
@@ -485,14 +485,14 @@ def test_importing_the_module_loads_nothing(tmp_path: Path) -> None:
             sys.executable,
             "-c",
             "from zarabot.config import ConfigError, get\n"
-            "assert get.cache_info().currentsize == 0\n"
+            "assert get.cache_info().currsize == 0\n"
             "raised = False\n"
             "try:\n"
             "    get()\n"
             "except ConfigError:\n"
             "    raised = True\n"
             "assert raised\n"
-            "assert get.cache_info().currentsize == 0\n",
+            "assert get.cache_info().currsize == 0\n",
         ],
         cwd=tmp_path,
         env=env,

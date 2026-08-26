@@ -138,6 +138,17 @@ greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty; `TRADING_MODE` is not
 `live` or `sandbox`; `SSL_TBANK_VERIFY` or `ALLOW_FOREIGN_HOLDINGS` is not
 `true` or `false`; or `ML_MODEL_PATH` is set but unreadable.
 
+**`get() → Config`**
+Returns the process-wide `Config`, calling `load()` on the first call only and
+returning that same instance thereafter — `get() is get()`. Memoised with
+`functools.lru_cache`, so it fills lazily on first call, never at import.
+`load()` re-reads every environment variable, re-parses every `Decimal` and
+stats `ML_MODEL_PATH` each time; `broker.client` was paying that three times per
+order (#18). `app.startup` still calls `load()` first, so a bad configuration
+fails before anything else; every later reader uses `get()`. A `ConfigError`
+caches nothing — the next call re-reads. Tests reset the memo with
+`get.cache_clear()`; running code never should.
+
 ## `zarabot.logging_setup`
 
 JSON logs to stdout only. Never a file, never stderr. Tokens are replaced by

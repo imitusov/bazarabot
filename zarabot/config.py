@@ -6,6 +6,7 @@ import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -277,9 +278,7 @@ def load() -> Config:
         price_max_age_seconds=_positive_int(
             "PRICE_MAX_AGE_SECONDS", _optional("PRICE_MAX_AGE_SECONDS")
         ),
-        price_max_move_pct=_pct(
-            "PRICE_MAX_MOVE_PCT", _optional("PRICE_MAX_MOVE_PCT")
-        ),
+        price_max_move_pct=_pct("PRICE_MAX_MOVE_PCT", _optional("PRICE_MAX_MOVE_PCT")),
         # Not a risk limit, so a missing value takes the safe default. Anything
         # else must be spelled exactly: the flag says the trading account is not
         # the bot's alone, and nobody should arrive at that by writing "yes".
@@ -293,3 +292,28 @@ def load() -> Config:
             "on the connection that carries the trading token"
         )
     return cfg
+
+
+@lru_cache(maxsize=1)
+def get() -> Config:
+    """Return the process-wide `Config`, loading it on the first call only.
+
+    `load()` re-reads every environment variable, re-parses every `Decimal` and
+    stats `ML_MODEL_PATH` on each call; `broker.client` was paying that three
+    times per order on the latency-critical path (#18). Every later reader uses
+    this instead.
+
+    The memo fills lazily rather than at import: `AGENTS.md` permits a
+    module-level side effect here, but loading at import would make merely
+    importing `config` — from a test, a script or a tool — validate whichever
+    environment happened to be in force, and fail there rather than in
+    `app.startup`, which calls `load()` first precisely so a bad configuration
+    aborts before anything else.
+
+    A failed load caches nothing: `lru_cache` records a result only when the
+    call returns, so a `ConfigError` leaves the memo empty and the next call
+    re-reads. Tests clear it with `get.cache_clear()`; nothing in the running
+    bot ever should, because a config swapped mid-flight would change a risk
+    limit under an open position.
+    """
+    return load()
