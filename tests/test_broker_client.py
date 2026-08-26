@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from t_tech.invest.schemas import (
 from t_tech.invest.utils import decimal_to_money, decimal_to_quotation
 
 import zarabot.broker.client as broker_client
+from zarabot import config
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
@@ -48,13 +50,21 @@ from zarabot.models import (
     Instrument,
     OperationRecord,
     OrderRecord,
+    OrderStatus,
     PortfolioState,
     SessionInfo,
     Side,
     StopOrderRecord,
 )
 
+# A Monday, mid-session. The weekend that follows is 21-22 March 2026.
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
+MIDNIGHT = datetime(2026, 3, 16, 0, 0, tzinfo=UTC)
+SATURDAY = datetime(2026, 3, 21, tzinfo=UTC).date()
+SUNDAY = datetime(2026, 3, 22, tzinfo=UTC).date()
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+SCHEDULE_DAYS = 14
+
 TOKEN = "tinvest-secret-token"  # noqa: S105
 REQUIRED_ENV = {
     "TINVEST_TOKEN": TOKEN,
@@ -65,19 +75,83 @@ REQUIRED_ENV = {
     "WATCHLIST": "SBER",
 }
 
+# The main equity board: 10:00-18:54:59 MSK, weekends closed.
+MAIN_BOARD_OPEN = (7, 0, 0)
+MAIN_BOARD_CLOSE = (15, 54, 59)
+# The extended session the substring filter used to pick: to 23:49 MSK, and it
+# reports Saturday and Sunday as trading days (#43).
+WEEKEND_BOARD_OPEN = (4, 0, 0)
+WEEKEND_BOARD_CLOSE = (20, 49, 59)
+
+
+def _day(
+    moment: datetime,
+    *,
+    trading: bool,
+    open_at: tuple[int, int, int],
+    close_at: tuple[int, int, int],
+) -> SimpleNamespace:
+    if not trading:
+        # A closed day carries 1970-01-01 in both timestamps.
+        return SimpleNamespace(
+            date=moment, is_trading_day=False, start_time=EPOCH, end_time=EPOCH
+        )
+    return SimpleNamespace(
+        date=moment,
+        is_trading_day=True,
+        start_time=moment.replace(
+            hour=open_at[0], minute=open_at[1], second=open_at[2]
+        ),
+        end_time=moment.replace(
+            hour=close_at[0], minute=close_at[1], second=close_at[2]
+        ),
+    )
+
+
+def _board(name: str, *, weekends_trade: bool, days: int) -> SimpleNamespace:
+    open_at = WEEKEND_BOARD_OPEN if weekends_trade else MAIN_BOARD_OPEN
+    close_at = WEEKEND_BOARD_CLOSE if weekends_trade else MAIN_BOARD_CLOSE
+    entries = []
+    for offset in range(days):
+        moment = MIDNIGHT + timedelta(days=offset)
+        weekend = moment.weekday() >= 5
+        entries.append(
+            _day(
+                moment,
+                trading=weekends_trade or not weekend,
+                open_at=open_at,
+                close_at=close_at,
+            )
+        )
+    return SimpleNamespace(exchange=name, days=entries)
+
 
 class _Capture:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.target: str | None = None
+        self.targets: list[str | None] = []
+        self.tokens: list[str] = []
+        self.constructed = 0
+        self.closed = 0
         self.fail: BaseException | None = None
         self.order_status = OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
+        self.order_lots_executed: int | None = None
         self.order_message = ""
         self.last_price = Decimal("123.45")
-        self.last_price_time: datetime = NOW
+        self.last_price_time: datetime | None = NOW
+        self.schedule_override: list[SimpleNamespace] | None = None
+
+    @property
+    def target(self) -> str | None:
+        return self.targets[-1] if self.targets else None
+
+    def kwargs_for(self, name: str) -> list[dict[str, Any]]:
+        return [kwargs for called, kwargs in self.calls if called == name]
 
 
-class _AsyncClient:
+class _Services:
+    """Stands in for the SDK's AsyncServices. Every service is this object."""
+
     def __init__(self, capture: _Capture) -> None:
         self._capture = capture
         self.instruments = self
@@ -86,16 +160,10 @@ class _AsyncClient:
         self.stop_orders = self
         self.operations = self
 
-    async def __aenter__(self) -> _AsyncClient:
-        if self._capture.fail is not None:
-            raise self._capture.fail
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        return None
-
     def _record(self, name: str, kwargs: dict[str, Any]) -> None:
         self._capture.calls.append((name, kwargs))
+        if self._capture.fail is not None:
+            raise self._capture.fail
 
     async def share_by(self, **kwargs: Any) -> SimpleNamespace:
         self._record("share_by", kwargs)
@@ -115,19 +183,21 @@ class _AsyncClient:
 
     async def get_candles(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_candles", kwargs)
-        ts = datetime(2026, 3, 13, 0, 0, tzinfo=UTC)
-        return SimpleNamespace(
-            candles=[
-                SimpleNamespace(
-                    time=ts,
-                    open=decimal_to_quotation(Decimal("100")),
-                    high=decimal_to_quotation(Decimal("101")),
-                    low=decimal_to_quotation(Decimal("99")),
-                    close=decimal_to_quotation(Decimal("100.5")),
-                    volume=1000,
-                )
-            ]
-        )
+        newest = datetime(2026, 3, 13, 0, 0, tzinfo=UTC)
+        oldest = datetime(2026, 3, 12, 0, 0, tzinfo=UTC)
+
+        def bar(ts: datetime, close: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                time=ts,
+                open=decimal_to_quotation(Decimal("100")),
+                high=decimal_to_quotation(Decimal("101")),
+                low=decimal_to_quotation(Decimal("99")),
+                close=decimal_to_quotation(Decimal(close)),
+                volume=1000,
+            )
+
+        # Returned newest-first on purpose: the module must order them.
+        return SimpleNamespace(candles=[bar(newest, "100.5"), bar(oldest, "99.5")])
 
     async def get_last_prices(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_last_prices", kwargs)
@@ -149,39 +219,63 @@ class _AsyncClient:
 
     async def trading_schedules(self, **kwargs: Any) -> SimpleNamespace:
         self._record("trading_schedules", kwargs)
-        start = datetime(2026, 3, 16, 6, 50, tzinfo=UTC)
-        end = datetime(2026, 3, 16, 15, 50, tzinfo=UTC)
+        from_ = kwargs.get("from_")
+        to = kwargs.get("to")
+        if from_ is None or to is None:
+            raise AioRequestError(
+                StatusCode.INVALID_ARGUMENT, "30002 from_ and to are required", None
+            )
+        # Measured against the live account (#39): the horizon is counted from
+        # the START OF THE DAY of `from_`, never from the instant of the call.
+        # from=now,      to=now+14d      -> INVALID_ARGUMENT 30002
+        # from=now,      to=now+13d      -> ok
+        # from=midnight, to=midnight+14d -> ok
+        day_start = from_.replace(hour=0, minute=0, second=0, microsecond=0)
+        if to - day_start > timedelta(days=SCHEDULE_DAYS):
+            raise AioRequestError(
+                StatusCode.INVALID_ARGUMENT, "30002 horizon exceeds 14 days", None
+            )
+        if self._capture.schedule_override is not None:
+            return SimpleNamespace(exchanges=self._capture.schedule_override)
+        span = (to - day_start).days
+        exchange = kwargs.get("exchange", "")
+        if exchange == "MOEX":
+            # Naming it returns exactly one exchange.
+            return SimpleNamespace(
+                exchanges=[_board("MOEX", weekends_trade=False, days=span)]
+            )
+        if exchange:
+            return SimpleNamespace(exchanges=[])
+        # No name: 147 exchanges, 53 of them containing "MOEX". The first
+        # substring match is whichever the broker happened to order first.
         return SimpleNamespace(
             exchanges=[
-                SimpleNamespace(
-                    exchange="MOEX",
-                    days=[
-                        SimpleNamespace(
-                            is_trading_day=True,
-                            start_time=start,
-                            end_time=end,
-                        )
-                    ],
-                )
+                _board("MOEX_MRNG_EVNG_E_WKND_D", weekends_trade=True, days=span),
+                _board("MOEX", weekends_trade=False, days=span),
+                _board("SPB", weekends_trade=False, days=span),
             ]
         )
 
     async def post_order(self, **kwargs: Any) -> SimpleNamespace:
         self._record("post_order", kwargs)
         status = self._capture.order_status
+        requested = kwargs.get("quantity", 1)
+        executed = self._capture.order_lots_executed
+        if executed is None:
+            executed = (
+                requested
+                if status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
+                else 0
+            )
         return SimpleNamespace(
             order_id="exch-1",
             execution_report_status=status,
-            lots_requested=kwargs.get("quantity", 1),
-            lots_executed=(
-                1
-                if status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
-                else 0
-            ),
+            lots_requested=requested,
+            lots_executed=executed,
             executed_order_price=decimal_to_money(Decimal("100"), "rub"),
             executed_commission=decimal_to_money(Decimal("0.5"), "rub"),
             message=self._capture.order_message,
-            figi=kwargs.get("figi", "BBG000000001"),
+            figi=kwargs.get("instrument_id", "BBG000000001"),
             direction=kwargs.get("direction"),
             order_request_id=kwargs.get("order_id", ""),
         )
@@ -240,7 +334,9 @@ class _AsyncClient:
         self._record("get_order_state", kwargs)
         return SimpleNamespace(
             order_id="exch-1",
-            execution_report_status=OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL,
+            execution_report_status=(
+                OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
+            ),
             lots_requested=1,
             lots_executed=1,
             executed_order_price=decimal_to_money(Decimal("100"), "rub"),
@@ -252,22 +348,48 @@ class _AsyncClient:
         )
 
 
+class _AsyncClient:
+    """Stands in for t_tech.invest.AsyncClient — one channel, entered once."""
+
+    def __init__(self, capture: _Capture) -> None:
+        self._capture = capture
+        self.entered = 0
+
+    async def __aenter__(self) -> _Services:
+        self.entered += 1
+        return _Services(self._capture)
+
+    async def __aexit__(self, *args: object) -> bool:
+        self._capture.closed += 1
+        return False
+
+
 @pytest.fixture(autouse=True)
-def _reset_last_accepted_prices() -> None:
+async def _reset_module_state() -> AsyncIterator[None]:
+    """No client, no memoised config and no price history leaks between tests."""
+    config.get.cache_clear()
     accepted = getattr(broker_client, "_last_accepted", None)
     if isinstance(accepted, dict):
         accepted.clear()
+    yield
+    closer = getattr(broker_client, "close", None)
+    if closer is not None:
+        await closer()
+    config.get.cache_clear()
 
 
 @pytest.fixture
 def capture(monkeypatch: pytest.MonkeyPatch) -> _Capture:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("TRADING_MODE", raising=False)
     cap = _Capture()
 
     def factory(token: str, target: str | None = None, **_: Any) -> _AsyncClient:
         assert token  # used, never logged
-        cap.target = target
+        cap.constructed += 1
+        cap.tokens.append(token)
+        cap.targets.append(target)
         return _AsyncClient(cap)
 
     monkeypatch.setattr("zarabot.broker.client.AsyncClient", factory)
@@ -275,7 +397,11 @@ def capture(monkeypatch: pytest.MonkeyPatch) -> _Capture:
     return cap
 
 
-@pytest.mark.asyncio
+# --------------------------------------------------------------------------
+# Happy path per method — each returns the documented domain type.
+# --------------------------------------------------------------------------
+
+
 async def test_get_instrument_returns_domain_type(capture: _Capture) -> None:
     instrument = await get_instrument("SBER")
     assert isinstance(instrument, Instrument)
@@ -284,7 +410,6 @@ async def test_get_instrument_returns_domain_type(capture: _Capture) -> None:
     assert isinstance(instrument.min_price_increment, Decimal)
 
 
-@pytest.mark.asyncio
 async def test_get_candles_returns_oldest_first_aware_decimals(
     capture: _Capture,
 ) -> None:
@@ -294,76 +419,77 @@ async def test_get_candles_returns_oldest_first_aware_decimals(
         NOW - timedelta(days=5),
         NOW,
     )
-    assert candles
+    assert len(candles) == 2
     assert isinstance(candles[0], Candle)
+    assert candles[0].timestamp < candles[1].timestamp
     assert candles[0].timestamp.tzinfo is not None
     assert isinstance(candles[0].close, Decimal)
 
 
-@pytest.mark.asyncio
 async def test_get_last_price_is_decimal(capture: _Capture) -> None:
     price = await get_last_price("BBG000000001")
     assert price == Decimal("123.45")
     assert type(price) is Decimal
 
 
-@pytest.mark.asyncio
 async def test_get_portfolio_returns_portfolio_state(capture: _Capture) -> None:
     state = await get_portfolio()
     assert isinstance(state, PortfolioState)
     assert state.cash == Decimal("50000")
+    assert isinstance(state.cash, Decimal)
 
 
-@pytest.mark.asyncio
 async def test_get_trading_schedule_returns_session_info(capture: _Capture) -> None:
-    sessions = await get_trading_schedule(1)
+    sessions = await get_trading_schedule(SCHEDULE_DAYS)
     assert sessions
-    assert isinstance(sessions[0], SessionInfo)
-    assert sessions[0].is_trading_day is True
+    assert all(isinstance(session, SessionInfo) for session in sessions)
+    trading = [session for session in sessions if session.is_trading_day]
+    assert trading
+    assert trading[0].start is not None
+    assert trading[0].start.tzinfo is not None
 
 
-@pytest.mark.asyncio
 async def test_post_market_order_returns_order_record_and_disables_margin(
     capture: _Capture,
 ) -> None:
     record = await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
     assert isinstance(record, OrderRecord)
     assert record.key == "key-1"
+    assert record.status is OrderStatus.FILLED
     assert record.commission == Decimal("0.5")
     assert isinstance(record.commission, Decimal)
-    posted = [kwargs for name, kwargs in capture.calls if name == "post_order"]
+    posted = capture.kwargs_for("post_order")
     assert posted
     assert posted[0]["confirm_margin_trade"] is False
     assert posted[0]["order_type"] is OrderType.ORDER_TYPE_MARKET
+    assert posted[0]["order_id"] == "key-1"
 
 
-@pytest.mark.asyncio
 async def test_post_stop_loss_disables_margin(capture: _Capture) -> None:
     record = await post_stop_loss("sk-1", "BBG000000001", 1, Decimal("95"))
     assert isinstance(record, StopOrderRecord)
-    posted = [kwargs for name, kwargs in capture.calls if name == "post_stop_order"]
+    posted = capture.kwargs_for("post_stop_order")
     assert posted
     assert posted[0]["confirm_margin_trade"] is False
 
 
-@pytest.mark.asyncio
 async def test_cancel_stop_order_is_idempotent(capture: _Capture) -> None:
-    await cancel_stop_order("stop-1")
+    assert await cancel_stop_order("stop-1") is None
+    capture.fail = AioRequestError(StatusCode.NOT_FOUND, "already gone", None)
+    assert await cancel_stop_order("stop-1") is None
 
 
-@pytest.mark.asyncio
 async def test_list_stop_orders_returns_domain_records(capture: _Capture) -> None:
     records = await list_stop_orders()
     assert records
     assert isinstance(records[0], StopOrderRecord)
+    assert isinstance(records[0].stop_price, Decimal)
 
 
-@pytest.mark.asyncio
 async def test_get_max_lots_returns_int(capture: _Capture) -> None:
     assert await get_max_lots("BBG000000001") == 7
 
 
-@pytest.mark.asyncio
 async def test_get_operations_returns_domain_records(capture: _Capture) -> None:
     ops = await get_operations(NOW - timedelta(days=1), NOW)
     assert ops
@@ -371,28 +497,19 @@ async def test_get_operations_returns_domain_records(capture: _Capture) -> None:
     assert isinstance(ops[0].commission, Decimal)
 
 
-@pytest.mark.asyncio
 async def test_get_order_state_uses_request_id_type(capture: _Capture) -> None:
     record = await get_order_state("key-1")
     assert isinstance(record, OrderRecord)
     assert record.commission == Decimal("0.5")
-    assert isinstance(record.commission, Decimal)
-    called = [kwargs for name, kwargs in capture.calls if name == "get_order_state"]
+    called = capture.kwargs_for("get_order_state")
     assert called[0]["order_id"] == "key-1"
     assert called[0]["order_id_type"] is OrderIdType.ORDER_ID_TYPE_REQUEST
 
 
-@pytest.mark.asyncio
-async def test_commission_comes_from_executed_commission(
-    capture: _Capture,
-) -> None:
+async def test_commission_comes_from_executed_commission(capture: _Capture) -> None:
     """Commission is read from the order response, per spec §4 broker.client.
 
-    Asserts the converted VALUE, not which helper converts it. The previous
-    version monkeypatched money_to_decimal and asserted the stub's return, so
-    it pinned an implementation detail while stubbing out the conversion it
-    claimed to cover — it would have passed against an arithmetically wrong
-    converter, and failed against a correct one that used a different helper.
+    Asserts the converted VALUE, not which helper converts it.
     """
     posted = await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
     assert posted.commission == Decimal("0.5")
@@ -400,51 +517,17 @@ async def test_commission_comes_from_executed_commission(
     assert state.commission == Decimal("0.5")
 
 
-@pytest.mark.asyncio
-async def test_transport_error_raises_broker_unavailable(
-    capture: _Capture,
-) -> None:
-    capture.fail = AioRequestError(StatusCode.UNAVAILABLE, "down", None)
-    with pytest.raises(BrokerUnavailable) as exc:
-        await get_last_price("BBG000000001")
-    assert TOKEN not in str(exc.value)
-
-
-@pytest.mark.asyncio
-async def test_rate_limit_raises_broker_rate_limited_with_hint(
-    capture: _Capture,
-) -> None:
-    capture.fail = AioRequestError(
-        StatusCode.RESOURCE_EXHAUSTED, "slow down", {"retry-after": "2.5"}
-    )
-    with pytest.raises(BrokerRateLimited) as exc:
-        await get_last_price("BBG000000001")
-    assert exc.value.retry_after == Decimal("2.5") or exc.value.retry_after == 2.5
-    assert TOKEN not in str(exc.value)
-
-
-@pytest.mark.asyncio
-async def test_order_rejection_raises_order_rejected_with_reason(
-    capture: _Capture,
-) -> None:
-    capture.order_status = OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED
-    capture.order_message = "insufficient funds"
-    with pytest.raises(OrderRejected) as exc:
-        await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
-    assert "insufficient funds" in str(exc.value)
-    assert TOKEN not in str(exc.value)
-
-
-@pytest.mark.asyncio
 async def test_sandbox_mode_uses_sandbox_endpoint(
     capture: _Capture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("TRADING_MODE", "sandbox")
+    config.get.cache_clear()
     await get_last_price("BBG000000001")
     assert capture.target == INVEST_GRPC_API_SANDBOX
+    # Sandbox is the endpoint, never the post_sandbox_* method family.
+    assert not any(name.endswith("_sandbox_order") for name, _ in capture.calls)
 
 
-@pytest.mark.asyncio
 async def test_get_candles_rejects_naive_datetimes(capture: _Capture) -> None:
     naive = datetime(2026, 3, 16, 10, 0)  # noqa: DTZ001
     with pytest.raises(ValueError):
@@ -453,7 +536,6 @@ async def test_get_candles_rejects_naive_datetimes(capture: _Capture) -> None:
         )
 
 
-@pytest.mark.asyncio
 async def test_missing_instrument_raises_instrument_not_found(
     capture: _Capture,
 ) -> None:
@@ -462,14 +544,337 @@ async def test_missing_instrument_raises_instrument_not_found(
         await get_instrument("XXXX")
 
 
-@pytest.mark.asyncio
 async def test_missing_order_raises_order_not_found(capture: _Capture) -> None:
     capture.fail = AioRequestError(StatusCode.NOT_FOUND, "no order", None)
     with pytest.raises(OrderNotFound):
         await get_order_state("missing-key")
 
 
-@pytest.mark.asyncio
+# --------------------------------------------------------------------------
+# #23 — errors are typed by what they are, not by where they were caught.
+# --------------------------------------------------------------------------
+
+
+async def test_transport_error_raises_broker_unavailable(capture: _Capture) -> None:
+    capture.fail = AioRequestError(StatusCode.UNAVAILABLE, "down", None)
+    with pytest.raises(BrokerUnavailable) as exc:
+        await get_last_price("BBG000000001")
+    assert TOKEN not in str(exc.value)
+    assert exc.value.__cause__ is capture.fail
+
+
+async def test_invalid_argument_is_not_broker_unavailable(capture: _Capture) -> None:
+    """A malformed request is a defect, not weather (#23, and how #39 hid)."""
+    root = RuntimeError("grpc layer")
+    failure = AioRequestError(StatusCode.INVALID_ARGUMENT, "30002", None)
+    failure.__cause__ = root
+    capture.fail = failure
+
+    with pytest.raises(AioRequestError) as exc:
+        await get_last_price("BBG000000001")
+
+    assert exc.value is failure
+    assert not isinstance(exc.value, BrokerUnavailable)
+    assert exc.value.code is StatusCode.INVALID_ARGUMENT
+    # `from None` would have discarded this.
+    assert exc.value.__cause__ is root
+    assert exc.value.__traceback__ is not None
+
+
+async def test_attribute_error_from_renamed_field_reaches_caller(
+    capture: _Capture,
+) -> None:
+    """A renamed SDK field is a programming error and must look like one."""
+    capture.fail = AttributeError("'ShareResponse' object has no attribute 'lot'")
+    with pytest.raises(AttributeError) as exc:
+        await get_instrument("SBER")
+    assert not isinstance(exc.value, BrokerUnavailable)
+    assert exc.value.__traceback__ is not None
+    assert exc.value.__suppress_context__ is False
+
+
+async def test_type_error_from_changed_shape_reaches_caller(
+    capture: _Capture,
+) -> None:
+    capture.fail = TypeError("post_order() got an unexpected keyword argument")
+    with pytest.raises(TypeError):
+        await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
+
+
+async def test_rate_limit_raises_broker_rate_limited_with_hint(
+    capture: _Capture,
+) -> None:
+    capture.fail = AioRequestError(
+        StatusCode.RESOURCE_EXHAUSTED, "slow down", {"retry-after": "2.5"}
+    )
+    with pytest.raises(BrokerRateLimited) as exc:
+        await get_last_price("BBG000000001")
+    assert exc.value.retry_after == Decimal("2.5")
+    assert TOKEN not in str(exc.value)
+
+
+async def test_rate_limit_reads_sdk_metadata_ratelimit_reset(
+    capture: _Capture,
+) -> None:
+    """The SDK hands back a namedtuple, not a dict — read `ratelimit_reset`."""
+    metadata = SimpleNamespace(
+        tracking_id="t-1",
+        ratelimit_limit="60",
+        ratelimit_remaining="0",
+        ratelimit_reset="7",
+        message="rate limited",
+    )
+    capture.fail = AioRequestError(StatusCode.RESOURCE_EXHAUSTED, "slow down", metadata)
+    with pytest.raises(BrokerRateLimited) as exc:
+        await get_last_price("BBG000000001")
+    assert exc.value.retry_after == Decimal("7")
+
+
+async def test_order_rejection_raises_order_rejected_with_reason(
+    capture: _Capture,
+) -> None:
+    capture.order_status = OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED
+    capture.order_message = "insufficient funds"
+    with pytest.raises(OrderRejected) as exc:
+        await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
+    assert "insufficient funds" in str(exc.value)
+    assert exc.value.reason == "insufficient funds"
+    assert TOKEN not in str(exc.value)
+
+
+async def test_no_exception_from_this_module_carries_the_token(
+    capture: _Capture,
+) -> None:
+    """The secret boundary, checked on every failure shape the module raises."""
+    failures: list[BaseException] = [
+        AioRequestError(StatusCode.UNAVAILABLE, f"failed with {TOKEN}", None),
+        AioRequestError(StatusCode.NOT_FOUND, f"no share for {TOKEN}", None),
+        AioRequestError(
+            StatusCode.RESOURCE_EXHAUSTED, f"throttled {TOKEN}", {"retry-after": "1"}
+        ),
+    ]
+    expected = (BrokerUnavailable, InstrumentNotFound, BrokerRateLimited)
+    for failure in failures:
+        capture.fail = failure
+        with pytest.raises(expected) as exc:
+            await get_instrument("SBER")
+        raised = exc.value
+        assert TOKEN not in str(raised)
+        assert TOKEN not in repr(raised.args)
+
+    capture.fail = None
+    capture.order_status = OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED
+    capture.order_message = f"rejected because {TOKEN} is bad"
+    with pytest.raises(OrderRejected) as rejected:
+        await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
+    assert TOKEN not in str(rejected.value)
+    assert TOKEN not in str(rejected.value.reason)
+
+
+# --------------------------------------------------------------------------
+# #39 and #43 — the trading calendar.
+# --------------------------------------------------------------------------
+
+
+async def test_trading_schedule_requests_the_main_board_by_name(
+    capture: _Capture,
+) -> None:
+    """`exchange="MOEX"`, not a substring filter over 53 MOEX-ish names (#43)."""
+    sessions = await get_trading_schedule(SCHEDULE_DAYS)
+
+    requested = capture.kwargs_for("trading_schedules")
+    assert len(requested) == 1
+    assert requested[0]["exchange"] == "MOEX"
+
+    by_date = {session.start.date(): session for session in sessions if session.start}
+    monday = by_date[MIDNIGHT.date()]
+    assert monday.start == MIDNIGHT.replace(hour=7)
+    assert monday.end == MIDNIGHT.replace(hour=15, minute=54, second=59)
+
+
+async def test_trading_schedule_reports_the_weekend_as_closed(
+    capture: _Capture,
+) -> None:
+    """The extended board trades weekends; the main board does not (#43)."""
+    sessions = await get_trading_schedule(SCHEDULE_DAYS)
+    assert len(sessions) == SCHEDULE_DAYS
+
+    weekend = [sessions[5], sessions[6]]  # Saturday and Sunday
+    assert MIDNIGHT + timedelta(days=5) == datetime.combine(
+        SATURDAY, datetime.min.time(), tzinfo=UTC
+    )
+    assert MIDNIGHT + timedelta(days=6) == datetime.combine(
+        SUNDAY, datetime.min.time(), tzinfo=UTC
+    )
+    for session in weekend:
+        assert session.is_trading_day is False
+        assert session.start is None
+        assert session.end is None
+
+
+async def test_trading_schedule_anchors_the_range_to_the_utc_day_start(
+    capture: _Capture,
+) -> None:
+    """Mid-day + 14 days is rejected by the broker; midnight + 14 is not (#39)."""
+    sessions = await get_trading_schedule(SCHEDULE_DAYS)
+    assert sessions  # a mid-day anchor would have raised INVALID_ARGUMENT here
+
+    requested = capture.kwargs_for("trading_schedules")[0]
+    assert requested["from_"] == MIDNIGHT
+    assert requested["from_"] != NOW
+    assert requested["to"] == MIDNIGHT + timedelta(days=SCHEDULE_DAYS)
+    assert requested["from_"].tzinfo is not None
+    assert requested["to"].tzinfo is not None
+
+
+async def test_trading_schedule_refuses_more_than_fourteen_days(
+    capture: _Capture,
+) -> None:
+    with pytest.raises(ValueError):
+        await get_trading_schedule(15)
+    assert capture.kwargs_for("trading_schedules") == []
+
+
+async def test_non_trading_day_yields_no_session_despite_epoch_stamps(
+    capture: _Capture,
+) -> None:
+    """The flag is honoured before the timestamps."""
+    capture.schedule_override = [
+        SimpleNamespace(
+            exchange="MOEX",
+            days=[
+                SimpleNamespace(
+                    date=MIDNIGHT,
+                    is_trading_day=False,
+                    start_time=EPOCH,
+                    end_time=EPOCH,
+                )
+            ],
+        )
+    ]
+    sessions = await get_trading_schedule(1)
+    assert len(sessions) == 1
+    assert sessions[0].is_trading_day is False
+    assert sessions[0].start is None
+    assert sessions[0].end is None
+
+
+async def test_epoch_stamps_yield_no_session_even_when_flagged_trading(
+    capture: _Capture,
+) -> None:
+    """`is_trading_day` true with 1970 stamps is not a session either."""
+    capture.schedule_override = [
+        SimpleNamespace(
+            exchange="MOEX",
+            days=[
+                SimpleNamespace(
+                    date=MIDNIGHT,
+                    is_trading_day=True,
+                    start_time=EPOCH,
+                    end_time=EPOCH,
+                )
+            ],
+        )
+    ]
+    sessions = await get_trading_schedule(1)
+    assert len(sessions) == 1
+    assert sessions[0].start is None
+    assert sessions[0].end is None
+    assert sessions[0].is_trading_day is False
+
+
+# --------------------------------------------------------------------------
+# #10, client half — a partial fill is not a fill.
+# --------------------------------------------------------------------------
+
+
+async def test_partial_fill_maps_to_submitted_with_filled_lots(
+    capture: _Capture,
+) -> None:
+    capture.order_status = (
+        OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_PARTIALLYFILL
+    )
+    capture.order_lots_executed = 3
+    record = await post_market_order("key-1", "BBG000000001", Side.BUY, 10)
+    assert record.status is OrderStatus.SUBMITTED
+    assert record.status is not OrderStatus.FILLED
+    assert record.filled_lots == 3
+    assert record.filled_lots is not None
+    assert record.filled_lots < record.lots
+    assert record.settled_at is None
+
+
+async def test_full_fill_maps_to_filled(capture: _Capture) -> None:
+    capture.order_status = OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
+    capture.order_lots_executed = 10
+    record = await post_market_order("key-1", "BBG000000001", Side.BUY, 10)
+    assert record.status is OrderStatus.FILLED
+    assert record.filled_lots == record.lots
+    assert record.settled_at is not None
+
+
+# --------------------------------------------------------------------------
+# #18 — one channel per process, and one Config.
+# --------------------------------------------------------------------------
+
+
+async def test_successive_calls_reuse_one_client_and_close_releases_it(
+    capture: _Capture,
+) -> None:
+    await get_last_price("BBG000000001")
+    await get_last_price("BBG000000001")
+    await get_portfolio()
+    assert capture.constructed == 1
+    assert capture.closed == 0
+
+    await broker_client.close()
+    assert capture.closed == 1
+
+    # Closing is not a one-way door: a later call reconnects.
+    await get_last_price("BBG000000001")
+    assert capture.constructed == 2
+
+    await broker_client.close()
+    await broker_client.close()  # idempotent
+    assert capture.closed == 2
+
+
+async def test_close_without_a_client_is_a_no_op(capture: _Capture) -> None:
+    await broker_client.close()
+    assert capture.constructed == 0
+    assert capture.closed == 0
+
+
+async def test_config_is_read_once_across_a_sequence_of_calls(
+    capture: _Capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No re-reading the environment per request (#18)."""
+    config.get()  # prime the process-wide memo before counting
+    reads: list[int] = []
+    real_get = config.get
+
+    def counting_get() -> config.Config:
+        reads.append(1)
+        return real_get()
+
+    monkeypatch.setattr("zarabot.config.get", counting_get)
+    monkeypatch.setattr(
+        "zarabot.config.load", lambda: pytest.fail("load() must not be called")
+    )
+
+    await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
+    await get_last_price("BBG000000001")
+    await get_portfolio()
+    await get_order_state("key-1")
+
+    assert len(reads) == 1
+
+
+# --------------------------------------------------------------------------
+# Price validation at the single point prices enter the system.
+# --------------------------------------------------------------------------
+
+
 async def test_zero_quote_raises_price_rejected_not_unavailable(
     capture: _Capture,
 ) -> None:
@@ -480,7 +885,12 @@ async def test_zero_quote_raises_price_rejected_not_unavailable(
     assert TOKEN not in str(exc.value)
 
 
-@pytest.mark.asyncio
+async def test_negative_quote_raises_price_rejected(capture: _Capture) -> None:
+    capture.last_price = Decimal("-1")
+    with pytest.raises(PriceRejected):
+        await get_last_price("FIGI-NEG")
+
+
 async def test_stale_quote_raises_price_rejected_at_age_boundary(
     capture: _Capture,
 ) -> None:
@@ -494,8 +904,21 @@ async def test_stale_quote_raises_price_rejected_at_age_boundary(
     assert not isinstance(exc.value, BrokerUnavailable)
 
 
-@pytest.mark.asyncio
-async def test_implausible_move_raises_price_rejected_and_does_not_update_baseline(
+async def test_quote_without_timestamp_is_rejected(capture: _Capture) -> None:
+    capture.last_price_time = None
+    with pytest.raises(PriceRejected):
+        await get_last_price("FIGI-NOTIME")
+
+
+async def test_naive_quote_timestamp_is_rejected_not_a_value_error(
+    capture: _Capture,
+) -> None:
+    capture.last_price_time = datetime(2026, 3, 16, 10, 0)  # noqa: DTZ001
+    with pytest.raises(PriceRejected):
+        await get_last_price("FIGI-NAIVE")
+
+
+async def test_implausible_move_raises_price_rejected_and_keeps_baseline(
     capture: _Capture,
 ) -> None:
     capture.last_price = Decimal("100")
@@ -506,5 +929,6 @@ async def test_implausible_move_raises_price_rejected_and_does_not_update_baseli
     with pytest.raises(PriceRejected):
         await get_last_price(figi)
 
+    # The rejected value did not become the new baseline.
     capture.last_price = Decimal("110")
     assert await get_last_price(figi) == Decimal("110")
