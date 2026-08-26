@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from zarabot.app.startup import AppContext
+from zarabot.broker import client as broker_client
 from zarabot.clock import now
 from zarabot.db.connection import disconnect
 from zarabot.db.orders import list_unresolved
@@ -19,7 +20,12 @@ _POLL_SECONDS = 1.0
 
 
 async def shutdown(ctx: AppContext, signal: int) -> None:
-    """Wait for in-flight orders, then return. Never sells or cancels stops."""
+    """Settle in-flight orders, close the database and the broker channel.
+
+    Never sells a position and never cancels a stop: a restart must have no
+    financial consequence. Orders still unresolved at the timeout stay
+    `SUBMITTING` for the next startup to resolve.
+    """
     del ctx
     _LOG.info("shutdown requested signal=%s", signal)
     waited = 0
@@ -44,3 +50,7 @@ async def shutdown(ctx: AppContext, signal: int) -> None:
         f"unresolved={len(remaining)} positions={len(opened)}"
     )
     await disconnect()
+    # Last, and only here. Settlement above queries the broker, so the process
+    # channel (#18) has to outlive the drain it exists to serve; and closing it
+    # is this module's job, because no caller closes a client it did not open.
+    await broker_client.close()

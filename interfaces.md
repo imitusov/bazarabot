@@ -863,8 +863,10 @@ settled or left `SUBMITTING`; positions are neither cancelled nor liquidated.
 Waits up to 30 seconds for unresolved orders to reach a known state via
 `resolve_unfinished`. Remaining `SUBMITTING` rows are left for the next startup.
 Never cancels a stop or submits a sell. Alerts, then calls
-`db.connection.disconnect()` so `shared()` raises `DatabaseNotOpenError`.
-Closing the database is that call and nothing else.
+`db.connection.disconnect()` so `shared()` raises `DatabaseNotOpenError`, and
+last of all `broker.client.close()`. Closing the database is that one call and
+nothing else, and the broker channel is closed here because settlement above
+still needs it and no module closes a client it did not open (#18).
 
 ## `zarabot.__main__`
 
