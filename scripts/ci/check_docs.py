@@ -40,16 +40,39 @@ try:
 except ValueError:
     section = ""
 
-current = None
+# The search is scoped to the module's OWN section of interfaces.md. A plain
+# substring search over the whole file passes as soon as any module anywhere
+# records a function of that name, so `config.get` was satisfied by
+# `db.orders.get` and `broker.client.close` by `db.positions.close` — the check
+# could not fail for any common name.
+iface_sections: dict[str, str] = {}
+current_iface = None
+for line in iface.splitlines():
+    head = re.match(r"^## `([\w\.]+)`", line)
+    if head:
+        current_iface = head.group(1)
+        iface_sections[current_iface] = ""
+        continue
+    if current_iface:
+        iface_sections[current_iface] += line + "\n"
+
+# A heading may name more than one module — `### `a.py`, `b.py`` — and the
+# function may be recorded under either. `sandbox/` is skipped: it is research
+# code that zarabot never imports and it has no interfaces.md section.
+current: list[str] = []
 unimplemented: list[tuple[str, str]] = []
 for line in section.splitlines():
-    heading = re.match(r"^### `([\w/\.]+?)(?:\.py)?`", line)
-    if heading:
-        current = heading.group(1).replace("/", ".")
+    if line.startswith("### "):
+        paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
+        current = [
+            p.replace("/", ".") for p in paths if p.startswith("zarabot/")
+        ]
         continue
     fn = re.match(r"^\*\*`(?:async\s+)?(\w+)\(", line)
-    if fn and current and f"{fn.group(1)}(" not in iface:
-        unimplemented.append((current, fn.group(1)))
+    if fn and current:
+        wanted = f"{fn.group(1)}("
+        if not any(wanted in iface_sections.get(mod, "") for mod in current):
+            unimplemented.append((current[0], fn.group(1)))
 
 if unimplemented:
     print("FAIL functions specified but not recorded in interfaces.md")
