@@ -100,9 +100,7 @@ SQL runs on `db.connection.shared()`; a private connection is a contract
 violation. **Every write runs inside `db.connection.transaction()`**; this module
 never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
 its own (rule 31). This module is not a `db.*` repository, but it
-was one of the eight sites opening its own connection. **The shared connection is
-the only change to this module in v1.23**: the `STOP_DUPLICATE` remedy gap is
-issue #35 and is scheduled separately — do not fold it in here.
+was one of the eight sites opening its own connection.
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
 - Compares `broker.client.get_portfolio()` against `db.positions.list_open()`.
@@ -120,6 +118,15 @@ issue #35 and is scheduled separately — do not fold it in here.
   `db.positions.adopt` remains in the contract and is still called for a holding
   the bot **does** recognise but whose local row is missing — the crash-recovery
   case it was written for.
+- **A holding is recognised when the bot has an unresolved `ENTRY` order for that
+  ticker** — `SUBMITTING` or `SUBMITTED` in `db.orders.list_unresolved()`. That
+  is the residue of exactly one sequence: the bot submitted the buy, the broker
+  filled it, and the process died before the position row was written. Anything
+  else at the broker is foreign, including a holding whose entry order has
+  already reached a terminal status, because the bot then either has its position
+  row or has decided it does not. The rule is deliberately the narrowest one that
+  covers crash recovery: every widening of it is a way for a holding the owner
+  bought to be treated as the bot's.
 - Lot mismatch → the broker's count is written locally.
 - **Stop orders are reconciled too, but this module does not act on them.**
   Every open position must have exactly one live stop order. This module
@@ -203,6 +210,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A holding 40% above its average cost is reported, not adopted, and no exit is
   submitted for it (proves the specific liquidation this policy exists to
   prevent).
+- A holding whose ticker has an unresolved `ENTRY` order is adopted rather than
+  reported foreign (proves crash recovery still works: the bot bought this, the
+  fill landed, and the process died before the row was written).
+- A holding whose entry order has already reached a terminal status is reported
+  foreign (proves the recognition rule is the narrow one, and cannot be widened
+  into adopting what the owner bought).
 - An externally-closed position is closed with `order = None` and **no row is
   written to `orders`** (proves reconciliation records only what the bot actually
   submitted).
