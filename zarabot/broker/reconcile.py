@@ -16,6 +16,7 @@ from zarabot.broker.client import (
 )
 from zarabot.db.connection import transaction
 from zarabot.db.cooldowns import start as start_cooldown
+from zarabot.db.orders import list_unresolved
 from zarabot.db.positions import adopt, close, list_open, update_lots
 from zarabot.models import (
     ExitTrigger,
@@ -79,6 +80,41 @@ async def _adopt_holding(holding: Position, moment: datetime) -> dict[str, objec
     }
 
 
+async def _report_foreign(holding: Position) -> dict[str, object]:
+    """Name a holding the bot does not recognise. Nothing is written.
+
+    Adoption derived the stop and target from the holding's average cost, so a
+    holding bought by hand and already above its cost basis was adopted past its
+    take-profit and sold on the next cycle. The account is the bot's alone
+    (brief v1.8): an unrecognised holding is a condition to report, and
+    `app.startup` refuses to start on it (rule 32).
+    """
+    await alert(
+        f"foreign holding {holding.ticker} lots={holding.lots} "
+        f"average_price={holding.entry_price}: not adopted, not traded"
+    )
+    return {
+        "type": "FOREIGN_HOLDING",
+        "ticker": holding.ticker,
+        "lots": holding.lots,
+        "average_price": str(holding.entry_price),
+    }
+
+
+async def _recognised_tickers() -> set[str]:
+    """Tickers the bot has an unfinished entry of its own for.
+
+    The one case `db.positions.adopt` survives for: the bot submitted the buy,
+    the broker filled it, and the crash landed before the position row was
+    written. The order row is the bot's own record of the holding, so the
+    holding is recognised and the *local row* is what is missing. Anything else
+    at the broker is foreign.
+    """
+    return {
+        order.ticker for order in await list_unresolved() if order.intent == "ENTRY"
+    }
+
+
 async def _adjust_lots(local: Position, broker_lots: int) -> dict[str, object]:
     previous = local.lots
     await update_lots(local.id, broker_lots)
@@ -93,6 +129,11 @@ async def _adjust_lots(local: Position, broker_lots: int) -> dict[str, object]:
         "from": previous,
         "to": broker_lots,
     }
+
+
+def _identifier(stop: StopOrderRecord) -> str:
+    """How a stop is named in an adjustment: the broker's id, else our key."""
+    return stop.stop_order_id or stop.key
 
 
 def _keep_stop(
@@ -116,18 +157,22 @@ def _stop_adjustments(
         if ticker_stops:
             kept = _keep_stop(position, ticker_stops)
             if len(ticker_stops) > 1:
+                keeper = _identifier(kept)
                 adjustments.append(
                     {
                         "type": "STOP_DUPLICATE",
                         "ticker": position.ticker,
                         "position_id": position.id,
-                        "stop_order_ids": [
-                            stop.stop_order_id or stop.key for stop in ticker_stops
+                        "keep": keeper,
+                        "cancel": [
+                            _identifier(stop)
+                            for stop in ticker_stops
+                            if stop is not kept
                         ],
                     }
                 )
             for stop in ticker_stops:
-                claimed.add(stop.stop_order_id or stop.key)
+                claimed.add(_identifier(stop))
             if kept.stop_price != position.stop_price:
                 adjustments.append(
                     {
@@ -160,7 +205,7 @@ def _stop_adjustments(
             )
     open_tickers = {position.ticker for position in opened}
     for stop in stops:
-        marker = stop.stop_order_id or stop.key
+        marker = _identifier(stop)
         if marker in claimed:
             continue
         if stop.ticker in open_tickers:
@@ -200,9 +245,17 @@ async def reconcile(now: datetime) -> ReconciliationReport:
         elif holding.lots != local.lots:
             adjustments.append(await _adjust_lots(local, holding.lots))
 
-    for ticker, holding in broker_by_ticker.items():
-        if ticker not in local_by_ticker:
+    unknown = [
+        holding
+        for ticker, holding in broker_by_ticker.items()
+        if ticker not in local_by_ticker
+    ]
+    recognised = await _recognised_tickers() if unknown else set()
+    for holding in unknown:
+        if holding.ticker in recognised:
             adjustments.append(await _adopt_holding(holding, now))
+        else:
+            adjustments.append(await _report_foreign(holding))
 
     remaining_open = await list_open()
     broker_stops = await list_stop_orders()

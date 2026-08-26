@@ -669,10 +669,16 @@ Never calls `aiosqlite.connect` and never closes the connection. Access before
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
 Compares `get_portfolio()` to `list_open()`. Local-only → close `EXTERNAL` at
-last price with `order=None` and **no** `orders` row. Broker-only →
-`positions.adopt`. Lot mismatch → `positions.update_lots`. Stop discrepancies
-are reported (`STOP_MISSING`, `STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_ADOPTABLE`,
-`STOP_DUPLICATE`) and not acted on. A duplicate names both live stops.
+last price with `order=None` and **no** `orders` row. Broker-only and
+unrecognised → `{"type": "FOREIGN_HOLDING", "ticker", "lots", "average_price"}`
+and **no position row is written**; `app.startup` refuses to start on it (rule
+32). Broker-only but recognised — the bot has an unresolved `ENTRY` order of its
+own for the ticker, the crash-recovery case — → `positions.adopt`. Lot mismatch →
+`positions.update_lots`. Stop discrepancies are reported (`STOP_MISSING`,
+`STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_ADOPTABLE`, `STOP_DUPLICATE`) and not
+acted on. `STOP_DUPLICATE` carries `keep` (the stop matching the position's
+`stop_order_key`, else the oldest by `created_at`) and `cancel` (every other
+identifier); an identifier is `stop_order_id` when known, else the stop's key.
 Idempotent against an unchanged broker. Raises `ValueError` on naive `now`.
 
 ## `zarabot.telegram.notifier`
