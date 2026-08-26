@@ -3,12 +3,32 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from zarabot.config import ConfigError, load
+from zarabot.config import ConfigError, get, load
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _clear_config_memo() -> Iterator[None]:
+    """Drop the process-wide memo around every test in this file.
+
+    `get()` caches for the life of the process. Without this, whichever
+    environment the first test happened to set would be inherited by every
+    later test — here and in every file that runs after this one.
+    """
+    get.cache_clear()
+    yield
+    get.cache_clear()
+
 
 REQUIRED = {
     "TINVEST_TOKEN": "tinvest-secret-token",
@@ -364,3 +384,134 @@ def test_config_string_form_hides_the_sandbox_token(
     cfg = load()
     text = str(cfg) + repr(cfg)
     assert SANDBOX["TINVEST_TOKEN_SANDBOX"] not in text
+
+
+def test_get_returns_a_populated_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch)
+    cfg = get()
+    assert cfg.tinvest_account_id == REQUIRED["TINVEST_ACCOUNT_ID"]
+    assert cfg.watchlist == ("SBER", "GAZP", "LKOH")
+    assert cfg.allocated_capital == Decimal("100000")
+
+
+def test_get_returns_the_same_instance_on_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch)
+    assert get() is get() is get()
+
+
+def test_get_does_not_reread_the_environment_after_the_first_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The point of the memo (#18): a per-order read on the latency-critical
+    # path must not re-parse every variable. A later environment change is
+    # therefore invisible to `get()` until the memo is cleared.
+    _env(monkeypatch, {"POSITION_SIZE_PCT": "10"})
+    first = get()
+    assert first.position_size_pct == Decimal("10")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "15")
+    assert get() is first
+    assert get().position_size_pct == Decimal("10")
+
+
+def test_load_still_rereads_the_environment_on_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `load()` is unchanged: `app.startup` calls it so a bad configuration
+    # fails before anything else, and it must see the environment as it is.
+    _env(monkeypatch, {"POSITION_SIZE_PCT": "10"})
+    assert load().position_size_pct == Decimal("10")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "15")
+    assert load().position_size_pct == Decimal("15")
+    first = load()
+    assert load() is not first
+
+
+def test_get_reflects_the_environment_after_the_memo_is_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"POSITION_SIZE_PCT": "10"})
+    assert get().position_size_pct == Decimal("10")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "15")
+    get.cache_clear()
+    assert get().position_size_pct == Decimal("15")
+
+
+def test_get_raises_config_error_on_an_invalid_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch)
+    monkeypatch.delenv("TINVEST_TOKEN")
+    with pytest.raises(ConfigError, match="TINVEST_TOKEN") as exc:
+        get()
+    assert "tinvest-secret-token" not in str(exc.value)
+
+
+def test_get_does_not_memoise_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A failed load must leave nothing behind: a process that fixed its
+    # environment and retried would otherwise keep failing on a cached error,
+    # and — worse — a cached *success* must never be produced from a
+    # half-validated load.
+    _env(monkeypatch)
+    monkeypatch.delenv("TINVEST_TOKEN")
+    with pytest.raises(ConfigError):
+        get()
+    monkeypatch.setenv("TINVEST_TOKEN", REQUIRED["TINVEST_TOKEN"])
+    assert get().tinvest_token == REQUIRED["TINVEST_TOKEN"]
+
+
+def test_get_string_form_contains_neither_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch)
+    text = str(get()) + repr(get())
+    assert "tinvest-secret-token" not in text
+    assert "telegram-secret-token" not in text
+
+
+def test_importing_the_module_loads_nothing(tmp_path: Path) -> None:
+    # `AGENTS.md` allows module-level side effects in `config`, but the memo
+    # must still fill lazily: importing with no environment at all must not
+    # raise, and must not leave a config behind.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("TINVEST_", "TELEGRAM_", "ALLOCATED_", "WATCHLIST"))
+    }
+    env["PYTHONPATH"] = str(_REPO_ROOT)
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-c",
+            "from zarabot.config import ConfigError, get\n"
+            "assert get.cache_info().currentsize == 0\n"
+            "raised = False\n"
+            "try:\n"
+            "    get()\n"
+            "except ConfigError:\n"
+            "    raised = True\n"
+            "assert raised\n"
+            "assert get.cache_info().currentsize == 0\n",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_get_logs_the_ssl_warning_only_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The CRITICAL line belongs to loading, not to reading: memoised reads
+    # must not turn one disabled-verification warning into a flood that
+    # buries it.
+    _env(monkeypatch, {"SSL_TBANK_VERIFY": "false"})
+    with caplog.at_level(logging.CRITICAL):
+        get()
+        get()
+        get()
+    assert len([r for r in caplog.records if r.levelno == logging.CRITICAL]) == 1
