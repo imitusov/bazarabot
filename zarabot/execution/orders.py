@@ -239,14 +239,12 @@ async def _finish_close(
     trigger: ExitTrigger,
     moment: datetime,
 ) -> Position:
+    if order.filled_price is None:
+        # Rule 33: nothing downstream can tell an invented zero from a real
+        # price. Leave the position open and let the caller retry.
+        raise ExitFailed(f"exit for {position.ticker} has no fill price")
     closed = await _write(
-        close_row(
-            position.id,
-            trigger,
-            order.filled_price or Decimal("0"),
-            moment,
-            order,
-        )
+        close_row(position.id, trigger, order.filled_price, moment, order)
     )
     await start_cooldown(position.ticker, moment)
     return closed
@@ -384,8 +382,19 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
         return await _finish_close(current, last_order, trigger, clock_now())
 
 
-async def close_executed_stop(position: Position, fill_price: Decimal) -> Position:
-    """Close from an exchange-executed stop. Never submits a sell."""
+async def close_executed_stop(position: Position, fill: OrderRecord) -> Position:
+    """Close from an exchange-executed stop. Never submits a sell.
+
+    `fill` is the broker's own record of the execution, from
+    `broker.client.get_executed_stop_fills`. Its price and commission are what
+    get written; there is no fallback, because a number this module invents is
+    indistinguishable downstream from one the broker reported (rule 33).
+    """
+    fill_price = fill.filled_price
+    if fill_price is None:
+        raise ValueError(
+            f"stop fill for {position.ticker} carries no executed price"
+        )
     async with _locks(position.ticker):
         current = await get_position(position.id)
         if current is None:
@@ -414,9 +423,9 @@ async def close_executed_stop(position: Position, fill_price: Decimal) -> Positi
             settle_order(
                 key,
                 OrderStatus.FILLED,
-                current.lots,
+                fill.filled_lots or current.lots,
                 fill_price,
-                None,
+                fill.commission,
                 "stop executed",
             )
         )
