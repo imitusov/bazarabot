@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import inspect
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,7 +13,13 @@ import pytest
 
 from zarabot.broker.client import BrokerUnavailable
 from zarabot.broker.reconcile import reconcile
-from zarabot.db.connection import DatabaseNotOpenError, connect, disconnect, shared
+from zarabot.db.connection import (
+    DatabaseNotOpenError,
+    connect,
+    disconnect,
+    shared,
+    transaction,
+)
 from zarabot.db.migrations import apply
 from zarabot.db.positions import get, list_open, set_stop_protection
 from zarabot.db.positions import open as open_position
@@ -122,7 +129,9 @@ class _Broker:
 
 
 @pytest.fixture
-async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
+async def env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[_Broker]:
     path = tmp_path / "zarabot.db"
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
@@ -201,6 +210,55 @@ async def _open_local() -> Position:
     )
 
 
+async def _submit_unresolved_entry(
+    key: str = "order-2",
+    ticker: str = "SBER",
+    figi: str = "BBG000000001",
+) -> None:
+    """An entry the bot submitted and never finished resolving.
+
+    This is the crash-recovery case `db.positions.adopt` was written for: the
+    bot recognises the holding because it has its own order row for it, and the
+    position row is the thing that is missing.
+    """
+    async with transaction() as conn:
+        await conn.execute(
+            """
+            INSERT INTO orders (
+                key, ticker, figi, side, intent, lots, status,
+                filled_lots, filled_price, created_at, settled_at
+            ) VALUES (?, ?, ?, 'BUY', 'ENTRY', 3, 'SUBMITTED', NULL, NULL, ?, NULL)
+            """,
+            (key, ticker, figi, NOW.isoformat()),
+        )
+
+
+def _stop(
+    ticker: str = "SBER",
+    price: Decimal = Decimal("95"),
+    stop_id: str = "ex-stop",
+    created_at: datetime = NOW,
+) -> StopOrderRecord:
+    return StopOrderRecord(
+        key=stop_id,
+        stop_order_id=stop_id,
+        position_id=0,
+        ticker=ticker,
+        lots=2,
+        stop_price=price,
+        status=StopOrderStatus.ACTIVE,
+        created_at=created_at,
+        settled_at=None,
+    )
+
+
+async def _count(table: str) -> int:
+    cursor = await shared().execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+    row = await cursor.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 async def test_agreement_produces_no_adjustments_and_no_alert(env: _Broker) -> None:
     await _open_local()
     env.holdings = (_broker_position(),)
@@ -233,11 +291,54 @@ async def test_local_open_absent_at_broker_is_closed_externally(env: _Broker) ->
     assert "post_market_order" not in env.calls
 
 
-async def test_broker_holding_absent_locally_is_adopted(env: _Broker) -> None:
+async def test_unknown_holding_is_reported_foreign_and_never_adopted(
+    env: _Broker,
+) -> None:
+    """Spec §4 `broker.reconcile`: unknown at the broker → FOREIGN_HOLDING."""
+    before_positions = await _count("positions")
+    env.holdings = (_broker_position(lots=3, price=Decimal("123.45")),)
+    report = await reconcile(NOW)
+    types = [item["type"] for item in report.adjustments]
+    assert "FOREIGN_HOLDING" in types
+    assert "ADOPTED" not in types
+    foreign = next(
+        item for item in report.adjustments if item["type"] == "FOREIGN_HOLDING"
+    )
+    assert foreign["ticker"] == "SBER"
+    assert foreign["lots"] == 3
+    assert foreign["average_price"] == "123.45"
+    assert await list_open() == []
+    assert await _count("positions") == before_positions
+    assert env.alerts
+
+
+async def test_holding_far_above_cost_is_reported_not_adopted_and_not_sold(
+    env: _Broker,
+) -> None:
+    """A manual holding 40% above cost must not become inventory to liquidate."""
+    env.holdings = (_broker_position(lots=1, price=Decimal("140.00")),)
+    report = await reconcile(NOW)
+    types = [item["type"] for item in report.adjustments]
+    assert types.count("FOREIGN_HOLDING") == 1
+    assert "ADOPTED" not in types
+    foreign = next(
+        item for item in report.adjustments if item["type"] == "FOREIGN_HOLDING"
+    )
+    assert foreign["average_price"] == "140.00"
+    assert await list_open() == []
+    assert "post_market_order" not in env.calls
+    assert "post_stop_loss" not in env.calls
+    assert "cancel_stop_order" not in env.calls
+
+
+async def test_recognised_holding_with_missing_row_is_adopted(env: _Broker) -> None:
+    """The crash-recovery case `adopt` was written for is still adopted."""
+    await _submit_unresolved_entry()
     env.holdings = (_broker_position(lots=3, price=Decimal("123.45")),)
     report = await reconcile(NOW)
     types = [item["type"] for item in report.adjustments]
     assert "ADOPTED" in types
+    assert "FOREIGN_HOLDING" not in types
     adopted = next(item for item in report.adjustments if item["type"] == "ADOPTED")
     assert adopted["ticker"] == "SBER"
     assert adopted["lots"] == 3
@@ -300,24 +401,6 @@ async def test_stop_findings_are_re_reported_until_remedied(env: _Broker) -> Non
     assert not any(item["type"] in write_types for item in second.adjustments)
 
 
-def _stop(
-    ticker: str = "SBER",
-    price: Decimal = Decimal("95"),
-    stop_id: str = "ex-stop",
-) -> StopOrderRecord:
-    return StopOrderRecord(
-        key=stop_id,
-        stop_order_id=stop_id,
-        position_id=0,
-        ticker=ticker,
-        lots=2,
-        stop_price=price,
-        status=StopOrderStatus.ACTIVE,
-        created_at=NOW,
-        settled_at=None,
-    )
-
-
 async def test_naive_now_is_rejected(env: _Broker) -> None:
     naive = datetime(2026, 3, 16, 12, 0)  # noqa: DTZ001
     with pytest.raises(ValueError):
@@ -368,43 +451,57 @@ async def test_mispriced_and_orphan_and_adoptable_stops(env: _Broker) -> None:
 
 
 async def test_external_close_writes_no_order_row(env: _Broker) -> None:
-    from zarabot.config import load
-
     await _open_local()
     env.holdings = ()
-    async with aiosqlite.connect(load().db_path) as conn:
-        before = await conn.execute("SELECT COUNT(*) FROM orders")
-        count_before = int((await before.fetchone())[0])
+    count_before = await _count("orders")
     report = await reconcile(NOW)
     assert any(item["type"] == "CLOSED_EXTERNALLY" for item in report.adjustments)
-    opened = await list_open()
-    assert opened == []
-    async with aiosqlite.connect(load().db_path) as conn:
-        after = await conn.execute("SELECT COUNT(*) FROM orders")
-        count_after = int((await after.fetchone())[0])
-        closed = await conn.execute(
-            "SELECT close_order_key FROM positions WHERE status = 'CLOSED'"
-        )
-        row = await closed.fetchone()
-    assert count_after == count_before
+    assert await list_open() == []
+    assert await _count("orders") == count_before
+    cursor = await shared().execute(
+        "SELECT close_order_key FROM positions WHERE status = 'CLOSED'"
+    )
+    row = await cursor.fetchone()
     assert row is not None
     assert row[0] is None
 
 
-async def test_two_live_stops_report_duplicate_naming_both(env: _Broker) -> None:
+async def test_two_live_stops_report_duplicate_naming_keeper_and_cancels(
+    env: _Broker,
+) -> None:
+    """§3.2: `keep` is the stop matching `stop_order_key`, `cancel` the rest."""
     position = await _open_local()
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "stop-b")
     env.holdings = (_broker_position(),)
     env.stops = [
-        _stop(stop_id="stop-a"),
-        _stop(stop_id="stop-b"),
+        _stop(stop_id="stop-a", created_at=NOW - timedelta(hours=2)),
+        _stop(stop_id="stop-b", created_at=NOW - timedelta(hours=1)),
+        _stop(stop_id="stop-c", created_at=NOW),
     ]
     report = await reconcile(NOW)
     dup = next(item for item in report.adjustments if item["type"] == "STOP_DUPLICATE")
-    rendered = str(dup)
-    assert "stop-a" in rendered
-    assert "stop-b" in rendered
     assert dup["position_id"] == position.id
     assert dup["ticker"] == "SBER"
+    assert dup["keep"] == "stop-b"
+    assert sorted(dup["cancel"]) == ["stop-a", "stop-c"]
+    assert "cancel_stop_order" not in env.calls
+
+
+async def test_duplicate_without_stop_order_key_keeps_oldest(env: _Broker) -> None:
+    """§3.2: with no `stop_order_key`, the tie-break is oldest `created_at`."""
+    position = await _open_local()
+    assert position.stop_order_key is None
+    env.holdings = (_broker_position(),)
+    env.stops = [
+        _stop(stop_id="stop-late", created_at=NOW),
+        _stop(stop_id="stop-oldest", created_at=NOW - timedelta(days=1)),
+        _stop(stop_id="stop-middle", created_at=NOW - timedelta(hours=3)),
+    ]
+    report = await reconcile(NOW)
+    dup = next(item for item in report.adjustments if item["type"] == "STOP_DUPLICATE")
+    assert dup["keep"] == "stop-oldest"
+    assert sorted(dup["cancel"]) == ["stop-late", "stop-middle"]
+    assert "cancel_stop_order" not in env.calls
 
 
 async def test_module_never_calls_aiosqlite_connect(
@@ -425,7 +522,7 @@ async def test_module_never_calls_aiosqlite_connect(
     monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
     env.holdings = (_broker_position(lots=3, price=Decimal("123.45")),)
     report = await reconcile(NOW)
-    assert any(item["type"] == "ADOPTED" for item in report.adjustments)
+    assert any(item["type"] == "FOREIGN_HOLDING" for item in report.adjustments)
     cursor = await shared().execute("SELECT ran_at, adjustments FROM reconciliations")
     rows = await cursor.fetchall()
     assert len(rows) == 1
