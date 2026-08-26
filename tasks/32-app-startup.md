@@ -40,8 +40,19 @@ Fixed ordering; each step completes before the next begins:
    `execution.orders`: re-protect unprotected positions, cancel orphaned stops,
    replace mispriced ones, and **resolve duplicates — for a `STOP_DUPLICATE`
    adjustment, cancel every identifier in its `cancel` list and retain `keep`.**
-   Reconciliation identifies; the executor acts. **Every adjustment type the
-   report can carry is handled here.** An adjustment with no branch is silently
+   Reconciliation identifies; the executor acts. Duplicates are cancelled
+   through `execution.orders.cancel_orphaned_stop`, which is the only cancel
+   primitive that module exposes; a duplicate settles as `ORPHANED` as a result,
+   which is imprecise — it was a duplicate, not an orphan. A dedicated primitive
+   belongs with the `execution.orders` batch rather than as a change made in
+   passing to the module that moves money. The behaviour is safe meanwhile:
+   `cancel_orphaned_stop` demotes a position to `LOCAL` only when the cancelled
+   stop is the one recorded in `stop_order_key`, and that is the stop
+   reconciliation chose to keep, so the retained stop is never disturbed.
+   **An identifier in `cancel` that matches no known stop alerts and the sequence
+   continues** — skipping it silently would reproduce #35 exactly, and refusing
+   to start would leave a duplicate standing rather than remove the ones that can
+   be removed. **Every adjustment type the report can carry is handled here.** An adjustment with no branch is silently
    dropped, which is what happened to `STOP_DUPLICATE`: the double-sell condition
    was detected, reported, and then ignored, and the ready alert counted it as
    one more adjustment (#35). An unrecognised adjustment type must alert rather
