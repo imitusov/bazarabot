@@ -573,6 +573,17 @@ GTC market stop-loss, `confirm_margin_trade=False`.
 **`async cancel_stop_order(stop_order_id: str) → None`**
 Idempotent; already-cancelled/executed is not an error.
 **`async list_stop_orders() → list[StopOrderRecord]`**
+**`async get_executed_stop_fills(since: datetime, until: datetime) → dict[str, OrderRecord]`**
+The broker's own record of every stop order that fired in the window, keyed by
+`stop_order_id`. Composes `get_stop_orders(status=EXECUTED)` with a
+`get_order_state` on each result's `exchange_order_id`
+(`ORDER_ID_TYPE_EXCHANGE`), so the returned `OrderRecord` carries
+`executed_order_price`, `lots_executed` and `executed_commission` — never a
+quote. A stop whose exchange order does not resolve, or that reports no executed
+lots, is **omitted** rather than priced by guess: the caller leaves the position
+open and retries (rule 33). Empty dict when nothing fired. Raises `ValueError` on
+naive datetimes.
+
 **`async get_max_lots(figi: str) → int`**
 Buy-side market max lots.
 **`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**

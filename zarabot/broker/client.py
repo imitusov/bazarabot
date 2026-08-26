@@ -665,6 +665,67 @@ async def list_stop_orders() -> list[StopOrderRecord]:
     return records
 
 
+async def get_executed_stop_fills(
+    since: datetime, until: datetime
+) -> dict[str, OrderRecord]:
+    """The broker's own record of every stop that fired in the window.
+
+    Keyed by `stop_order_id`. Two SDK calls composed here because this is the
+    only module permitted to talk to the broker: executed stops, then each
+    one's `exchange_order_id` resolved to the actual fill. A stop whose
+    exchange order does not resolve is omitted — the caller retries rather than
+    booking a price nobody reported (rule 33).
+    """
+    _reject_naive(since)
+    _reject_naive(until)
+    conn = await _connect()
+    try:
+        response = await conn.services.stop_orders.get_stop_orders(
+            account_id=conn.config.tinvest_account_id,
+            status=StopOrderStatusOption.STOP_ORDER_STATUS_EXECUTED,
+            from_=since,
+            to=until,
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=None)
+
+    fills: dict[str, OrderRecord] = {}
+    for raw in response.stop_orders:
+        stop_id = getattr(raw, "stop_order_id", "") or ""
+        exchange_id = getattr(raw, "exchange_order_id", "") or ""
+        if not stop_id or not exchange_id:
+            continue
+        try:
+            state = await conn.services.orders.get_order_state(
+                account_id=conn.config.tinvest_account_id,
+                order_id=exchange_id,
+                order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE,
+            )
+        except AioRequestError:
+            # Not yet settled, or not resolvable. Omit it: the position stays
+            # open and the caller asks again next cycle.
+            continue
+        filled = state.lots_executed or None
+        if not filled:
+            continue
+        fills[stop_id] = _order_record(
+            key=exchange_id,
+            figi=state.figi,
+            side=Side.SELL,
+            lots=int(state.lots_requested),
+            status=_order_status(state.execution_report_status),
+            filled_lots=int(filled),
+            filled_price=_decimal_money(state.executed_order_price),
+            commission=_executed_commission(
+                getattr(state, "executed_commission", None)
+            ),
+            broker_reason=None,
+            created_at=getattr(state, "order_date", None) or clock.now(),
+            settled_at=getattr(state, "order_date", None) or clock.now(),
+        )
+    return fills
+
+
 async def get_max_lots(figi: str) -> int:
     conn = await _connect()
     request = GetMaxLotsRequest(
