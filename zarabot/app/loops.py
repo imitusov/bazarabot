@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from zarabot.app.startup import AppContext
@@ -15,6 +15,7 @@ from zarabot.broker.client import (
     InstrumentNotFound,
     OrderRejected,
     PriceRejected,
+    get_executed_stop_fills,
     get_instrument,
     get_last_price,
     get_portfolio,
@@ -25,6 +26,7 @@ from zarabot.clock import moscow_date, now, to_moscow, trading_days_between
 from zarabot.db.cooldowns import is_active
 from zarabot.db.positions import list_open
 from zarabot.db.signals import record
+from zarabot.db.stop_orders import active_for_position
 from zarabot.execution.orders import (
     ExitFailed,
     close_executed_stop,
@@ -61,6 +63,7 @@ _MAX_BACKOFF = 3600
 _market_failures = 0
 _market_alerted = False
 _price_rejected_alerted = False
+_stop_discrepancy_alerted = False
 _started_at: datetime | None = None
 _rolled_on: date | None = None
 _backed_up_on: date | None = None
@@ -120,9 +123,23 @@ def _stop_is_live(position: Position, standing_keys: set[str]) -> bool:
     return bool(key) and key in standing_keys
 
 
-async def _close_executed(
-    positions: list[Position], prices: dict[str, Decimal]
-) -> set[int]:
+def _moscow_day_start(moment: datetime) -> datetime:
+    """Midnight of the current Moscow day, as an aware UTC instant."""
+    moscow = to_moscow(moment)
+    return moscow.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+
+
+async def _close_executed(positions: list[Position]) -> set[int]:
+    """Close positions whose exchange stop the BROKER says has executed.
+
+    Execution is confirmed, never inferred. The previous rule concluded a stop
+    had fired from two absences — the stop missing from the active list and the
+    ticker missing from the portfolio — each an eventually-consistent read, and
+    correlated rather than independent when the broker hiccups. A false positive
+    closed a live position at a quote, cooled down an instrument still held, and
+    left the shares to be re-adopted at a new cost basis (#4, #5).
+    """
+    global _stop_discrepancy_alerted
     closed: set[int] = set()
     exchange = [
         position
@@ -130,22 +147,40 @@ async def _close_executed(
         if position.stop_protection is StopProtection.EXCHANGE
     ]
     if not exchange:
+        _stop_discrepancy_alerted = False
         return closed
+
+    moment = now()
+    fills = await get_executed_stop_fills(_moscow_day_start(moment), moment)
     standing = await list_stop_orders()
     live: set[str] = {stop.key for stop in standing}
     live.update(stop.stop_order_id for stop in standing if stop.stop_order_id)
-    portfolio = await get_portfolio()
-    held = {item.ticker for item in portfolio.positions}
+
+    unexplained: list[str] = []
     for position in exchange:
-        if _stop_is_live(position, live):
+        # Match on the identifier the BROKER issued and we persisted, never on
+        # our own UUID: list_stop_orders keys on order_request_id when the
+        # broker supplies one, so our key may match nothing for a live stop.
+        record = await active_for_position(position.id)
+        broker_id = record.stop_order_id if record is not None else None
+        fill = fills.get(broker_id) if broker_id else None
+        if fill is not None:
+            await close_executed_stop(position, fill)
+            closed.add(position.id)
             continue
-        if position.ticker in held:
-            continue
-        fill = prices.get(position.ticker)
-        if fill is None:
-            continue
-        await close_executed_stop(position, fill)
-        closed.add(position.id)
+        if not _stop_is_live(position, live):
+            unexplained.append(position.ticker)
+
+    if unexplained:
+        if not _stop_discrepancy_alerted:
+            _stop_discrepancy_alerted = True
+            await alert(
+                "stop no longer live with no confirmed execution for "
+                f"{', '.join(sorted(unexplained))}; position left open",
+                urgent=True,
+            )
+    else:
+        _stop_discrepancy_alerted = False
     return closed
 
 
@@ -257,7 +292,7 @@ async def trading_cycle(ctx: AppContext) -> None:
         await resolve_unfinished(moment)
         positions = await list_open()
         prices = await _prices_for(positions)
-        executed = await _close_executed(positions, prices)
+        executed = await _close_executed(positions)
         await _submit_exits(positions, prices, executed, moment, ctx)
         await _maybe_halt_on_loss(ctx, moment)
         if await is_halted():

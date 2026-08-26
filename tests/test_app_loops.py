@@ -338,20 +338,29 @@ async def test_exchange_executed_stop_closes_without_selling(
     async def _stops() -> list[StopOrderRecord]:
         return []
 
-    async def _executed(pos: Position, fill: Decimal) -> Position:
-        executed.append((pos.id, fill))
+    async def _executed(pos: Position, fill: OrderRecord) -> Position:
+        executed.append((pos.id, fill.filled_price or Decimal("0")))
         return pos
 
     async def _close(*_a: object, **_k: object) -> None:
         sold.append("sold")
 
+    async def _fills(since: object, until: object) -> dict[str, OrderRecord]:
+        return {"broker-stop": _broker_fill(Decimal("95.00"))}
+
+    async def _active(position_id: int) -> StopOrderRecord | None:
+        return _our_stop()
+
     monkeypatch.setattr(loops, "list_open", _open)
     monkeypatch.setattr(loops, "get_last_price", _price)
     monkeypatch.setattr(loops, "list_stop_orders", _stops)
+    monkeypatch.setattr(loops, "get_executed_stop_fills", _fills)
+    monkeypatch.setattr(loops, "active_for_position", _active)
     monkeypatch.setattr(loops, "close_executed_stop", _executed)
     monkeypatch.setattr(loops, "close_position", _close)
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
-    assert executed == [(1, Decimal("94"))]
+    # The broker says 95.00; the quote says 94. Before v1.28 this asserted 94.
+    assert executed == [(1, Decimal("95.00"))]
     assert sold == []
 
 
@@ -776,8 +785,16 @@ async def test_live_exchange_stop_is_not_closed_as_executed(
     async def _executed(*_a: object, **_k: object) -> None:
         executed.append("closed")
 
+    async def _no_fills(since: object, until: object) -> dict[str, OrderRecord]:
+        return {}
+
+    async def _active(position_id: int) -> StopOrderRecord | None:
+        return _our_stop()
+
     monkeypatch.setattr(loops, "list_open", _open)
     monkeypatch.setattr(loops, "list_stop_orders", _stops)
+    monkeypatch.setattr(loops, "get_executed_stop_fills", _no_fills)
+    monkeypatch.setattr(loops, "active_for_position", _active)
     monkeypatch.setattr(loops, "close_executed_stop", _executed)
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
     assert executed == []
@@ -807,8 +824,16 @@ async def test_missing_stop_while_still_held_does_not_sell(
     async def _executed(*_a: object, **_k: object) -> None:
         executed.append("closed")
 
+    async def _no_fills(since: object, until: object) -> dict[str, OrderRecord]:
+        return {}
+
+    async def _active(position_id: int) -> StopOrderRecord | None:
+        return _our_stop()
+
     monkeypatch.setattr(loops, "list_open", _open)
     monkeypatch.setattr(loops, "get_portfolio", _portfolio)
+    monkeypatch.setattr(loops, "get_executed_stop_fills", _no_fills)
+    monkeypatch.setattr(loops, "active_for_position", _active)
     monkeypatch.setattr(loops, "close_executed_stop", _executed)
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
     assert executed == []
