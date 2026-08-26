@@ -118,9 +118,18 @@ async def _prices_for(positions: list[Position]) -> dict[str, Decimal]:
     return prices
 
 
-def _stop_is_live(position: Position, standing_keys: set[str]) -> bool:
-    key = position.stop_order_key
-    return bool(key) and key in standing_keys
+def _stop_is_live(
+    position: Position, standing_keys: set[str], broker_id: str | None = None
+) -> bool:
+    """Live if EITHER identifier is standing.
+
+    Our `stop_order_key` is a UUID. `list_stop_orders` keys a stop by
+    `order_request_id` when the broker supplies one and by `stop_order_id`
+    otherwise, so when the broker omits it our UUID matches nothing — and a
+    perfectly live stop would be reported missing on every cycle (#5).
+    """
+    candidates = {value for value in (position.stop_order_key, broker_id) if value}
+    return bool(candidates & standing_keys)
 
 
 def _moscow_day_start(moment: datetime) -> datetime:
@@ -168,7 +177,7 @@ async def _close_executed(positions: list[Position]) -> set[int]:
             await close_executed_stop(position, fill)
             closed.add(position.id)
             continue
-        if not _stop_is_live(position, live):
+        if not _stop_is_live(position, live, broker_id):
             unexplained.append(position.ticker)
 
     if unexplained:
