@@ -24,6 +24,8 @@ from zarabot.models import (
     ExitTrigger,
     HaltReason,
     Instrument,
+    OrderRecord,
+    OrderStatus,
     PortfolioState,
     Position,
     ReconciliationReport,
@@ -1112,3 +1114,156 @@ async def test_exhausted_schedule_cache_alerts(
     await trading_cycle(_ctx())
     assert alerts
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# #5: an exit is confirmed by the broker, never inferred from two absences.
+# ---------------------------------------------------------------------------
+
+
+def _exchange_position(**overrides: object) -> Position:
+    return _position(
+        stop_protection=StopProtection.EXCHANGE,
+        stop_order_key="stop-key-1",
+        **overrides,
+    )
+
+
+def _our_stop(stop_order_id: str | None = "broker-stop") -> StopOrderRecord:
+    return StopOrderRecord(
+        key="stop-key-1",
+        stop_order_id=stop_order_id,
+        position_id=1,
+        ticker="SBER",
+        lots=2,
+        stop_price=Decimal("95"),
+        status=StopOrderStatus.ACTIVE,
+        created_at=NOW,
+        settled_at=None,
+    )
+
+
+def _broker_fill(price: Decimal = Decimal("95.00")) -> OrderRecord:
+    return OrderRecord(
+        key="exch-1",
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.SELL,
+        intent="EXIT",
+        lots=2,
+        status=OrderStatus.FILLED,
+        filled_lots=2,
+        filled_price=price,
+        commission=Decimal("1.25"),
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+
+
+def _arrange_stop_detection(
+    monkeypatch: pytest.MonkeyPatch,
+    position: Position,
+    standing: list[StopOrderRecord],
+    fills: dict[str, OrderRecord],
+    booked: list[object],
+    alerts: list[str],
+) -> None:
+    import zarabot.app.loops as loops
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _stops() -> list[StopOrderRecord]:
+        return standing
+
+    async def _portfolio() -> PortfolioState:
+        return PortfolioState(cash=Decimal("1000"), positions=())
+
+    async def _fills(since: object, until: object) -> dict[str, OrderRecord]:
+        return fills
+
+    async def _active(position_id: int) -> StopOrderRecord | None:
+        return _our_stop()
+
+    async def _booked(pos: Position, fill: OrderRecord) -> Position:
+        booked.append((pos.id, fill.filled_price))
+        return pos
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "list_stop_orders", _stops)
+    monkeypatch.setattr(loops, "get_portfolio", _portfolio)
+    monkeypatch.setattr(loops, "get_executed_stop_fills", _fills)
+    monkeypatch.setattr(loops, "active_for_position", _active)
+    monkeypatch.setattr(loops, "close_executed_stop", _booked)
+    monkeypatch.setattr(loops, "alert", _alert)
+
+
+async def test_two_absences_alone_do_not_close_a_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5: stop gone and ticker gone is a discrepancy, not an exit."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    booked: list[object] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    _arrange_stop_detection(
+        monkeypatch, _exchange_position(), [], {}, booked, alerts
+    )
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+
+    assert booked == []
+    assert any("stop" in text.lower() for text in alerts)
+
+
+async def test_confirmed_execution_closes_at_the_brokers_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    booked: list[object] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    _arrange_stop_detection(
+        monkeypatch,
+        _exchange_position(),
+        [],
+        {"broker-stop": _broker_fill(Decimal("95.00"))},
+        booked,
+        alerts,
+    )
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+
+    assert booked == [(1, Decimal("95.00"))]
+
+
+async def test_match_is_on_the_persisted_broker_id_not_our_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local key is a UUID the broker may never echo back."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    booked: list[object] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    _arrange_stop_detection(
+        monkeypatch,
+        _exchange_position(),
+        [],
+        {"stop-key-1": _broker_fill()},
+        booked,
+        alerts,
+    )
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+
+    assert booked == []
