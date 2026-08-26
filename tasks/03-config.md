@@ -48,6 +48,14 @@ Loads and validates every setting once at startup.
 - Must never include a token value in an exception message or in `__repr__`.
 - Called before any other module is initialised.
 
+**`get() → Config`**
+- Returns the process-wide `Config`, loading it once on first call and returning
+  the same instance thereafter. `app.startup` calls `load()` first so a bad
+  configuration fails before anything else; every later reader uses `get()`.
+- Exists because `load()` re-reads every environment variable, re-parses every
+  `Decimal` and stats `ML_MODEL_PATH` on each call, and `broker.client` was
+  calling it three times per order on the latency-critical path (#18).
+
 ## Relevant error handling rules
 
 From `technical-spec.md` §8. Handle each exactly as written.

@@ -19,8 +19,10 @@ Module **34** of 40 in `dependency-order.md`. Everything before it is complete a
 **`async shutdown(ctx, signal) → None`**
 - Stops accepting new signals, waits for in-flight submissions to reach a known
   state or a bounded timeout, settles what it can, records state, calls
-  `db.connection.disconnect()`, and exits. Closing the database means that call
-  and nothing else — no repository closes a connection it did not open.
+  `db.connection.disconnect()` and `broker.client.close()`, and exits. Closing the
+  database means that call and nothing else — no repository closes a connection
+  it did not open — and closing the broker channel likewise belongs to the module
+  that owns it.
 - Must never cancel or liquidate positions.
 - Orders unresolved at the timeout are left as `SUBMITTING` for the next startup
   to resolve — this is correct, not a leak.

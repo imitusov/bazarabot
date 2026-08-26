@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.26
+**Version:** 1.27
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.8
 
@@ -434,6 +434,28 @@ it proves.
   response (happy path per method).
 - A transport error raises `BrokerUnavailable` (proves transport failures are
   typed, not leaked as SDK exceptions).
+- **An `INVALID_ARGUMENT` response does not raise `BrokerUnavailable`** — it
+  propagates with its cause intact (proves a malformed request is a defect rather
+  than weather, which is the confusion that hid #39 for the life of the
+  deployment).
+- An `AttributeError` raised inside the wrapper — a renamed SDK field — reaches
+  the caller as an `AttributeError` with its traceback (proves the catch is
+  narrowed to the SDK's own failures and `from None` is gone).
+- `get_trading_schedule` requests the exchange named exactly `MOEX`, and a
+  Saturday and a Sunday in the result are non-trading days (proves the calendar
+  is the main board's and not an extended session that trades weekends, #43).
+- `get_trading_schedule` anchors its range to the start of the current UTC day
+  (proves the request the broker rejects with `INVALID_ARGUMENT` is not sent:
+  mid-day plus 14 days fails, midnight plus 14 days does not, #39).
+- A day returned with `is_trading_day` false yields no session even when its
+  start and end are `1970-01-01` (proves the flag is honoured before the
+  timestamps).
+- A `PARTIALLYFILL` report maps to `SUBMITTED` with `filled_lots` below `lots`,
+  never to `FILLED` (proves a partial fill stays visible as partial, #10).
+- Two successive calls reuse one `AsyncClient`, and `close()` then releases it
+  (proves the channel is per process rather than per request, #18).
+- `config.get()` is called once across a sequence of broker calls (proves the
+  configuration is not re-read and re-validated per request).
 - A rate-limit response raises `BrokerRateLimited` carrying the retry hint
   (proves the caller can back off correctly).
 - A zero-valued quote raises `PriceRejected`, not `BrokerUnavailable` and not
@@ -894,6 +916,14 @@ Loads and validates every setting once at startup.
 - Must never include a token value in an exception message or in `__repr__`.
 - Called before any other module is initialised.
 
+**`get() → Config`**
+- Returns the process-wide `Config`, loading it once on first call and returning
+  the same instance thereafter. `app.startup` calls `load()` first so a bad
+  configuration fails before anything else; every later reader uses `get()`.
+- Exists because `load()` re-reads every environment variable, re-parses every
+  `Decimal` and stats `ML_MODEL_PATH` on each call, and `broker.client` was
+  calling it three times per order on the latency-critical path (#18).
+
 ### `zarabot/logging_setup.py`
 
 Configures structured logging and enforces secret redaction.
@@ -1263,6 +1293,47 @@ security model rests on — is enforced here, at the one place an order can be
 created. A code change setting this flag is a critical defect regardless of what
 else it does.
 
+**One channel per process, and one `Config`.** The module holds a single
+`AsyncClient`, created lazily on first use — never at import, which `AGENTS.md`
+forbids outside `config` — and reused for every later call. `app.shutdown` closes
+it through `broker.client.close()`. Opening a fresh client per call meant a new
+TLS handshake per request, and a single order cost three full `config.load()`
+calls, each re-reading every environment variable, re-parsing every `Decimal` and
+touching the filesystem to stat `ML_MODEL_PATH` — on the latency-critical path
+(#18). Configuration is read through `config.get()`, the memoised accessor, not
+`config.load()`.
+
+**`async close() → None`**
+- Closes the process client and forgets it. Idempotent. Called only by
+  `app.shutdown`. A later call creates a new client, so closing is not a
+  one-way door for a long-lived process that must reconnect.
+
+**Errors are typed by what they are, not by where they were caught.** Only a
+transport failure becomes `BrokerUnavailable`; a `RESOURCE_EXHAUSTED` becomes
+`BrokerRateLimited`; `NOT_FOUND` becomes the caller's not-found type. **Every
+other gRPC status — `INVALID_ARGUMENT` foremost — and every non-SDK exception
+propagates as itself**, with its cause preserved via `raise ... from exc`.
+
+Converting everything into `BrokerUnavailable` is what hid #39 for the whole life
+of the deployment: a malformed request was retried forever as though it were
+weather, the alert said the broker could not be reached, and the only place the
+words `INVALID_ARGUMENT` appeared was the SDK's own log line. A programming error
+must not wear an outage's costume — the caller's retry-with-backoff is correct
+for an outage and useless for a bug, and the difference between them is exactly
+what the type is for (#23). `from None` is forbidden: it discards the traceback
+that names the real fault. Token redaction already prevents secret leakage, and
+that is what makes preserving the cause safe.
+
+**A partial fill is not a fill.** `EXECUTION_REPORT_STATUS_PARTIALLYFILL` maps to
+`SUBMITTED` — the order is still live at the broker — with `filled_lots` carrying
+what has filled so far. `FILLED` means `filled_lots == lots` and nothing further
+is coming. Collapsing partial into filled erased the distinction at the boundary,
+so no caller could act on it: the bot opened a position for the filled portion
+while the remainder stayed live, and the account then held more shares than the
+position row recorded (#10). What the *callers* do about a partial fill —
+aggregating multi-slice exits into a quantity-weighted price, capping the exit
+loop — belongs to `execution.orders` and is not settled here.
+
 **`async get_instrument(ticker: str) → Instrument`**
 - Raises `InstrumentNotFound` when the ticker does not resolve, `BrokerUnavailable`
   on transport failure, `BrokerRateLimited` when throttled.
@@ -1307,6 +1378,28 @@ consecutive-failure alert and is retried as though waiting would help.
 **`async get_trading_schedule(days: int) → list[SessionInfo]`**
 - Session open and close instants per day, timezone-aware, marking non-trading
   days.
+- **Requests the exchange by name: `exchange="MOEX"`.** Not a substring filter
+  over the returned list. The response carries 147 exchanges, 53 of which contain
+  `MOEX`, and taking the first match returned whichever the broker happened to
+  order first — in practice `MOEX_MRNG_EVNG_E_WKND_D`, an extended session
+  running to 23:49 MSK that reports **Saturday and Sunday as trading days**
+  (#43). `MOEX` is the main equity board: 10:00–18:54:59 MSK, weekends closed.
+  Naming it returns exactly one exchange, so there is nothing left to choose.
+- **The range is anchored to the start of the current UTC day**, and `days` may
+  not exceed 14. A mid-day `from_` plus 14 days is rejected by the broker with
+  `INVALID_ARGUMENT` / `30002`, which is what left the cache empty and
+  `is_open()` false for the whole of the bot's life (#39). Confirmed against the
+  live account: `from=now, to=now+14d` fails, `from=now, to=now+13d` succeeds,
+  and `from=midnight, to=midnight+14d` succeeds — the horizon is measured from
+  the start of the day, not from the instant of the call.
+- **A day with `is_trading_day` false yields no session**, whatever its
+  timestamps say. A closed day carries `1970-01-01` in both, and some MOEX-
+  prefixed exchanges report `is_trading_day` true with those epoch values; either
+  read as a session is another way to believe the market is open.
+- The SDK marks `trading_schedules` deprecated as of its 1.0.0. It is the only
+  calendar surface available today; when a replacement appears this is the
+  contract to amend, and V10's recorded SDK version is what makes the change
+  visible.
 
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 - Submits a market order using `key` as the broker-side idempotency key.
@@ -1876,8 +1969,10 @@ restarted with backoff. A failure in one task must never terminate another.
 **`async shutdown(ctx, signal) → None`**
 - Stops accepting new signals, waits for in-flight submissions to reach a known
   state or a bounded timeout, settles what it can, records state, calls
-  `db.connection.disconnect()`, and exits. Closing the database means that call
-  and nothing else — no repository closes a connection it did not open.
+  `db.connection.disconnect()` and `broker.client.close()`, and exits. Closing the
+  database means that call and nothing else — no repository closes a connection
+  it did not open — and closing the broker channel likewise belongs to the module
+  that owns it.
 - Must never cancel or liquidate positions.
 - Orders unresolved at the timeout are left as `SUBMITTING` for the next startup
   to resolve — this is correct, not a leak.
