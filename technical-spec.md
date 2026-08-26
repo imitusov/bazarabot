@@ -300,10 +300,10 @@ it proves.
   nothing to trade).
 - The string form of the config object contains neither token (proves accidental
   logging of the whole config leaks nothing).
-
-  default — this flag exists to be set deliberately by the owner and
-- `allow_foreign_holdings` defaults to false when unset (proves the safe
-  never to be arrived at).
+- `allow_foreign_holdings` defaults to false when unset, and a near-miss spelling
+  (`1`, `yes`, `TRUE`, `on`) raises `ConfigError` rather than enabling it (proves
+  the safe default — this flag exists to be set deliberately by the owner, never
+  to be arrived at).
 
 **`logging_setup`**
 - A log record whose message contains the token value emits the token replaced by

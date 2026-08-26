@@ -73,7 +73,24 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-No dedicated test block in §3.2. Derive cases from the contract above: happy path, every early return, every boundary, and every documented exception.
+- A complete environment produces a populated config object (happy path).
+- A missing `TINVEST_TOKEN` raises `ConfigError` naming that variable (proves
+  fail-fast and that the message identifies the offender).
+- `POSITION_SIZE_PCT` of 0 or above 100 raises `ConfigError` (boundary).
+- `POSITION_SIZE_PCT` above `MAX_POSITION_PCT` raises `ConfigError` (proves
+  cross-field validation, not just per-field).
+- `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeding 100 raises `ConfigError`
+  (proves the allocation cannot be structurally over-committed).
+- `TAKE_PROFIT_PCT` less than or equal to `STOP_LOSS_PCT` raises `ConfigError`
+  (proves a configuration that can never profit is rejected).
+- An empty `WATCHLIST` raises `ConfigError` (proves the bot cannot start with
+  nothing to trade).
+- The string form of the config object contains neither token (proves accidental
+  logging of the whole config leaks nothing).
+- `allow_foreign_holdings` defaults to false when unset, and a near-miss spelling
+  (`1`, `yes`, `TRUE`, `on`) raises `ConfigError` rather than enabling it (proves
+  the safe default — this flag exists to be set deliberately by the owner, never
+  to be arrived at).
 
 ## Expected output
 
