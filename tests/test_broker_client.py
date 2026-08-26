@@ -20,6 +20,7 @@ from t_tech.invest.schemas import (
     OrderExecutionReportStatus,
     OrderIdType,
     OrderType,
+    StopOrderStatusOption,
 )
 from t_tech.invest.utils import decimal_to_money, decimal_to_quotation
 
@@ -34,6 +35,7 @@ from zarabot.broker.client import (
     PriceRejected,
     cancel_stop_order,
     get_candles,
+    get_executed_stop_fills,
     get_instrument,
     get_last_price,
     get_max_lots,
@@ -932,3 +934,121 @@ async def test_implausible_move_raises_price_rejected_and_keeps_baseline(
     # The rejected value did not become the new baseline.
     capture.last_price = Decimal("110")
     assert await get_last_price(figi) == Decimal("110")
+
+
+# ---------------------------------------------------------------------------
+# get_executed_stop_fills — #4 and #5. An exit is priced by the broker or it is
+# not booked. Nothing here may fall back to a quote.
+# ---------------------------------------------------------------------------
+
+
+def _executed_stop(stop_id: str, exchange_id: str | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        stop_order_id=stop_id,
+        lots_requested=2,
+        figi="BBG000000001",
+        ticker="SBER",
+        stop_price=decimal_to_money(Decimal("95"), "rub"),
+        create_date=NOW,
+        order_request_id="",
+        exchange_order_id=exchange_id,
+        status=SimpleNamespace(name="STOP_ORDER_STATUS_EXECUTED"),
+    )
+
+
+def _fill(price: Decimal, lots: int, commission: Decimal) -> SimpleNamespace:
+    return SimpleNamespace(
+        order_id="exch-1",
+        execution_report_status=(
+            OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
+        ),
+        lots_requested=lots,
+        lots_executed=lots,
+        executed_order_price=decimal_to_money(price, "rub"),
+        executed_commission=decimal_to_money(commission, "rub"),
+        figi="BBG000000001",
+        direction=OrderDirection.ORDER_DIRECTION_SELL,
+        order_date=NOW,
+        order_request_id="",
+    )
+
+
+def _arrange_stops(
+    monkeypatch: pytest.MonkeyPatch,
+    stops: list[SimpleNamespace],
+    fills: dict[str, SimpleNamespace],
+    seen: list[dict[str, Any]],
+) -> None:
+    async def get_stop_orders(self: Any, **kwargs: Any) -> SimpleNamespace:
+        seen.append({"call": "get_stop_orders", **kwargs})
+        return SimpleNamespace(stop_orders=stops)
+
+    async def get_order_state(self: Any, **kwargs: Any) -> SimpleNamespace:
+        seen.append({"call": "get_order_state", **kwargs})
+        found = fills.get(str(kwargs.get("order_id")))
+        if found is None:
+            raise AioRequestError(StatusCode.NOT_FOUND, "no such order", None)
+        return found
+
+    monkeypatch.setattr(_Services, "get_stop_orders", get_stop_orders)
+    monkeypatch.setattr(_Services, "get_order_state", get_order_state)
+
+
+async def test_executed_stop_fill_carries_the_brokers_own_numbers(
+    capture: _Capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4: the exit price is the broker's executed price, never a quote."""
+    seen: list[dict[str, Any]] = []
+    _arrange_stops(
+        monkeypatch,
+        [_executed_stop("stop-1", "exch-1")],
+        {"exch-1": _fill(Decimal("95.00"), 2, Decimal("1.25"))},
+        seen,
+    )
+    fills = await get_executed_stop_fills(NOW - timedelta(hours=8), NOW)
+
+    assert set(fills) == {"stop-1"}
+    record = fills["stop-1"]
+    assert record.filled_price == Decimal("95.00")
+    assert record.filled_lots == 2
+    assert record.commission == Decimal("1.25")
+
+    queried = [c for c in seen if c["call"] == "get_stop_orders"][0]
+    assert queried["status"] is StopOrderStatusOption.STOP_ORDER_STATUS_EXECUTED
+    resolved = [c for c in seen if c["call"] == "get_order_state"][0]
+    assert resolved["order_id"] == "exch-1"
+    assert resolved["order_id_type"] is OrderIdType.ORDER_ID_TYPE_EXCHANGE
+
+
+async def test_unresolvable_exchange_id_is_omitted_not_guessed(
+    capture: _Capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop we cannot price is left out, so the caller retries."""
+    seen: list[dict[str, Any]] = []
+    _arrange_stops(
+        monkeypatch,
+        [_executed_stop("stop-1", "missing"), _executed_stop("stop-2", None)],
+        {},
+        seen,
+    )
+    assert await get_executed_stop_fills(NOW - timedelta(hours=8), NOW) == {}
+
+
+async def test_nothing_executed_returns_an_empty_dict(
+    capture: _Capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, Any]] = []
+    _arrange_stops(monkeypatch, [], {}, seen)
+    result = await get_executed_stop_fills(NOW - timedelta(hours=8), NOW)
+    assert result == {}
+    assert result is not None
+
+
+async def test_executed_stop_fills_rejects_naive_datetimes(
+    capture: _Capture,
+) -> None:
+    naive = NOW.replace(tzinfo=None)
+    with pytest.raises(ValueError):
+        await get_executed_stop_fills(naive, NOW)
+    with pytest.raises(ValueError):
+        await get_executed_stop_fills(NOW - timedelta(hours=8), naive)
