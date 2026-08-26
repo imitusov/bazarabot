@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.27
+**Version:** 1.28
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.8
 
@@ -452,6 +452,13 @@ it proves.
   timestamps).
 - A `PARTIALLYFILL` report maps to `SUBMITTED` with `filled_lots` below `lots`,
   never to `FILLED` (proves a partial fill stays visible as partial, #10).
+- `get_executed_stop_fills` returns the broker's executed price, lots and
+  commission for a stop that fired, keyed by `stop_order_id` (proves the exit is
+  booked from the broker's own record rather than from a quote, #4).
+- A stop whose `exchange_order_id` does not resolve is **omitted** from the
+  result rather than returned with a substituted price (proves the caller is left
+  to retry rather than handed a guess).
+- Nothing fired in the window → empty dict, not `None`.
 - Two successive calls reuse one `AsyncClient`, and `close()` then releases it
   (proves the channel is per process rather than per request, #18).
 - `config.get()` is called once across a sequence of broker calls (proves the
@@ -681,6 +688,16 @@ Additionally, `strategies.ml_model`:
 - An exit filling partially retries the remainder until flat (proves the system
   never rests half-exited).
 
+Additionally, on exits booked from an exchange stop:
+- `close_executed_stop` records the **broker's** executed price, not the price
+  `get_last_price` would return at that moment: a fill at 95.00 while the quote
+  says 92.00 records 95.00 (proves the invented-price path is closed — this is
+  #4's own verification case).
+- `close_executed_stop` with a `fill` whose `filled_price` is `None` raises
+  rather than substituting any other number.
+- The exit commission on the closed position is the broker's
+  `executed_commission`, never zero and never estimated.
+
 **`state.halt`**
 - Halting then reading state reports halted with its reason (happy path).
 - Halt state survives a simulated restart, where a restart is
@@ -773,6 +790,20 @@ Additionally, `strategies.ml_model`:
 **`app.loops` / `app.shutdown`**
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- A position whose stop is **absent from the active list and whose ticker is
+  absent from the portfolio**, with no confirmed execution, stays `OPEN`, submits
+  nothing, starts no cooldown, and alerts once (proves an exit is never inferred
+  from two eventually-consistent absences — the false positive that fabricated a
+  round trip, #5).
+- A position is closed when `get_executed_stop_fills` contains the
+  `stop_order_id` persisted in its `stop_orders` row, and the exit price recorded
+  is the one that result carries (proves execution is confirmed and priced from
+  the broker).
+- Matching is on the persisted broker `stop_order_id`, not on the locally
+  generated key: a stop whose broker-side key differs from our UUID is still
+  matched (proves the key mismatch that made a live stop look dead cannot recur).
+- Re-running the cycle after a position has been closed this way does not
+  reconsider it (proves the re-queried window is idempotent).
 - One position's price raising `PriceRejected` leaves the other positions
   evaluated normally, submits no exit for the rejected one, and does not
   increment the outage counter (proves one bad quote cannot abort a cycle or
@@ -1424,6 +1455,24 @@ consecutive-failure alert and is retried as though waiting would help.
 **`async list_stop_orders() → list[StopOrderRecord]`**
 - Every standing stop order on the account. Consumed by reconciliation.
 
+**`async get_executed_stop_fills(since: datetime, until: datetime) → dict[str, OrderRecord]`**
+- Returns the **actual execution** of every stop order that fired in the window,
+  keyed by the broker's `stop_order_id`. Empty dict when none fired; never
+  `None`.
+- Implemented as two SDK calls, composed here because this is the only module
+  permitted to talk to the broker: `get_stop_orders` with
+  `StopOrderStatusOption.STOP_ORDER_STATUS_EXECUTED`, then each result's
+  `exchange_order_id` resolved through `get_order_state` with
+  `OrderIdType.ORDER_ID_TYPE_EXCHANGE`.
+- The `OrderRecord` carries the broker's own numbers: `filled_price` from
+  `executed_order_price`, `filled_lots` from `lots_executed`, and `commission`
+  from `executed_commission`. None of the three is estimated, and none comes from
+  a quote.
+- **A stop whose `exchange_order_id` does not resolve is omitted, not guessed
+  at.** The caller leaves the position open and retries. A position closed a
+  minute late is recoverable; a position closed at an invented price is not.
+- Raises `ValueError` on naive datetimes.
+
 **`async get_max_lots(figi: str) → int`**
 - The maximum lots the broker will accept for a buy on this account. A pre-submit
   sanity check against `risk.sizing`, which models cash but not settlement or
@@ -1753,6 +1802,25 @@ Owns order submission, the submission locks, and crash recovery.
   no-retry rule.
 - Must never be blocked by halt state, cooldown, or any risk limit.
 
+**`async close_executed_stop(position: Position, fill: OrderRecord) → Position`**
+- Books the close of a position whose **exchange** stop fired. Never submits a
+  sell — the exchange already did.
+- **`fill` is the broker's own record of that execution**, obtained from
+  `broker.client.get_executed_stop_fills`. The exit price is
+  `fill.filled_price` and the exit commission is `fill.commission`. Neither may
+  come from a quote.
+- Raises `ValueError` when `fill.filled_price` is `None`. There is no fallback
+  price: a stop exit with no confirmed fill is not bookable, and the caller
+  leaves the position open and retries.
+
+Until v1.28 this function took a `Decimal` fill price, and `app.loops` passed it
+the value from `get_last_price` at the top of the cycle — the market price at the
+moment of *detection*, up to a poll interval after the fill, and on a gap-down
+open potentially far from what the broker actually got. Every stop-loss exit's
+realised P&L was wrong, and the weekly report's gapped-exit section measured a
+difference the bot had manufactured rather than slippage the market caused
+(#4).
+
 **Partial fills.** An entry that fills partially opens a position for the lots
 actually filled, sizes stop and target from the achieved average price, and
 places the stop for that quantity. The unfilled remainder is abandoned, never
@@ -1915,6 +1983,29 @@ Fixed ordering; each step completes before the next begins:
 1. If the session is closed, return without any broker call.
 2. Refresh prices for open positions, and poll standing stop orders for
    execution. A stop filled by the exchange closes its position here.
+
+   **Execution is confirmed, never inferred.** The cycle calls
+   `broker.client.get_executed_stop_fills` once, over the window from the start
+   of the current Moscow trading day to now, and closes a position **only** when
+   that result contains the `stop_order_id` recorded in its own `stop_orders`
+   row. Matching is on that persisted broker identifier, never on the UUID we
+   generated: `list_stop_orders` builds its key from `order_request_id` when the
+   broker supplies one and from `stop_order_id` otherwise, so our UUID may match
+   nothing even for a stop that is perfectly alive.
+
+   The previous rule concluded that a stop had fired from **two absences** — the
+   stop missing from the active list, and the ticker missing from the portfolio —
+   each an eventually-consistent read, and correlated rather than independent
+   when the broker hiccups. A false positive closed a live position at an
+   invented price, started a cooldown on an instrument the bot still held, and
+   left the shares to be re-adopted as a fresh position at a new cost basis: one
+   phantom round trip in the P&L from two reads that merely lagged (#5).
+
+   **An absence is a discrepancy, not an exit.** A position whose stop is no
+   longer live and for which no execution is confirmed stays open, and is
+   alerted once so reconciliation and the owner can see it. The window is
+   re-queried every cycle, which is harmless: a position already closed is not
+   reconsidered.
    **A `PriceRejected` for one position omits that ticker and continues with the
    rest** — it must not abort the cycle, and must not count toward the
    consecutive-failure outage alert, which exists for a broker that cannot be
@@ -2513,6 +2604,18 @@ Applies across all modules. Every external failure mode has exactly one rule.
     placed, no exit evaluated, no sale made. Never adopt one — adoption derived a
     stop and target from the holding's average cost, which handed the next cycle
     a position already past its take-profit.
+
+33. **A recorded price comes from the broker, or the record stays pending.**
+    Realised P&L, exit prices and commissions are written from what the broker
+    reports it did — an order state, an executed stop, an operation — and never
+    from a quote, a stop price, an entry price, or any other number the bot has
+    to hand. Where the broker's own record is not yet available, the position
+    stays open and the read is retried on the next cycle; after a bounded number
+    of cycles the owner is alerted. A position closed a minute late is
+    recoverable and a position closed at an invented number is not, because
+    nothing downstream can tell the invented one from a real one. This rule
+    generalises #4, #5, #8 and #11, which are four instances of the same
+    mistake.
 
 ---
 

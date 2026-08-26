@@ -173,6 +173,24 @@ consecutive-failure alert and is retried as though waiting would help.
 **`async list_stop_orders() → list[StopOrderRecord]`**
 - Every standing stop order on the account. Consumed by reconciliation.
 
+**`async get_executed_stop_fills(since: datetime, until: datetime) → dict[str, OrderRecord]`**
+- Returns the **actual execution** of every stop order that fired in the window,
+  keyed by the broker's `stop_order_id`. Empty dict when none fired; never
+  `None`.
+- Implemented as two SDK calls, composed here because this is the only module
+  permitted to talk to the broker: `get_stop_orders` with
+  `StopOrderStatusOption.STOP_ORDER_STATUS_EXECUTED`, then each result's
+  `exchange_order_id` resolved through `get_order_state` with
+  `OrderIdType.ORDER_ID_TYPE_EXCHANGE`.
+- The `OrderRecord` carries the broker's own numbers: `filled_price` from
+  `executed_order_price`, `filled_lots` from `lots_executed`, and `commission`
+  from `executed_commission`. None of the three is estimated, and none comes from
+  a quote.
+- **A stop whose `exchange_order_id` does not resolve is omitted, not guessed
+  at.** The caller leaves the position open and retries. A position closed a
+  minute late is recoverable; a position closed at an invented price is not.
+- Raises `ValueError` on naive datetimes.
+
 **`async get_max_lots(figi: str) → int`**
 - The maximum lots the broker will accept for a buy on this account. A pre-submit
   sanity check against `risk.sizing`, which models cash but not settlement or
@@ -269,6 +287,20 @@ From `technical-spec.md` §8. Handle each exactly as written.
     losses exceeding allocated capital — is the one failure the brief promises
     cannot happen.
 
+33. **A recorded price comes from the broker, or the record stays pending.**
+    Realised P&L, exit prices and commissions are written from what the broker
+    reports it did — an order state, an executed stop, an operation — and never
+    from a quote, a stop price, an entry price, or any other number the bot has
+    to hand. Where the broker's own record is not yet available, the position
+    stays open and the read is retried on the next cycle; after a bounded number
+    of cycles the owner is alerted. A position closed a minute late is
+    recoverable and a position closed at an invented number is not, because
+    nothing downstream can tell the invented one from a real one. This rule
+    generalises #4, #5, #8 and #11, which are four instances of the same
+    mistake.
+
+---
+
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -295,6 +327,13 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   timestamps).
 - A `PARTIALLYFILL` report maps to `SUBMITTED` with `filled_lots` below `lots`,
   never to `FILLED` (proves a partial fill stays visible as partial, #10).
+- `get_executed_stop_fills` returns the broker's executed price, lots and
+  commission for a stop that fired, keyed by `stop_order_id` (proves the exit is
+  booked from the broker's own record rather than from a quote, #4).
+- A stop whose `exchange_order_id` does not resolve is **omitted** from the
+  result rather than returned with a substituted price (proves the caller is left
+  to retry rather than handed a guess).
+- Nothing fired in the window → empty dict, not `None`.
 - Two successive calls reuse one `AsyncClient`, and `close()` then releases it
   (proves the channel is per process rather than per request, #18).
 - `config.get()` is called once across a sequence of broker calls (proves the

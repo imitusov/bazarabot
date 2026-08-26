@@ -20,6 +20,29 @@ Module **33** of 40 in `dependency-order.md`. Everything before it is complete a
 1. If the session is closed, return without any broker call.
 2. Refresh prices for open positions, and poll standing stop orders for
    execution. A stop filled by the exchange closes its position here.
+
+   **Execution is confirmed, never inferred.** The cycle calls
+   `broker.client.get_executed_stop_fills` once, over the window from the start
+   of the current Moscow trading day to now, and closes a position **only** when
+   that result contains the `stop_order_id` recorded in its own `stop_orders`
+   row. Matching is on that persisted broker identifier, never on the UUID we
+   generated: `list_stop_orders` builds its key from `order_request_id` when the
+   broker supplies one and from `stop_order_id` otherwise, so our UUID may match
+   nothing even for a stop that is perfectly alive.
+
+   The previous rule concluded that a stop had fired from **two absences** — the
+   stop missing from the active list, and the ticker missing from the portfolio —
+   each an eventually-consistent read, and correlated rather than independent
+   when the broker hiccups. A false positive closed a live position at an
+   invented price, started a cooldown on an instrument the bot still held, and
+   left the shares to be re-adopted as a fresh position at a new cost basis: one
+   phantom round trip in the P&L from two reads that merely lagged (#5).
+
+   **An absence is a discrepancy, not an exit.** A position whose stop is no
+   longer live and for which no execution is confirmed stays open, and is
+   alerted once so reconciliation and the owner can see it. The window is
+   re-queried every cycle, which is harmless: a position already closed is not
+   reconsidered.
    **A `PriceRejected` for one position omits that ticker and continues with the
    rest** — it must not abort the cycle, and must not count toward the
    consecutive-failure outage alert, which exists for a broker that cannot be
@@ -94,12 +117,40 @@ From `technical-spec.md` §8. Handle each exactly as written.
     hand-written NTP client into a system that moves money — is more risk than a
     correctly configured time daemon warrants.
 
+33. **A recorded price comes from the broker, or the record stays pending.**
+    Realised P&L, exit prices and commissions are written from what the broker
+    reports it did — an order state, an executed stop, an operation — and never
+    from a quote, a stop price, an entry price, or any other number the bot has
+    to hand. Where the broker's own record is not yet available, the position
+    stays open and the read is retried on the next cycle; after a bounded number
+    of cycles the owner is alerted. A position closed a minute late is
+    recoverable and a position closed at an invented number is not, because
+    nothing downstream can tell the invented one from a real one. This rule
+    generalises #4, #5, #8 and #11, which are four instances of the same
+    mistake.
+
+---
+
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- A position whose stop is **absent from the active list and whose ticker is
+  absent from the portfolio**, with no confirmed execution, stays `OPEN`, submits
+  nothing, starts no cooldown, and alerts once (proves an exit is never inferred
+  from two eventually-consistent absences — the false positive that fabricated a
+  round trip, #5).
+- A position is closed when `get_executed_stop_fills` contains the
+  `stop_order_id` persisted in its `stop_orders` row, and the exit price recorded
+  is the one that result carries (proves execution is confirmed and priced from
+  the broker).
+- Matching is on the persisted broker `stop_order_id`, not on the locally
+  generated key: a stop whose broker-side key differs from our UUID is still
+  matched (proves the key mismatch that made a live stop look dead cannot recur).
+- Re-running the cycle after a position has been closed this way does not
+  reconsider it (proves the re-queried window is idempotent).
 - One position's price raising `PriceRejected` leaves the other positions
   evaluated normally, submits no exit for the rejected one, and does not
   increment the outage counter (proves one bad quote cannot abort a cycle or

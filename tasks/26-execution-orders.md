@@ -167,6 +167,25 @@ Owns order submission, the submission locks, and crash recovery.
   no-retry rule.
 - Must never be blocked by halt state, cooldown, or any risk limit.
 
+**`async close_executed_stop(position: Position, fill: OrderRecord) → Position`**
+- Books the close of a position whose **exchange** stop fired. Never submits a
+  sell — the exchange already did.
+- **`fill` is the broker's own record of that execution**, obtained from
+  `broker.client.get_executed_stop_fills`. The exit price is
+  `fill.filled_price` and the exit commission is `fill.commission`. Neither may
+  come from a quote.
+- Raises `ValueError` when `fill.filled_price` is `None`. There is no fallback
+  price: a stop exit with no confirmed fill is not bookable, and the caller
+  leaves the position open and retries.
+
+Until v1.28 this function took a `Decimal` fill price, and `app.loops` passed it
+the value from `get_last_price` at the top of the cycle — the market price at the
+moment of *detection*, up to a poll interval after the fill, and on a gap-down
+open potentially far from what the broker actually got. Every stop-loss exit's
+realised P&L was wrong, and the weekly report's gapped-exit section measured a
+difference the bot had manufactured rather than slippage the market caused
+(#4).
+
 **Partial fills.** An entry that fills partially opens a position for the lots
 actually filled, sizes stop and target from the achieved average price, and
 places the stop for that quantity. The unfilled remainder is abandoned, never
@@ -226,6 +245,20 @@ From `technical-spec.md` §8. Handle each exactly as written.
     correct; it is listed here because the failure mode it would produce —
     losses exceeding allocated capital — is the one failure the brief promises
     cannot happen.
+
+33. **A recorded price comes from the broker, or the record stays pending.**
+    Realised P&L, exit prices and commissions are written from what the broker
+    reports it did — an order state, an executed stop, an operation — and never
+    from a quote, a stop price, an entry price, or any other number the bot has
+    to hand. Where the broker's own record is not yet available, the position
+    stays open and the read is retried on the next cycle; after a bounded number
+    of cycles the owner is alerted. A position closed a minute late is
+    recoverable and a position closed at an invented number is not, because
+    nothing downstream can tell the invented one from a real one. This rule
+    generalises #4, #5, #8 and #11, which are four instances of the same
+    mistake.
+
+---
 
 ## Test cases
 

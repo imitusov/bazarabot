@@ -193,8 +193,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     stop and target from the holding's average cost, which handed the next cycle
     a position already past its take-profit.
 
----
-
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.

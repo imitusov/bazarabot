@@ -48,6 +48,20 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - With the session closed, no market data call is made (proves the session guard
   gates the loop).
+- A position whose stop is **absent from the active list and whose ticker is
+  absent from the portfolio**, with no confirmed execution, stays `OPEN`, submits
+  nothing, starts no cooldown, and alerts once (proves an exit is never inferred
+  from two eventually-consistent absences — the false positive that fabricated a
+  round trip, #5).
+- A position is closed when `get_executed_stop_fills` contains the
+  `stop_order_id` persisted in its `stop_orders` row, and the exit price recorded
+  is the one that result carries (proves execution is confirmed and priced from
+  the broker).
+- Matching is on the persisted broker `stop_order_id`, not on the locally
+  generated key: a stop whose broker-side key differs from our UUID is still
+  matched (proves the key mismatch that made a live stop look dead cannot recur).
+- Re-running the cycle after a position has been closed this way does not
+  reconsider it (proves the re-queried window is idempotent).
 - One position's price raising `PriceRejected` leaves the other positions
   evaluated normally, submits no exit for the rejected one, and does not
   increment the outage counter (proves one bad quote cannot abort a cycle or
