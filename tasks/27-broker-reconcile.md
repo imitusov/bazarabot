@@ -109,7 +109,17 @@ issue #35 and is scheduled separately — do not fold it in here.
 - Locally-open but absent at the broker → closed as `EXTERNAL` at the last known
   price, passing `order = None`. This module records **no** order row: it did not
   submit one, and inventing one would contradict its own prohibition on trading.
-- Present at the broker but unknown locally → adopted via `db.positions.adopt`.
+- **Present at the broker but unknown locally → reported as `FOREIGN_HOLDING`,
+  never adopted.** This module previously called `db.positions.adopt` here, which
+  derived a stop and target from the holding's *average cost* and so handed the
+  next trading cycle a position already past its take-profit. Adoption of an
+  unknown holding is no longer this module's decision or anyone else's: the
+  account is the bot's alone, and a holding it does not recognise is a condition
+  to report, not inventory to manage. The adjustment names the ticker, the lot
+  count and the average price, so `app.startup` can name them in its refusal.
+  `db.positions.adopt` remains in the contract and is still called for a holding
+  the bot **does** recognise but whose local row is missing — the crash-recovery
+  case it was written for.
 - Lot mismatch → the broker's count is written locally.
 - **Stop orders are reconciled too, but this module does not act on them.**
   Every open position must have exactly one live stop order. This module
@@ -127,6 +137,12 @@ issue #35 and is scheduled separately — do not fold it in here.
   keeps the stop whose key matches the position's recorded `stop_order_key`, or
   the oldest if none matches, and cancels every other. A duplicate must never be
   silently skipped as though it were the position's one legitimate stop.
+- **The `STOP_DUPLICATE` adjustment names the keeper.** It carries `keep`, the
+  identifier of the stop to retain, and `cancel`, the identifiers of every other.
+  This module applies the keep-rule because this module is where the rule is
+  written and where `stop_order_key` and `created_at` are already in hand;
+  emitting an undifferentiated list of identifiers forced the caller either to
+  re-derive the rule or, as happened, to skip the adjustment entirely (#35).
 - Returns a report enumerating every adjustment; an empty report means agreement.
 - Idempotent.
 - Ordering constraint: runs during `app.startup` after migrations and after
@@ -160,6 +176,18 @@ From `technical-spec.md` §8. Handle each exactly as written.
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
 
+32. **The broker reports a holding the bot has no record of at startup** →
+    refuse to start, alert, and name every ticker, unless
+    `config.allow_foreign_holdings` is true. The account is the bot's alone
+    (brief v1.8). The bot cannot distinguish "someone bought this by hand" from
+    "local state is wrong", and both readings forbid trading it. When the flag is
+    set, the holdings are named in the ready alert and are never traded: no stop
+    placed, no exit evaluated, no sale made. Never adopt one — adoption derived a
+    stop and target from the holding's average cost, which handed the next cycle
+    a position already past its take-profit.
+
+---
+
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -167,15 +195,24 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - Broker and database agreeing produces no adjustments and no alert (happy path).
 - A position open in the database but absent at the broker is closed locally as
   externally closed and alerted (proves the broker is authoritative).
-- A position present at the broker but absent locally is adopted with the
-  broker's average price as entry price, marked adopted, and alerted (proves
-  unknown holdings are managed rather than ignored).
+- A holding present at the broker but absent locally is reported as
+  `FOREIGN_HOLDING` naming its ticker, lots and average price, and **no position
+  row is written** (proves the bot no longer takes ownership of shares it did not
+  buy — the path that adopted a manual holding at its cost basis and sold it on
+  the next cycle).
+- A holding 40% above its average cost is reported, not adopted, and no exit is
+  submitted for it (proves the specific liquidation this policy exists to
+  prevent).
 - An externally-closed position is closed with `order = None` and **no row is
   written to `orders`** (proves reconciliation records only what the bot actually
   submitted).
-- Two live stops on one open position report `STOP_DUPLICATE` naming both
-  (proves the double-sell condition is detected rather than half-claimed — the
-  case where the second stop is neither adopted nor reported as an orphan).
+- Two live stops on one open position report `STOP_DUPLICATE` naming both, with
+  `keep` set to the one matching the position's `stop_order_key` and `cancel`
+  listing the rest (proves the double-sell condition is detected rather than
+  half-claimed, and that the caller is told which stop to keep rather than left
+  to re-derive the rule).
+- With no `stop_order_key` recorded, `keep` is the oldest stop by `created_at`
+  (proves the documented tie-break).
 - A lot-count mismatch adopts the broker's count and alerts (proves quantity
   reconciliation).
 - Reconciliation applies each **corrective write** at most once: running it twice

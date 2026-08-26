@@ -1,7 +1,7 @@
 # Zarabot — Business Brief
 
-**Version:** 1.7
-**Date:** 2026-08-25
+**Version:** 1.8
+**Date:** 2026-08-26
 **Status:** Ready for technical spec
 
 **Companion document.** Implementation contracts are in `technical-spec.md`.
@@ -804,6 +804,26 @@ depends on the bot being profitable.
 | Web dashboard | Telegram covers monitoring from a phone. A dashboard means a web stack, authentication, and a public surface for a single reader. |
 | Automatic model retraining on the server | A model that changes without review can start trading differently for reasons nobody examined. Training stays deliberate and offline. |
 | Manual trading through the bot | The bot's record must reflect its own decisions. Discretionary trades belong in the broker's app, where they do not pollute strategy performance data. |
+
+**The trading account is the bot's alone, and this is now enforced rather than
+assumed.** "Manual trading is out of scope" was written as a scope boundary and
+implemented as its opposite: reconciliation adopted every unrecognised holding,
+derived a stop and target from its *average cost*, and the next cycle sold it. A
+share bought by hand and up 40% is adopted with a target 10% above a cost basis
+far below market, so it is already past its take-profit the moment it is adopted.
+A share down more than the stop percentage is sold immediately for the same
+reason.
+
+So: **if the broker reports a holding the bot has no record of, the bot refuses
+to start**, naming the tickers. Move them to another account, or set
+`ALLOW_FOREIGN_HOLDINGS=true` to acknowledge them — in which case they are
+reported at every startup and never traded, never counted, never sold.
+
+Refusing to start is the right failure direction here. The alternative failure is
+selling something the owner chose to hold, at a price they did not choose, and
+recording it as strategy performance. A bot that will not start is an
+inconvenience the owner notices immediately; a bot that quietly liquidates a
+long-term holding is discovered afterwards.
 | Multiple brokers | One broker's API is the learning objective. A second adds an abstraction layer with no educational return. |
 | Tax reporting | The broker produces the statements that matter for tax. Duplicating them risks producing a confidently wrong number. |
 | News and sentiment analysis | An entire data-acquisition and NLP problem in its own right, with no clean way to validate that it helped. |

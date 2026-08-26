@@ -38,7 +38,24 @@ Fixed ordering; each step completes before the next begins:
 6. `execution.orders.resolve_unfinished()`.
 7. `broker.reconcile.reconcile()`, then apply its remedies via
    `execution.orders`: re-protect unprotected positions, cancel orphaned stops,
-   replace mispriced ones. Reconciliation identifies; the executor acts.
+   replace mispriced ones, and **resolve duplicates — for a `STOP_DUPLICATE`
+   adjustment, cancel every identifier in its `cancel` list and retain `keep`.**
+   Reconciliation identifies; the executor acts. **Every adjustment type the
+   report can carry is handled here.** An adjustment with no branch is silently
+   dropped, which is what happened to `STOP_DUPLICATE`: the double-sell condition
+   was detected, reported, and then ignored, and the ready alert counted it as
+   one more adjustment (#35). An unrecognised adjustment type must alert rather
+   than pass, so a report the executor does not understand is loud.
+
+7b. **Refuse to start on a `FOREIGN_HOLDING` adjustment**, unless
+   `config.allow_foreign_holdings` is true. Raise `StartupError` naming every
+   ticker reported, after alerting. The account is the bot's alone (brief v1.8),
+   and a holding the bot does not recognise means either that someone traded in
+   it by hand or that local state is wrong — and the bot cannot tell which. When
+   the flag is set, the holdings are named in the ready alert instead and are
+   never traded: no stop is placed, no exit is evaluated, no sale is made.
+   Refusing is the correct failure direction. The alternative failure is selling
+   something the owner chose to hold, at a price they did not choose.
 8. Restore halt state.
 9. Alert the owner that the bot is running, reporting version, mode, halt state
    and any reconciliation adjustments.
@@ -72,6 +89,18 @@ From `technical-spec.md` §8. Handle each exactly as written.
     reconnect would hide a missing `app.startup` step in production, and in tests
     would let one test inherit a database another created.
 
+32. **The broker reports a holding the bot has no record of at startup** →
+    refuse to start, alert, and name every ticker, unless
+    `config.allow_foreign_holdings` is true. The account is the bot's alone
+    (brief v1.8). The bot cannot distinguish "someone bought this by hand" from
+    "local state is wrong", and both readings forbid trading it. When the flag is
+    set, the holdings are named in the ready alert and are never traded: no stop
+    placed, no exit evaluated, no sale made. Never adopt one — adoption derived a
+    stop and target from the holding's average cost, which handed the next cycle
+    a position already past its take-profit.
+
+---
+
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -93,6 +122,19 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - Reconciliation runs before the first entry is permitted (proves the same for
   position truth).
 - A halted-at-shutdown bot starts halted (proves halt persistence end to end).
+- A `STOP_DUPLICATE` adjustment causes every identifier in `cancel` to be
+  cancelled and `keep` to be retained (proves the remedy is applied — it was
+  reported and dropped, and every test still passed).
+- A report containing **only** a `STOP_DUPLICATE` still applies it (proves the
+  remedy gate does not skip a report that carries no other stop adjustment).
+- An adjustment type the executor does not recognise alerts rather than being
+  ignored (proves a report it cannot act on is loud).
+- A `FOREIGN_HOLDING` adjustment raises `StartupError` naming the ticker, and no
+  entry is attempted (proves the account-exclusivity policy is enforced rather
+  than documented).
+- With `allow_foreign_holdings` true, startup completes, the ready alert names
+  the holding, and no stop is placed and no exit submitted for it (proves the
+  acknowledged path is observe-only).
 - `start` calls `db.connection.connect` **before** `db.migrations.apply`, and
   `apply` receives `db.connection.shared()` (proves the connection is opened by
   startup rather than at import or inside a repository).

@@ -29,6 +29,10 @@ Loads and validates every setting once at startup.
   never branches on mode — sandbox remains selected by endpoint alone.
 - Adds `price_max_age_seconds` (default 120) and `price_max_move_pct` (default
   20), the bounds `broker.client` validates quotes against.
+- Adds `allow_foreign_holdings`, defaulting to **false**. The trading account is
+  the bot's alone (brief v1.8); this flag is the owner's explicit acknowledgement
+  that it is not, and it is deliberately awkward to set by accident. It is not a
+  risk limit, so a missing value takes its default.
 - `ssl_tbank_verify` defaults to true. **Setting it false must be loud**:
   `config.load()` logs a CRITICAL line naming the risk, because it disables
   certificate verification on the connection carrying the trading token. A
@@ -52,6 +56,18 @@ From `technical-spec.md` §8. Handle each exactly as written.
     Telegram credentials are among the valid ones, sleep 30 seconds, exit
     non-zero. The sleep exists so the container restart policy cannot produce an
     alert loop.
+
+32. **The broker reports a holding the bot has no record of at startup** →
+    refuse to start, alert, and name every ticker, unless
+    `config.allow_foreign_holdings` is true. The account is the bot's alone
+    (brief v1.8). The bot cannot distinguish "someone bought this by hand" from
+    "local state is wrong", and both readings forbid trading it. When the flag is
+    set, the holdings are named in the ready alert and are never traded: no stop
+    placed, no exit evaluated, no sale made. Never adopt one — adoption derived a
+    stop and target from the holding's average cost, which handed the next cycle
+    a position already past its take-profit.
+
+---
 
 ## Test cases
 
