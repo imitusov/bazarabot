@@ -36,8 +36,22 @@ _SSL_DISABLED_TEXT = (
     "is disabled on the connection that carries the trading token"
 )
 _SCHEDULE_DAYS = 14
+# Types the executor acts on. `STOP_DUPLICATE` belongs here: two live stops
+# against one position is the double-sell condition, and an executor with no
+# branch for it detected, reported and then dropped it (#35).
 _STOP_TYPES = frozenset(
-    {"STOP_MISSING", "STOP_ORPHAN", "STOP_MISPRICED", "STOP_ADOPTABLE"}
+    {
+        "STOP_MISSING",
+        "STOP_ORPHAN",
+        "STOP_MISPRICED",
+        "STOP_ADOPTABLE",
+        "STOP_DUPLICATE",
+    }
+)
+# Types reconciliation resolves itself. They need no remedy, but they are known,
+# so they must not be reported as an adjustment the executor cannot act on.
+_OBSERVED_TYPES = frozenset(
+    {"CLOSED_EXTERNALLY", "ADOPTED", "LOTS_ADJUSTED", "FOREIGN_HOLDING"}
 )
 
 
@@ -89,7 +103,68 @@ def _find_stop(
     return None
 
 
+def _find_by_identifier(
+    identifier: str, stops: list[StopOrderRecord]
+) -> StopOrderRecord | None:
+    """Resolve an adjustment identifier: the broker's id, else our key."""
+    for stop in stops:
+        if stop.stop_order_id == identifier or stop.key == identifier:
+            return stop
+    return None
+
+
+async def _resolve_duplicate(
+    item: dict[str, object], stops: list[StopOrderRecord]
+) -> None:
+    """Cancel every identifier in `cancel`; retain `keep`.
+
+    Reconciliation chose which stop survives — the one matching the position's
+    `stop_order_key`, else the oldest. The executor only carries that decision
+    out. A duplicate it cannot resolve stays live, so it alerts rather than
+    passing: an uncancelled second stop is the double-sell condition.
+    """
+    keep = item.get("keep")
+    raw = item.get("cancel")
+    identifiers = raw if isinstance(raw, list | tuple) else ()
+    for entry in identifiers:
+        if not isinstance(entry, str) or entry == keep:
+            continue
+        stop = _find_by_identifier(entry, stops)
+        if stop is None:
+            await alert(
+                f"duplicate stop {entry} on {item.get('ticker')} could not be "
+                "matched to a live stop order and was not cancelled",
+                urgent=True,
+            )
+            continue
+        await cancel_orphaned_stop(stop)
+
+
+async def _report_unhandled(report: ReconciliationReport) -> None:
+    """Alert on any adjustment type this executor has no branch for.
+
+    An adjustment that falls through every branch is silently dropped, which is
+    exactly how `STOP_DUPLICATE` was lost (#35). A report the executor does not
+    understand must be loud.
+    """
+    known = _STOP_TYPES | _OBSERVED_TYPES
+    unknown = sorted(
+        {
+            str(item.get("type"))
+            for item in report.adjustments
+            if item.get("type") not in known
+        }
+    )
+    if unknown:
+        await alert(
+            "reconciliation reported adjustment types this build cannot act on: "
+            f"{', '.join(unknown)} — no remedy was applied for them",
+            urgent=True,
+        )
+
+
 async def _apply_remedies(report: ReconciliationReport) -> None:
+    await _report_unhandled(report)
     kinds = [item.get("type") for item in report.adjustments]
     if not any(kind in _STOP_TYPES for kind in kinds):
         return
@@ -119,6 +194,43 @@ async def _apply_remedies(report: ReconciliationReport) -> None:
             if stop is None:
                 continue
             await cancel_orphaned_stop(stop)
+        elif kind == "STOP_DUPLICATE":
+            await _resolve_duplicate(item, stops)
+
+
+def _foreign_tickers(report: ReconciliationReport) -> list[str]:
+    """Every ticker the broker holds that the bot has no record of."""
+    seen: list[str] = []
+    for item in report.adjustments:
+        if item.get("type") != "FOREIGN_HOLDING":
+            continue
+        ticker = str(item.get("ticker"))
+        if ticker not in seen:
+            seen.append(ticker)
+    return seen
+
+
+async def _enforce_account_exclusivity(
+    cfg: Config, report: ReconciliationReport
+) -> None:
+    """Rule 32: refuse to start on a holding the bot has no record of.
+
+    The account is the bot's alone (brief v1.8). The bot cannot tell "someone
+    bought this by hand" from "local state is wrong", and both readings forbid
+    trading it. Refusing is the correct failure direction; the alternative is
+    selling something the owner chose to hold, at a price they did not choose.
+    With `allow_foreign_holdings` set, the holdings are named in the ready alert
+    instead and are never traded — reconciliation writes no position row for
+    them, so no stop is placed, no exit evaluated and no sale made.
+    """
+    foreign = _foreign_tickers(report)
+    if not foreign or cfg.allow_foreign_holdings:
+        return
+    await _abort(
+        "Startup aborted: the broker reports holdings the bot has no record of "
+        f"({', '.join(foreign)}). The account is the bot's alone; set "
+        "ALLOW_FOREIGN_HOLDINGS=true to start anyway and leave them untraded."
+    )
 
 
 def _ready_text(
@@ -129,9 +241,13 @@ def _ready_text(
     if halted and halt is not None and halt.reason is not None:
         reason = f" ({halt.reason.value})"
     n_adj = len(report.adjustments)
+    foreign = _foreign_tickers(report)
+    holdings = ""
+    if foreign:
+        holdings = f" foreign_holdings={','.join(foreign)} (not traded)"
     return (
         f"zarabot {_VERSION} running mode={cfg.trading_mode} "
-        f"halted={halted}{reason} adjustments={n_adj}"
+        f"halted={halted}{reason} adjustments={n_adj}{holdings}"
     )
 
 
@@ -156,6 +272,7 @@ async def start() -> AppContext:
         await resolve_unfinished(moment)
         report = await reconcile(moment)
         await _apply_remedies(report)
+        await _enforce_account_exclusivity(cfg, report)
         halt = await current()
         set_report_builder(build_report)
         await alert(_ready_text(cfg, halt, report))

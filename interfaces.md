@@ -755,7 +755,8 @@ unknown more than 24 hours after the fill (strictly greater than 24h). Raises
 Fixed order. No entry before the ready alert. `StartupError` after an alert
 when Telegram credentials are present. Sleep-on-failure belongs to `__main__`.
 Wires `/report` to `reporter.weekly.build`. Applies stop remedies from
-reconciliation via `execution.orders`.
+reconciliation via `execution.orders` — every adjustment type the report can
+carry is handled, and an unrecognised one alerts rather than being dropped.
 
 **`StartupError`**
 Raised when startup aborts. No trading has begun.
@@ -771,9 +772,19 @@ disabled, before any broker call and carrying no token → `logging_setup.config
 `db.connection.connect(config.db_path)` then
 `db.migrations.apply(db.connection.shared())` → `strategies.registry.enabled` →
 `market.session.refresh` → `execution.orders.resolve_unfinished` →
-`broker.reconcile.reconcile` plus stop remedies → restore halt → ready `alert`.
+`broker.reconcile.reconcile` plus stop remedies → refuse to start on a foreign
+holding → restore halt → ready `alert`.
 The connection is opened here, not at import. The TLS env write precedes every
-broker call.
+broker call. Remedies: `STOP_MISSING` → `place_protective_stop`, `STOP_MISPRICED`
+→ `replace_stop`, `STOP_ADOPTABLE` → `adopt_existing_stop`, `STOP_ORPHAN` →
+`cancel_orphaned_stop`, and `STOP_DUPLICATE` → `cancel_orphaned_stop` for every
+identifier in its `cancel` list while `keep` is retained. The remedy gate does
+not skip a report whose only stop adjustment is a duplicate. A type outside the
+handled set alerts urgently. A `FOREIGN_HOLDING` adjustment raises
+`StartupError` naming every ticker, after alerting, unless
+`config.allow_foreign_holdings` is true (rule 32); when it is, the ready alert
+names the holdings and they are never traded — reconciliation writes no position
+row, so no stop is placed, no exit evaluated and no sale made.
 
 ## `zarabot.app.loops`
 
