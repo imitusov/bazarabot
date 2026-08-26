@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-25 · spec v1.24 · brief v1.7 · 28 open issues
+Updated: 2026-08-26 · spec v1.26 · brief v1.8 · 27 open issues
 
 ## What this is
 
@@ -29,6 +29,36 @@ limits and sandbox fidelity are all still assumptions.
 
 `scripts/deploy/export_health.py` exists to give the audit real behaviour and
 currently returns nothing, because there is no behaviour.
+
+## Two critical money defects closed — #7 and #35
+
+Spec v1.25, brief v1.8. Three tasks, each run in its own session with only its
+contract: `03-config` → `27-broker-reconcile` → `32-app-startup`.
+
+**#7 was a policy gap, not a bug.** The brief listed manual trading as out of
+scope and the code adopted every unrecognised holding, priced its stop and target
+from *average cost*, and sold it on the next cycle. A share bought by hand and up
+40% was adopted already past its take-profit. The brief now decides it: the
+account is the bot's alone, enforced — an unrecognised holding is reported and
+startup refuses, naming the tickers, unless `ALLOW_FOREIGN_HOLDINGS`
+acknowledges them, in which case they are never traded.
+
+**#35 was the double-sell condition detected and dropped.** `reconcile` now names
+`keep` and `cancel`; `app.startup` applies it; every adjustment type must be
+handled and an unrecognised one alerts.
+
+**Running each task in a clean session paid for itself three times.** Each agent
+read the contract cold and found something the author could not see:
+
+- task 03 found a §3.2 block I had scrambled while inserting, and that `config`
+  was registered in `make_tasks.py` with no test-contract key — so every agent
+  that ever ran task 03 got the contract without its test cases
+- task 27 found a v1.24 sentence telling it not to do the work v1.25 required
+  thirty lines below, and that "a holding the bot recognises" was never defined
+- task 27 also found **#42**: `adopt` violates its own `open_order_key` foreign
+  key on a clean database and reports it as `PositionStateError: open position
+  already exists`. Batch 3 made foreign keys real; a fixture pre-inserting the
+  synthetic order row had hidden it since `001`.
 
 ## Batch 3 done — one connection, one transaction owner
 
