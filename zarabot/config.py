@@ -29,6 +29,7 @@ _DEFAULTS: dict[str, str] = {
     "SSL_TBANK_VERIFY": "true",
     "PRICE_MAX_AGE_SECONDS": "120",
     "PRICE_MAX_MOVE_PCT": "20",
+    "ALLOW_FOREIGN_HOLDINGS": "false",
 }
 
 _REQUIRED = (
@@ -153,6 +154,7 @@ class Config:
     ssl_tbank_verify: bool = True
     price_max_age_seconds: int = 120
     price_max_move_pct: Decimal = Decimal("20")
+    allow_foreign_holdings: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -181,7 +183,8 @@ class Config:
             f"tz={self.tz!r}, "
             f"ssl_tbank_verify={self.ssl_tbank_verify!r}, "
             f"price_max_age_seconds={self.price_max_age_seconds!r}, "
-            f"price_max_move_pct={self.price_max_move_pct!r})"
+            f"price_max_move_pct={self.price_max_move_pct!r}, "
+            f"allow_foreign_holdings={self.allow_foreign_holdings!r})"
         )
 
     __str__ = __repr__
@@ -276,6 +279,12 @@ def load() -> Config:
         ),
         price_max_move_pct=_pct(
             "PRICE_MAX_MOVE_PCT", _optional("PRICE_MAX_MOVE_PCT")
+        ),
+        # Not a risk limit, so a missing value takes the safe default. Anything
+        # else must be spelled exactly: the flag says the trading account is not
+        # the bot's alone, and nobody should arrive at that by writing "yes".
+        allow_foreign_holdings=_bool(
+            "ALLOW_FOREIGN_HOLDINGS", _optional("ALLOW_FOREIGN_HOLDINGS")
         ),
     )
     if not cfg.ssl_tbank_verify:
