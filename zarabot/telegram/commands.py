@@ -11,9 +11,9 @@ from typing import Any
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from zarabot import config
 from zarabot.broker.client import get_last_price
 from zarabot.clock import moscow_date, now, to_moscow
-from zarabot.config import load
 from zarabot.db.positions import list_closed, list_open
 from zarabot.db.snapshots import list_for_period
 from zarabot.market.session import current_session, is_open, next_open
@@ -105,7 +105,7 @@ def _join_truncated(header: str, entries: list[str]) -> str:
 def _authorised(update: Update) -> bool:
     chat = update.effective_chat
     chat_id = chat.id if chat is not None else None
-    if chat_id == load().telegram_chat_id:
+    if chat_id == config.get().telegram_chat_id:
         return True
     _LOG.info("unauthorised telegram command from chat %s", chat_id)
     return False
@@ -248,16 +248,28 @@ async def _pnl_text() -> str:
 
 
 def _risk_limit_text() -> str:
-    cfg = load()
+    """The limits that can actually stop an order, and only those.
+
+    Every line here has a control behind it: the daily loss limit halts entries,
+    the position size and the cash reserve bound what one order may spend, the
+    exposure ceiling and the position count bound the portfolio, the cooldown
+    bounds repetition, and the exit rules bound a single holding. The withdrawn
+    `MAX_POSITION_PCT` is absent because it never bound anything, and a limit an
+    operator believes but that cannot bind is worse than no limit at all (#15).
+    """
+    cfg = config.get()
     return (
-        "Risk limits: "
-        f"stop loss {cfg.stop_loss_pct}%, "
-        f"take profit {cfg.take_profit_pct}%, "
-        f"daily loss {cfg.daily_loss_limit_pct}%, "
-        f"position size {cfg.position_size_pct}%, "
-        f"max position {cfg.max_position_pct}%, "
-        f"max open {cfg.max_open_positions}, "
-        f"max holding {cfg.max_holding_days} days."
+        "Risk limits (no command can change them):\n"
+        f"Daily loss limit: {cfg.daily_loss_limit_pct}% of allocated capital "
+        "— halts new entries\n"
+        f"Position size on entry: {cfg.position_size_pct}% of allocated capital\n"
+        "Portfolio exposure ceiling: open positions cost at most "
+        f"{_fmt_money(cfg.allocated_capital)} in total\n"
+        f"Cash reserve: {cfg.cash_reserve_pct}% of cash held back from every order\n"
+        f"Maximum open positions: {cfg.max_open_positions}\n"
+        f"Re-entry cooldown: {cfg.reentry_cooldown_minutes} minutes per instrument\n"
+        f"Exits: stop {cfg.stop_loss_pct}%, target {cfg.take_profit_pct}%, "
+        f"maximum holding {cfg.max_holding_days} trading days"
     )
 
 
@@ -267,7 +279,7 @@ async def _strategies_text() -> str:
     for row in closed:
         by_name.setdefault(row.strategy, []).append(row)
     lines: list[str] = []
-    for strategy in enabled(load()):
+    for strategy in enabled(config.get()):
         trades = by_name.get(strategy.name, [])
         if not trades:
             lines.append(f"{strategy.name}: N/A")
@@ -326,7 +338,7 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> N
     if not await persist_resume("telegram", now()):
         await _reply(update, _NOTHING_HALTED)
         return
-    await _reply(update, f"Resumed. {_risk_limit_text()}")
+    await _reply(update, f"Resumed.\n{_risk_limit_text()}")
 
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
@@ -349,7 +361,7 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> Non
 
 def build_application() -> Application[Any, Any, Any, Any, Any, Any]:
     """PTB application with every brief command registered."""
-    application = Application.builder().token(load().telegram_bot_token).build()
+    application = Application.builder().token(config.get().telegram_bot_token).build()
     for name, handler in (
         ("status", status),
         ("positions", positions),
