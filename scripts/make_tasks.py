@@ -41,7 +41,7 @@ M = [
  (22,"market.session","zarabot/market/session.py","`market.session`",[],[10],"Is the exchange open? Queried from the broker calendar, never hardcoded. Defaults to closed when unknown."),
  (23,"market.data","zarabot/market/data.py","`market.data`",[],[1,9],"Candles for the watchlist. One failing instrument must never blind the bot to the rest."),
  (24,"state.halt","zarabot/state/halt.py","`state.halt`",["halt_state"],[20,30],"Sole owner of the halt flag. A halt suspends ENTRIES ONLY - exits keep running, and the halt survives restarts."),
- (25,"pnl","zarabot/pnl.py","`pnl`",["positions","daily_snapshots"],[12],"Realised and unrealised P&L, the daily loss percentage, and the buy-and-hold benchmark. Commission is read from the broker, never estimated."),
+ (25,"pnl","zarabot/pnl.py","`pnl`",["positions","daily_snapshots"],[12,20],"Realised and unrealised P&L, the daily loss percentage, and the buy-and-hold benchmark. Commission is read from the broker, never estimated."),
  (26,"execution.orders","zarabot/execution/orders.py","`execution.orders`",["positions","orders","stop_orders","cooldowns"],[3,4,5,11,23,26,27,28,33],"Where money moves. Write-then-send ordering, the submission locks, crash recovery, and the standing stop-loss. Highest-risk module in the project. 95% coverage."),
  (27,"broker.reconcile","zarabot/broker/reconcile.py","`broker.reconcile`",["positions","stop_orders","reconciliations"],[6,7,24,25,30,32],"Compares broker truth against local belief on startup. Observes and reports only - it never places or cancels an order."),
  (28,"telegram.notifier","zarabot/telegram/notifier.py","`telegram.notifier`",[],[13,19],"Pushes alerts. Never raises: Telegram being down must never delay a trading decision."),

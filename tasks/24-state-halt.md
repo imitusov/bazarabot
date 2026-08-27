@@ -43,7 +43,13 @@ obligation.
 **`async is_halted() → bool`** · **`async current() → HaltState | None`**
 
 **`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
-- Persists the halt so it survives a restart. Idempotent when already halted.
+- Persists the halt so it survives a restart. Idempotent when already halted
+  **for the same or a more severe reason**.
+- **Severity order: `DAILY_LOSS_LIMIT` > `RECONCILIATION_MISMATCH` > `MANUAL`.**
+  A halt for a strictly more severe reason replaces a weaker one, rewrites the
+  detail and re-alerts. Returning early regardless of reason meant a daily-loss
+  breach arriving during a manual halt was silently discarded, so `/resume`
+  cleared a halt whose real cause nobody had been told about (#9).
 - Suspends **entries only**. Never affects `lifecycle.exits` or
   `execution.orders.close_position`.
 
@@ -77,6 +83,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   connection; `state/halt.py` was one of the eight sites opening its own).
 - Resuming clears the halt and records who cleared it (proves auditability).
 - Resuming when not halted is accepted and changes nothing (proves idempotency).
+- A `DAILY_LOSS_LIMIT` halt arriving during a `MANUAL` halt **replaces** it,
+  rewrites the detail and alerts; a `MANUAL` halt arriving during a
+  `DAILY_LOSS_LIMIT` halt changes nothing (proves severity ordering — the more
+  serious reason was previously discarded, #9).
 - A halt does not prevent `lifecycle.exits` from returning triggers, nor
   `execution.orders` from placing an exit (proves the halt-blocks-entries-only
   contract, which is the single most consequential interaction in the system).

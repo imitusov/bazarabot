@@ -1,8 +1,8 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.29
+**Version:** 1.30
 **Date:** 2026-08-18
-**Implements:** `business-brief.md` v1.8
+**Implements:** `business-brief.md` v1.9
 
 **Companion document.** Read the brief first. When this spec and the brief
 conflict, **the brief takes precedence**.
@@ -609,6 +609,13 @@ Additionally, `strategies.ml_model`:
 - A prediction below the confidence threshold returns `None` (boundary).
 
 **`risk.sizing`**
+- With `open_cost` leaving less headroom than one lot, returns 0 (proves the
+  portfolio ceiling binds — the control that replaced a per-position cap which
+  could not, #15/#16).
+- The reserve is honoured: with cash exactly equal to one lot and a non-zero
+  `reserve_pct`, returns 0 rather than an order the broker would refuse.
+- `lots × lot_size × price ≤ allocated − open_cost` holds for every input
+  (property, not example).
 - A standard case returns whole lots at or below the configured percentage
   (happy path).
 - A price so high that one lot exceeds the position cap returns zero lots
@@ -622,6 +629,16 @@ Additionally, `strategies.ml_model`:
   structural).
 
 **`risk.gate`**
+- Open positions whose summed cost leaves less than one lot of headroom reject
+  with `PORTFOLIO_EXPOSURE` (proves the runtime exposure ceiling exists; before
+  v1.30 only a configuration-time bound did).
+- `PORTFOLIO_EXPOSURE` is evaluated after `INSUFFICIENT_CASH` and before
+  `ZERO_LOTS` (proves the fixed priority, so the recorded reason is
+  deterministic).
+- No test constructs a `Config` the loader would refuse. The removed
+  `POSITION_CAP` case did exactly that — it set `position_size_pct=50` against
+  `max_position_pct=20`, a state `config.load()` rejects — so a green test
+  asserted behaviour the assembled system could not produce (#15).
 - A clean signal in an unremarkable portfolio is approved (happy path).
 - Each rejection reason is produced by a state constructed to trigger exactly it:
   halted, session closed, position cap, maximum positions, cooldown active,
@@ -736,6 +753,10 @@ Additionally, on exits booked from an exchange stop:
   connection; `state/halt.py` was one of the eight sites opening its own).
 - Resuming clears the halt and records who cleared it (proves auditability).
 - Resuming when not halted is accepted and changes nothing (proves idempotency).
+- A `DAILY_LOSS_LIMIT` halt arriving during a `MANUAL` halt **replaces** it,
+  rewrites the detail and alerts; a `MANUAL` halt arriving during a
+  `DAILY_LOSS_LIMIT` halt changes nothing (proves severity ordering — the more
+  serious reason was previously discarded, #9).
 - A halt does not prevent `lifecycle.exits` from returning triggers, nor
   `execution.orders` from placing an exit (proves the halt-blocks-entries-only
   contract, which is the single most consequential interaction in the system).
@@ -744,8 +765,17 @@ Additionally, on exits booked from an exchange stop:
 - Realised P&L for a closed position matches the arithmetic including commission
   (happy path).
 - Unrealised P&L for an open position uses the current price (happy path).
-- The daily loss percentage is computed against the day's opening baseline, not
-  against allocated capital drift (proves the baseline definition).
+- The daily loss percentage divides by `ALLOCATED_CAPITAL`, not by account
+  equity: the same rouble loss on an account holding twice the allocation gives
+  the same percentage (proves the limit means a share of the money at risk, #9).
+- A cash withdrawal between two calls does not change the daily loss percentage
+  (proves broker equity is never read, so a transfer cannot read as a trading
+  result — the failure that could halt trading for moving money).
+- With no snapshot for the day, the baseline is reconstructed from realised P&L
+  before today and the reconstruction is alerted (proves a mid-session start is
+  not silently blind to the morning).
+- `bot_equity` counts allocated capital plus realised plus unrealised, and is
+  unchanged by a deposit.
 - With no positions and no trades, all figures are zero rather than `None`
   (proves the empty-portfolio path).
 - The buy-and-hold benchmark over a window with a missing price for one
@@ -889,10 +919,20 @@ Domain types shared across every module. Contains validation only, never logic.
 - `Side` — `BUY`, `SELL`
 - `OrderStatus` — `SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED`, `UNKNOWN`
 - `ExitTrigger` — `STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`
-- `RejectionReason` — `HALTED`, `SESSION_CLOSED`, `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`, `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `ZERO_LOTS`, `POSITION_CAP`, `BROKER_LOT_LIMIT`
+- `RejectionReason` — `HALTED`, `SESSION_CLOSED`, `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`, `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `ZERO_LOTS`, `PORTFOLIO_EXPOSURE`, `BROKER_LOT_LIMIT`
 - `HaltReason` — `DAILY_LOSS_LIMIT`, `MANUAL`, `RECONCILIATION_MISMATCH`
 - `StopOrderStatus` — `PLACING`, `ACTIVE`, `CANCELLED`, `EXECUTED`, `ORPHANED`, `FAILED`
 - `StopProtection` — `EXCHANGE`, `LOCAL`. Which side owns a position's stop trigger
+
+`POSITION_CAP` was removed in v1.30 and `PORTFOLIO_EXPOSURE` takes its place.
+The old reason was unreachable: `config.load()` refused any configuration where
+`POSITION_SIZE_PCT` exceeded `MAX_POSITION_PCT`, so the per-position cap was
+never the binding minimum and no order could ever be rejected for it — while the
+risk summary the bot shows on `/resume` listed it as an active control (#15). The
+new reason can bind, because the ceiling it enforces is on the **portfolio**, and
+the portfolio grows independently of any one order's size. The `signals` table
+does not enumerate rejection reasons in a CHECK constraint, so no migration is
+required; a value the schema would still accept but no code can produce is inert.
 
 `BROKER_LOT_LIMIT` covers the broker refusing the size outright — its maximum
 for the account is zero lots. It is distinct from `ZERO_LOTS`, which means our
@@ -956,6 +996,14 @@ Loads and validates every setting once at startup.
   never branches on mode — sandbox remains selected by endpoint alone.
 - Adds `price_max_age_seconds` (default 120) and `price_max_move_pct` (default
   20), the bounds `broker.client` validates quotes against.
+- **`MAX_POSITION_PCT` is removed** (v1.30), with its cross-field check against
+  `POSITION_SIZE_PCT`. It could not bind: the check guaranteed
+  `position_size_pct ≤ max_position_pct`, which made the cap unreachable in
+  sizing while `/resume` reported it as an active limit (#15). `MAX_OPEN_POSITIONS
+  × POSITION_SIZE_PCT ≤ 100` stays — it is a real configuration-time bound.
+- Adds `cash_reserve_pct`, default **1**, the slice of cash `risk.sizing` holds
+  back so fees and rounding cannot make an approved order unaffordable. Bounded
+  0–50; a reserve above half of cash is a configuration error, not a preference.
 - Adds `allow_foreign_holdings`, defaulting to **false**. The trading account is
   the bot's alone (brief v1.8); this flag is the owner's explicit acknowledgement
   that it is not, and it is deliberately awkward to set by accident. It is not a
@@ -1431,6 +1479,11 @@ consecutive-failure alert and is retried as though waiting would help.
   look reasonable.
 
 **`async get_portfolio() → PortfolioState`**
+- **`cash` is RUB buying power**, not `total_amount_currencies`. That field is the
+  converted value of *all* currency positions, including blocked and reserved
+  funds and any non-RUB balance, so it overstates what an order can actually
+  spend and an order sized against it can be refused for insufficient funds
+  (#16). Where the response separates available from blocked, available wins.
 - Returns cash and holdings as reported by the broker. This is the authoritative
   view referred to throughout the brief.
 
@@ -1734,12 +1787,28 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 
 ### `zarabot/risk/sizing.py`
 
-**`size_position(price: Decimal, instrument: Instrument, allocated: Decimal, cash: Decimal, size_pct: Decimal, cap_pct: Decimal) → int`**
+**`size_position(price: Decimal, instrument: Instrument, allocated: Decimal, cash: Decimal, size_pct: Decimal, open_cost: Decimal, reserve_pct: Decimal) → int`**
 - Pure. Returns the number of **whole lots** to buy.
-- Rounds down, always. Returns 0 when one lot exceeds the cap or exceeds cash.
+- Rounds down, always. Never returns a negative number.
+- Bounded by three quantities, and the smallest wins:
+  - **budget** — `size_pct% × allocated`, the intended size of one position;
+  - **headroom** — `allocated − open_cost`, so the portfolio's total cost never
+    exceeds the allocated capital (#16). `open_cost` is the summed cost of
+    positions already open, supplied by the caller because this function is pure;
+  - **spendable** — `cash × (100 − reserve_pct)%`, a buying-power reserve.
 - The returned value must satisfy, for every possible input:
-  `lots × lot_size × price ≤ cap_pct% × allocated` and `≤ cash`.
-- Never returns a negative number.
+  `lots × lot_size × price ≤ allocated − open_cost` and `≤ cash`.
+- `reserve_pct` holds back a slice of cash so that fees, price movement between
+  sizing and fill, and lot rounding cannot turn an approved order into one the
+  broker refuses for insufficient funds. **It is a reserve, not an estimate of
+  commission**: nothing here predicts what the fee will be, and nothing derived
+  from it is ever recorded as a commission. Commission remains what the broker
+  reports it charged, and only that.
+- `cap_pct` was removed in v1.30. It could never be the binding minimum, because
+  `config.load()` refused any configuration where `size_pct` exceeded it — so the
+  per-position cap bounded nothing while appearing in the operator's risk summary
+  as an active control (#15). The portfolio headroom replaces it with a ceiling
+  that can actually bind.
 
 ### `zarabot/risk/gate.py`
 
@@ -1749,9 +1818,24 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 - Rejection reasons are evaluated in this fixed priority order, so that the
   recorded reason is deterministic when several apply:
   `HALTED` → `SESSION_CLOSED` → `INSTRUMENT_NOT_TRADING` → `DUPLICATE_TICKER` →
-  `MAX_POSITIONS` → `COOLDOWN_ACTIVE` → `INSUFFICIENT_CASH` → `ZERO_LOTS` →
-  `POSITION_CAP`.
+  `MAX_POSITIONS` → `COOLDOWN_ACTIVE` → `INSUFFICIENT_CASH` →
+  `PORTFOLIO_EXPOSURE` → `ZERO_LOTS`.
 - `MAX_POSITIONS` applies at or above the configured maximum.
+- **`PORTFOLIO_EXPOSURE`** rejects when the summed cost of open positions leaves
+  less headroom than one lot: `allocated − open_cost < lot_cost`. The gate
+  computes `open_cost` from `state.positions`, which carry entry price, lots and
+  lot size, so this stays pure and needs no new argument. Before v1.30 the only
+  exposure controls were the duplicate-ticker check and a position count, so
+  `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT ≤ 100` bounded *nominal* allocation at
+  configuration time and nothing bounded it at runtime (#16).
+- A **sector or correlation cap is deliberately not implemented yet.** Ten
+  positions in ten Russian banks pass every check above as ten independent bets
+  and behave in a drawdown as one position at ten times the size — the largest
+  unmodelled risk in the system. It is not implemented because it needs a
+  ticker→sector grouping supplied as an input (this module must stay pure), and
+  on the current four-instrument watchlist, four distinct sectors, it would bind
+  on nothing. It becomes required before the watchlist holds two names in one
+  sector, and this paragraph is the reminder.
 - Rejects any signal whose side is `SELL`. Exits never pass through this module.
 - Must never perform I/O, and must never mutate `state`.
 
@@ -1887,7 +1971,13 @@ obligation.
 **`async is_halted() → bool`** · **`async current() → HaltState | None`**
 
 **`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
-- Persists the halt so it survives a restart. Idempotent when already halted.
+- Persists the halt so it survives a restart. Idempotent when already halted
+  **for the same or a more severe reason**.
+- **Severity order: `DAILY_LOSS_LIMIT` > `RECONCILIATION_MISMATCH` > `MANUAL`.**
+  A halt for a strictly more severe reason replaces a weaker one, rewrites the
+  detail and re-alerts. Returning early regardless of reason meant a daily-loss
+  breach arriving during a manual halt was silently discarded, so `/resume`
+  cleared a halt whose real cause nobody had been told about (#9).
 - Suspends **entries only**. Never affects `lifecycle.exits` or
   `execution.orders.close_position`.
 
@@ -1904,10 +1994,42 @@ It is never estimated from a rate. On a small account, commission is a
 material fraction of a 10% move, and an estimated figure would make every
 realised P&L slightly and permanently wrong.
 
+**`async bot_equity() → Decimal`**
+- `allocated_capital + realised P&L of every closed position + unrealised P&L of
+  every open position at current prices`.
+- **Never reads broker cash or broker equity.** That is the whole point: the
+  broker's equity moves when money is paid in or taken out, and those movements
+  are not trading results. Reading them made a withdrawal look like a loss large
+  enough to halt trading, and a deposit mask a real one (#9).
+
 **`async daily_loss_pct(now: datetime) → Decimal`**
-- Current equity against the day's opening baseline, as a percentage. Positive
-  means a loss. The baseline is the snapshot written at session open, never
-  allocated capital.
+- `(opening bot equity − bot equity now) / ALLOCATED_CAPITAL × 100`. Positive
+  means a loss.
+- **The denominator is allocated capital**, the money actually at risk — not
+  account equity. On an account holding twice the allocation, dividing by equity
+  let a "5% daily limit" permit a 10% loss of the capital the bot was given
+  (#9). `DAILY_LOSS_LIMIT_PCT` now means what an operator reads it to mean:
+  a percentage of what they handed the bot.
+- **The baseline is bot equity at the session open**, written to
+  `daily_snapshots.opening_equity` when the session opens rather than lazily on
+  whichever call happened to be first. A process that started at 14:00 previously
+  seeded the baseline at 14:00 and was structurally blind to the morning's
+  drawdown, and returned zero on the call that established the day — so the limit
+  could not trip on the cycle that created it.
+- **When no snapshot exists for the day** — the bot started mid-session and
+  missed the open — the baseline is reconstructed as
+  `allocated_capital + realised P&L of every position closed before today`, and
+  the reconstruction is alerted once. It is not exact: unrealised movement on
+  positions carried overnight is attributed to today. That direction is
+  deliberate, because it makes the limit tighter rather than looser, and a limit
+  that halts early is recoverable by `/resume` while one that halts late is not.
+
+**Interaction with an existing halt.** `state.halt.halt()` returns early when
+already halted, so a `DAILY_LOSS_LIMIT` breach arriving during a `MANUAL` halt
+was discarded — the more serious reason and its detail lost. A halt reason of
+strictly greater severity must replace a weaker one and re-alert;
+`DAILY_LOSS_LIMIT` outranks `MANUAL` and `RECONCILIATION_MISMATCH`. Re-halting
+for a reason already recorded stays a no-op, so this adds no alert noise.
 
 **`async benchmark_return(start: date, end: date) → Decimal | None`**
 - Buy-and-hold return over the watchlist for the period.

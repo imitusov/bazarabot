@@ -77,10 +77,42 @@ It is never estimated from a rate. On a small account, commission is a
 material fraction of a 10% move, and an estimated figure would make every
 realised P&L slightly and permanently wrong.
 
+**`async bot_equity() → Decimal`**
+- `allocated_capital + realised P&L of every closed position + unrealised P&L of
+  every open position at current prices`.
+- **Never reads broker cash or broker equity.** That is the whole point: the
+  broker's equity moves when money is paid in or taken out, and those movements
+  are not trading results. Reading them made a withdrawal look like a loss large
+  enough to halt trading, and a deposit mask a real one (#9).
+
 **`async daily_loss_pct(now: datetime) → Decimal`**
-- Current equity against the day's opening baseline, as a percentage. Positive
-  means a loss. The baseline is the snapshot written at session open, never
-  allocated capital.
+- `(opening bot equity − bot equity now) / ALLOCATED_CAPITAL × 100`. Positive
+  means a loss.
+- **The denominator is allocated capital**, the money actually at risk — not
+  account equity. On an account holding twice the allocation, dividing by equity
+  let a "5% daily limit" permit a 10% loss of the capital the bot was given
+  (#9). `DAILY_LOSS_LIMIT_PCT` now means what an operator reads it to mean:
+  a percentage of what they handed the bot.
+- **The baseline is bot equity at the session open**, written to
+  `daily_snapshots.opening_equity` when the session opens rather than lazily on
+  whichever call happened to be first. A process that started at 14:00 previously
+  seeded the baseline at 14:00 and was structurally blind to the morning's
+  drawdown, and returned zero on the call that established the day — so the limit
+  could not trip on the cycle that created it.
+- **When no snapshot exists for the day** — the bot started mid-session and
+  missed the open — the baseline is reconstructed as
+  `allocated_capital + realised P&L of every position closed before today`, and
+  the reconstruction is alerted once. It is not exact: unrealised movement on
+  positions carried overnight is attributed to today. That direction is
+  deliberate, because it makes the limit tighter rather than looser, and a limit
+  that halts early is recoverable by `/resume` while one that halts late is not.
+
+**Interaction with an existing halt.** `state.halt.halt()` returns early when
+already halted, so a `DAILY_LOSS_LIMIT` breach arriving during a `MANUAL` halt
+was discarded — the more serious reason and its detail lost. A halt reason of
+strictly greater severity must replace a weaker one and re-alert;
+`DAILY_LOSS_LIMIT` outranks `MANUAL` and `RECONCILIATION_MISMATCH`. Re-halting
+for a reason already recorded stays a no-op, so this adds no alert noise.
 
 **`async benchmark_return(start: date, end: date) → Decimal | None`**
 - Buy-and-hold return over the watchlist for the period.
@@ -95,6 +127,9 @@ From `technical-spec.md` §8. Handle each exactly as written.
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
 
+20. **Daily loss limit breached** → halt, persist the halt, alert with the loss
+    and the trades that produced it. Exits continue to run.
+
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
@@ -102,8 +137,17 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - Realised P&L for a closed position matches the arithmetic including commission
   (happy path).
 - Unrealised P&L for an open position uses the current price (happy path).
-- The daily loss percentage is computed against the day's opening baseline, not
-  against allocated capital drift (proves the baseline definition).
+- The daily loss percentage divides by `ALLOCATED_CAPITAL`, not by account
+  equity: the same rouble loss on an account holding twice the allocation gives
+  the same percentage (proves the limit means a share of the money at risk, #9).
+- A cash withdrawal between two calls does not change the daily loss percentage
+  (proves broker equity is never read, so a transfer cannot read as a trading
+  result — the failure that could halt trading for moving money).
+- With no snapshot for the day, the baseline is reconstructed from realised P&L
+  before today and the reconstruction is alerted (proves a mid-session start is
+  not silently blind to the morning).
+- `bot_equity` counts allocated capital plus realised plus unrealised, and is
+  unchanged by a deposit.
 - With no positions and no trades, all figures are zero rather than `None`
   (proves the empty-portfolio path).
 - The buy-and-hold benchmark over a window with a missing price for one

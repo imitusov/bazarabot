@@ -29,6 +29,14 @@ Loads and validates every setting once at startup.
   never branches on mode — sandbox remains selected by endpoint alone.
 - Adds `price_max_age_seconds` (default 120) and `price_max_move_pct` (default
   20), the bounds `broker.client` validates quotes against.
+- **`MAX_POSITION_PCT` is removed** (v1.30), with its cross-field check against
+  `POSITION_SIZE_PCT`. It could not bind: the check guaranteed
+  `position_size_pct ≤ max_position_pct`, which made the cap unreachable in
+  sizing while `/resume` reported it as an active limit (#15). `MAX_OPEN_POSITIONS
+  × POSITION_SIZE_PCT ≤ 100` stays — it is a real configuration-time bound.
+- Adds `cash_reserve_pct`, default **1**, the slice of cash `risk.sizing` holds
+  back so fees and rounding cannot make an approved order unaffordable. Bounded
+  0–50; a reserve above half of cash is a configuration error, not a preference.
 - Adds `allow_foreign_holdings`, defaulting to **false**. The trading account is
   the bot's alone (brief v1.8); this flag is the owner's explicit acknowledgement
   that it is not, and it is deliberately awkward to set by accident. It is not a

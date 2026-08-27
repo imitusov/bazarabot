@@ -22,10 +22,20 @@ Domain types shared across every module. Contains validation only, never logic.
 - `Side` — `BUY`, `SELL`
 - `OrderStatus` — `SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED`, `UNKNOWN`
 - `ExitTrigger` — `STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`
-- `RejectionReason` — `HALTED`, `SESSION_CLOSED`, `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`, `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `ZERO_LOTS`, `POSITION_CAP`, `BROKER_LOT_LIMIT`
+- `RejectionReason` — `HALTED`, `SESSION_CLOSED`, `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`, `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `ZERO_LOTS`, `PORTFOLIO_EXPOSURE`, `BROKER_LOT_LIMIT`
 - `HaltReason` — `DAILY_LOSS_LIMIT`, `MANUAL`, `RECONCILIATION_MISMATCH`
 - `StopOrderStatus` — `PLACING`, `ACTIVE`, `CANCELLED`, `EXECUTED`, `ORPHANED`, `FAILED`
 - `StopProtection` — `EXCHANGE`, `LOCAL`. Which side owns a position's stop trigger
+
+`POSITION_CAP` was removed in v1.30 and `PORTFOLIO_EXPOSURE` takes its place.
+The old reason was unreachable: `config.load()` refused any configuration where
+`POSITION_SIZE_PCT` exceeded `MAX_POSITION_PCT`, so the per-position cap was
+never the binding minimum and no order could ever be rejected for it — while the
+risk summary the bot shows on `/resume` listed it as an active control (#15). The
+new reason can bind, because the ceiling it enforces is on the **portfolio**, and
+the portfolio grows independently of any one order's size. The `signals` table
+does not enumerate rejection reasons in a CHECK constraint, so no migration is
+required; a value the schema would still accept but no code can produce is inert.
 
 `BROKER_LOT_LIMIT` covers the broker refusing the size outright — its maximum
 for the account is zero lots. It is distinct from `ZERO_LOTS`, which means our

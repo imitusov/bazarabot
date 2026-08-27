@@ -1,7 +1,7 @@
 # Zarabot — Business Brief
 
-**Version:** 1.8
-**Date:** 2026-08-26
+**Version:** 1.9
+**Date:** 2026-08-27
 **Status:** Ready for technical spec
 
 **Companion document.** Implementation contracts are in `technical-spec.md`.
@@ -485,6 +485,30 @@ no listening ports.
   long as the logs happen to survive.
 - **What does not persist.** In-flight computation, cached candles, and the
   Telegram command context. These are rebuilt on startup.
+- **The daily loss limit is a percentage of allocated capital, measured against
+  the session open.** It was written as a percentage of *account equity* against
+  a baseline taken at whatever moment the bot first asked. Three consequences,
+  all wrong: on an account holding twice the allocation a "5% limit" allowed a
+  10% loss of the money actually at risk; a bot restarted at 14:00 could not see
+  the morning's drawdown; and paying money in or taking it out read as a trading
+  result, so a withdrawal could halt trading and a deposit could hide a real
+  loss. The limit now measures the bot's own equity — allocated capital plus its
+  realised results plus its open positions marked to market — and never reads the
+  broker's cash. What the operator sets is what they get: lose that percentage of
+  what you gave the bot, in one day, and it stops opening positions.
+- **Total exposure is bounded at runtime, not only in configuration.** The sum of
+  what open positions cost, plus any new order, stays within allocated capital.
+  Previously only `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT ≤ 100` was checked, and
+  only when configuration was loaded.
+- **`MAX_POSITION_PCT` is withdrawn.** It could never bind, and it was displayed
+  in the bot's own risk summary as an active control. A limit that cannot bind is
+  worse than no limit, because it is believed.
+- **Concentration risk remains unmodelled, knowingly.** Ten positions in ten
+  Russian banks are ten independent bets to every check the bot makes, and one
+  position at ten times the size to the market. A sector cap is required before
+  the watchlist holds two names in one sector; today it holds four names in four
+  sectors, so the control would bind on nothing and is deliberately deferred
+  rather than written and left untested.
 - **Halt state survives restarts.** If the bot was halted when it stopped, it
   comes back halted. A crash must never be a way to accidentally resume trading.
 - **Daily counters reset** at the start of each trading session, in Moscow time.

@@ -121,6 +121,11 @@ consecutive-failure alert and is retried as though waiting would help.
   look reasonable.
 
 **`async get_portfolio() → PortfolioState`**
+- **`cash` is RUB buying power**, not `total_amount_currencies`. That field is the
+  converted value of *all* currency positions, including blocked and reserved
+  funds and any non-RUB balance, so it overstates what an order can actually
+  spend and an order sized against it can be refused for insufficient funds
+  (#16). Where the response separates available from blocked, available wins.
 - Returns cash and holdings as reported by the broker. This is the authoritative
   view referred to throughout the brief.
 

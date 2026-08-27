@@ -22,9 +22,24 @@ Module **20** of 40 in `dependency-order.md`. Everything before it is complete a
 - Rejection reasons are evaluated in this fixed priority order, so that the
   recorded reason is deterministic when several apply:
   `HALTED` → `SESSION_CLOSED` → `INSTRUMENT_NOT_TRADING` → `DUPLICATE_TICKER` →
-  `MAX_POSITIONS` → `COOLDOWN_ACTIVE` → `INSUFFICIENT_CASH` → `ZERO_LOTS` →
-  `POSITION_CAP`.
+  `MAX_POSITIONS` → `COOLDOWN_ACTIVE` → `INSUFFICIENT_CASH` →
+  `PORTFOLIO_EXPOSURE` → `ZERO_LOTS`.
 - `MAX_POSITIONS` applies at or above the configured maximum.
+- **`PORTFOLIO_EXPOSURE`** rejects when the summed cost of open positions leaves
+  less headroom than one lot: `allocated − open_cost < lot_cost`. The gate
+  computes `open_cost` from `state.positions`, which carry entry price, lots and
+  lot size, so this stays pure and needs no new argument. Before v1.30 the only
+  exposure controls were the duplicate-ticker check and a position count, so
+  `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT ≤ 100` bounded *nominal* allocation at
+  configuration time and nothing bounded it at runtime (#16).
+- A **sector or correlation cap is deliberately not implemented yet.** Ten
+  positions in ten Russian banks pass every check above as ten independent bets
+  and behave in a drawdown as one position at ten times the size — the largest
+  unmodelled risk in the system. It is not implemented because it needs a
+  ticker→sector grouping supplied as an input (this module must stay pure), and
+  on the current four-instrument watchlist, four distinct sectors, it would bind
+  on nothing. It becomes required before the watchlist holds two names in one
+  sector, and this paragraph is the reminder.
 - Rejects any signal whose side is `SELL`. Exits never pass through this module.
 - Must never perform I/O, and must never mutate `state`.
 
@@ -32,6 +47,16 @@ Module **20** of 40 in `dependency-order.md`. Everything before it is complete a
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
+- Open positions whose summed cost leaves less than one lot of headroom reject
+  with `PORTFOLIO_EXPOSURE` (proves the runtime exposure ceiling exists; before
+  v1.30 only a configuration-time bound did).
+- `PORTFOLIO_EXPOSURE` is evaluated after `INSUFFICIENT_CASH` and before
+  `ZERO_LOTS` (proves the fixed priority, so the recorded reason is
+  deterministic).
+- No test constructs a `Config` the loader would refuse. The removed
+  `POSITION_CAP` case did exactly that — it set `position_size_pct=50` against
+  `max_position_pct=20`, a state `config.load()` rejects — so a green test
+  asserted behaviour the assembled system could not produce (#15).
 - A clean signal in an unremarkable portfolio is approved (happy path).
 - Each rejection reason is produced by a state constructed to trigger exactly it:
   halted, session closed, position cap, maximum positions, cooldown active,
