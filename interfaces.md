@@ -24,7 +24,12 @@ frozen.
 - `Side` — `BUY`, `SELL`
 - `OrderStatus` — `SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED`, `UNKNOWN`
 - `ExitTrigger` — `STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`
-- `RejectionReason` — `HALTED`, `SESSION_CLOSED`, `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`, `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `ZERO_LOTS`, `POSITION_CAP`, `BROKER_LOT_LIMIT`
+- `RejectionReason` — `HALTED`, `SESSION_CLOSED`, `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`, `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `ZERO_LOTS`, `PORTFOLIO_EXPOSURE`, `BROKER_LOT_LIMIT`
+  (`POSITION_CAP` was withdrawn in v1.30 and `PORTFOLIO_EXPOSURE` took its
+  place. The old reason could not bind, because `config.load()` refused any
+  configuration in which the per-position cap was the binding minimum, while
+  `/resume` listed it as an active control (#15). `signals.rejection_reason` is
+  plain TEXT with no CHECK enumerating reasons, so no migration is required.)
 - `HaltReason` — `DAILY_LOSS_LIMIT`, `MANUAL`, `RECONCILIATION_MISMATCH`
 - `StopOrderStatus` — `PLACING`, `ACTIVE`, `CANCELLED`, `EXECUTED`, `ORPHANED`, `FAILED`
 - `StopProtection` — `EXCHANGE`, `LOCAL`
