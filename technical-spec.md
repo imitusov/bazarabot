@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.28
+**Version:** 1.29
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.8
 
@@ -201,6 +201,34 @@ matches the recorded sha256; `from t_tech.invest import AsyncClient` succeeds;
 Each of these was confirmed against wheel 1.49.1 on 2026-08-18, so V10 is a
 regression check against a future SDK version silently removing or renaming
 something load-bearing — not a discovery step.
+
+### 2.1 Measured values
+
+The suite ran green for the first time on **2026-08-27** — V1–V11, 11 of 11.
+Everything below was previously an assumption. It is recorded here because the
+two most expensive defects in this project (#39 and #43) were both assumptions
+that inspection could not have falsified.
+
+| Measured | Value | Why it matters |
+|---|---|---|
+| SDK | 1.49.1, wheel sha256 `b18ea2da…7eba` | V10's regression baseline |
+| Lot sizes | SBER 1, **GAZP 10**, LKOH 1, MGNT 1 | Sizing is in lots; a wrong lot size is a wrong position size |
+| Price steps | SBER/GAZP 0.01, **LKOH/MGNT 0.50** | A stop price off-step is rejected by the exchange |
+| Candle depth | 456 daily candles available | Floor is 250; the longest lookback plus a margin |
+| Longest legitimate candle gap | **6 calendar days** (2025-12-30 → 2026-01-05, the New Year closure) | Recurs annually; a continuity check below it fails on correct data |
+| Market-data rate limit | 200 requests / 60s | Measured headroom 400× the loop's 1.0 calls/min |
+| **`PostOrder` rate limit** | **2 / second** | The one limit close enough to matter; an exit loop slicing an order can reach it |
+| Price polling cost | `get_last_prices` takes the **whole watchlist in one call** | A poll cycle costs 1 request, not one per instrument (#19) |
+| Calendar horizon | **14 days measured from the start of the day** | Exceeding it returns `INVALID_ARGUMENT`/`30002`, "The required period should not exceed 14 days" (#39) |
+| Exchange name | `MOEX`, main board, 10:00–18:54:59 MSK, weekends closed | 53 of the 147 returned exchanges contain "MOEX"; one of them trades weekends (#43) |
+| Duplicate idempotency key | **Refused** — `INVALID_ARGUMENT`/`30057` | It does *not* return the existing order. Recovery is `get_order_state` by key, confirmed working across processes |
+| Stop-order expiry | `GOOD_TILL_CANCEL` accepted; `expiration_time` returns epoch zero, meaning **unset** | The stop survives a restart — brief acceptance criterion 16, previously untested |
+| Telegram | 4096-character ceiling accepted | The truncation contract assumes exactly this |
+
+**Two protobuf sentinels appear repeatedly and both have bitten:** an unset
+timestamp is `1970-01-01`, not `None`, so any check reading it as a value rather
+than as absence reads a closed day or an unexpiring order as the opposite of
+what it is.
 
 **Pinning.** After V1–V11 pass, exact resolved versions of every dependency are
 written to the lockfile and **§9 Dependencies** is updated with the pinned

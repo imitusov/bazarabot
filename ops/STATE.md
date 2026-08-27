@@ -39,6 +39,25 @@ and neither was reachable by inspection — one needed the broker to reject a
 request, the other needed to see what 147 exchanges actually contain. `make
 verify` and a sandbox session are still the highest-information action available.
 
+## make verify is green — 11 of 11, first time ever
+
+Ran 2026-08-27. Five separate defects had been stopping it, the first of which
+meant it could never start: `run_all.sh` cd's into its own directory and the
+Makefile handed it a *relative* interpreter path. Measured values are now
+recorded in `technical-spec.md` §2.1 instead of being assumptions.
+
+The findings that change decisions: `PostOrder` is limited to **2/second**;
+`get_last_prices` takes the whole watchlist in **one** call (#19 is cheaper than
+it looks); a duplicate idempotency key is **refused**, not echoed back, so
+recovery must be `get_order_state`; and the exchange stop is **good-till-cancel
+and survives a restart**, which is brief acceptance criterion 16 and had never
+been tested.
+
+Two of the eleven checks contained the very defects they existed to catch — V5
+sent the >14-day calendar request that is #39, and V11 read protobuf's epoch-zero
+sentinel as a real expiry. A check written from the same assumption as the code
+cannot falsify it.
+
 ## Still true
 
 **The bot has never traded.** The database exists at schema version 2 with zero
@@ -202,7 +221,6 @@ catches, and it is the one that keeps recurring.
 
 ## Not yet done
 
-- `make verify` — never run, needs the token and a watchlist
 - A sandbox session — never run
 - CI workflows exist but **have never executed on GitHub**
 - The VPS deploy path (`scripts/deploy/`) is written and untested
