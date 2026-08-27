@@ -584,6 +584,12 @@ with a missing or naive timestamp, and moves beyond `price_max_move_pct` from
 the last accepted price for that instrument (`PriceRejected`). A rejected quote
 does not update the last accepted price.
 **`async get_portfolio() → PortfolioState`**
+Cash is **available RUB** — the sum of `quantity − blocked_lots` over rouble
+currency positions (`figi` `RUB000UTSTOM`), floored at zero. Not
+`total_amount_currencies`, which converts every currency and counts blocked
+funds, so it overstates what an order can actually spend (#16). A currency
+position is priced in roubles whatever it holds, so identification is by
+instrument, never by the price's currency code.
 Broker-authoritative cash and holdings.
 **`async get_trading_schedule(days: int) → list[SessionInfo]`**
 Requests `exchange="MOEX"` by name — the main equity board, weekends closed —
