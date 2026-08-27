@@ -423,11 +423,21 @@ Access before `connect` or after `disconnect` raises `DatabaseNotOpenError`
 
 Pure. No I/O. 95% coverage required.
 
-**`size_position(price: Decimal, instrument: Instrument, allocated: Decimal, cash: Decimal, size_pct: Decimal, cap_pct: Decimal) → int`**
-Whole lots to buy, rounded down. `min(size_pct% × allocated, cap_pct% ×
-allocated, cash) / (lot × price)`. Returns 0 when one lot exceeds the cap or
-cash, or when lot cost is not positive. Never negative. Satisfies
-`lots × lot × price ≤ cap_pct% × allocated` and `≤ cash`.
+**`size_position(price: Decimal, instrument: Instrument, allocated: Decimal, cash: Decimal, size_pct: Decimal, open_cost: Decimal, reserve_pct: Decimal) → int`**
+Whole lots to buy, rounded down (truncating division, so no quotient rounded at
+the context precision can return a lot the money cannot pay for).
+`min(size_pct% × allocated, allocated − open_cost, cash × (100 − reserve_pct)%)
+/ (lot × price)`. Returns 0 when one lot exceeds the smallest of those three,
+when headroom is negative, or when lot cost is not positive. Never negative.
+Satisfies `lots × lot × price ≤ allocated − open_cost` and `≤ cash` for every
+input. `open_cost` is the summed cost of the positions already open, passed in
+because this function is pure; `risk.gate` computes it from `state.positions`.
+`reserve_pct` is a buying-power reserve — `config.cash_reserve_pct`, bounded
+0–50 — and **never an estimate of commission**: nothing derived from it may be
+recorded as one. `cap_pct` was withdrawn in v1.30 (#15): `config.load()`
+guaranteed `size_pct ≤ cap_pct`, so the per-position cap could never be the
+binding minimum while `/resume` reported it as an active control. The portfolio
+headroom replaces it with a ceiling that can bind (#16).
 
 ## `zarabot.risk.gate`
 
