@@ -61,11 +61,18 @@ Module **33** of 40 in `dependency-order.md`. Everything before it is complete a
    and before entries.
 4. Recompute daily P&L; halt if the daily loss limit is breached.
 
-   **Write the day's opening snapshot on the first cycle of a session** — that
-   is what makes the baseline the session open rather than whenever the process
-   first happened to ask. A bot restarted at 14:00 finds the snapshot already
-   written that morning and measures against it; only a bot that missed the open
-   entirely falls back to `pnl`'s reconstruction.
+   **Write the day's opening snapshot on the first in-session cycle of a day,
+   and only when this process was already running when the session opened.** A
+   bot restarted at 14:00 finds the snapshot written that morning and measures
+   against it. A bot whose *first* cycle is at 14:00 writes **nothing** and lets
+   `pnl` reconstruct the baseline.
+
+   That second case is the whole point, and it is easy to get backwards. Writing
+   at 14:00 would store bot equity as of 14:00 — a figure that already contains
+   the morning's losses — so the baseline would hide exactly the drawdown the
+   limit exists to catch. That is #9 restated, not fixed. `pnl`'s reconstruction
+   is deliberately tight and alerts; a late snapshot is loose and silent, and on
+   a limit that bounds real money the tight, loud option wins.
 
    **When the loss cannot be measured, do not trade on.** `pnl.bot_equity` marks
    open positions to market, so a `PriceRejected` or `BrokerUnavailable` on any

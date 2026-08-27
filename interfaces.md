@@ -898,6 +898,14 @@ The trading cycle. Exits run before the halt check. Halt blocks entries only.
 A failure in one scheduled task never terminates another.
 
 **`async trading_cycle(ctx: AppContext) → None`**
+Step 4 owns the day's opening snapshot: written on the first in-session cycle of
+a Moscow day, and only when this process was already up when the session opened —
+a later first cycle writes nothing and `pnl` reconstructs the baseline instead,
+because a snapshot taken at 14:00 would bury the morning's drawdown. When
+`bot_equity` cannot mark a position (`PriceRejected`, `BrokerUnavailable`) the
+day's loss is unknowable, so the cycle **skips entries and alerts once, without
+halting** — exits at step 3 stand, and the market-data outage counter is left
+untouched so a bad quote cannot masquerade as a broker outage.
 Session closed → return with no broker call. Otherwise: resolve unfinished
 orders; refresh prices; close exchange-executed stops via `close_executed_stop`;
 evaluate remaining exits (LOCAL stop-loss, take-profit, max age) and submit
