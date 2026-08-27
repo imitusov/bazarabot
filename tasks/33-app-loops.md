@@ -60,6 +60,22 @@ Module **33** of 40 in `dependency-order.md`. Everything before it is complete a
    for `LOCAL`-protected positions — and submit them. **Before** any halt check,
    and before entries.
 4. Recompute daily P&L; halt if the daily loss limit is breached.
+
+   **Write the day's opening snapshot on the first cycle of a session** — that
+   is what makes the baseline the session open rather than whenever the process
+   first happened to ask. A bot restarted at 14:00 finds the snapshot already
+   written that morning and measures against it; only a bot that missed the open
+   entirely falls back to `pnl`'s reconstruction.
+
+   **When the loss cannot be measured, do not trade on.** `pnl.bot_equity` marks
+   open positions to market, so a `PriceRejected` or `BrokerUnavailable` on any
+   one of them makes the day's loss unknowable rather than merely imprecise. The
+   cycle then **skips entries for that cycle and alerts, latched**, without
+   halting: exits have already run at step 3 and must not be blocked, and a
+   halt would persist past a condition that is usually momentary. This is
+   deliberately stricter than step 2, where one rejected quote omits its ticker
+   and the cycle continues — there, a missing price costs one position's exit
+   evaluation; here it costs the measurement that bounds the whole day.
 5. If halted, return; entries stop here.
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.

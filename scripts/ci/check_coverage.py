@@ -28,7 +28,7 @@ DEFAULT = 80.0
 # a global average that the rest of the project pays for. See issue #30.
 KNOWN_BELOW = {
     "zarabot/broker/client.py": 81.0,
-    "zarabot/pnl.py": 69.0,
+    "zarabot/pnl.py": 85.0,
 }
 
 data = json.loads(pathlib.Path("coverage.json").read_text(encoding="utf-8"))
