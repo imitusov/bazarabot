@@ -11,7 +11,7 @@ from typing import Any
 import aiosqlite
 import pytest
 
-from zarabot.config import load
+from zarabot.config import Config, get, load
 from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.snapshots import DailySnapshot, write_daily
@@ -111,12 +111,12 @@ def _closed(**overrides: object) -> Position:
     return _position(**fields)
 
 
-def _risk_limits() -> tuple[object, ...]:
-    cfg = load()
+def _risk_limits(cfg: Config) -> tuple[object, ...]:
+    """Every limit the bot enforces. `max_position_pct` is gone — it never bound."""
     return (
         cfg.allocated_capital,
         cfg.position_size_pct,
-        cfg.max_position_pct,
+        cfg.cash_reserve_pct,
         cfg.stop_loss_pct,
         cfg.take_profit_pct,
         cfg.max_holding_days,
@@ -132,6 +132,7 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("DB_PATH", str(path))
+    get.cache_clear()
     async with aiosqlite.connect(path) as conn:
         await apply(conn)
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
@@ -161,6 +162,7 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         yield path
     finally:
         await disconnect()
+        get.cache_clear()
 
 
 async def _reply(handler: Any, chat_id: int = AUTH_CHAT) -> str:
@@ -244,6 +246,16 @@ async def test_each_command_from_authorised_chat_returns_documented_content(
     assert await is_halted() is False
     assert "stop" in resume_text.lower() or "limit" in resume_text.lower()
     assert "5" in resume_text
+    lowered = resume_text.lower()
+    for label in (
+        "daily loss",
+        "position size",
+        "portfolio exposure",
+        "cash reserve",
+        "maximum open positions",
+        "cooldown",
+    ):
+        assert label in lowered, f"/resume omits the {label} limit"
 
     strategies_text = await _reply(strategies)
     assert "ma_crossover" in strategies_text
@@ -324,7 +336,8 @@ async def test_response_over_limit_is_truncated_with_omission_count(
 
 
 async def test_no_command_mutates_a_risk_limit(env: Path) -> None:
-    before = _risk_limits()
+    warm = get()
+    before = _risk_limits(warm)
     handlers = (
         status,
         positions,
@@ -338,8 +351,66 @@ async def test_no_command_mutates_a_risk_limit(env: Path) -> None:
     )
     for handler in handlers:
         await _reply(handler)
-    assert _risk_limits() == before
-    cfg = load()
+    assert get() is warm
+    assert _risk_limits(get()) == before
+    # A fresh read of the environment agrees: no command wrote a limit anywhere.
+    assert _risk_limits(load()) == before
+    cfg = get()
     assert cfg.stop_loss_pct == Decimal("5")
     assert cfg.daily_loss_limit_pct == Decimal("5")
+    assert cfg.position_size_pct == Decimal("10")
+    assert cfg.cash_reserve_pct == Decimal("1")
     assert cfg.max_open_positions == 10
+    assert cfg.reentry_cooldown_minutes == 120
+
+
+async def test_resume_reports_every_binding_limit_and_no_withdrawn_cap(
+    env: Path,
+) -> None:
+    """The summary names the controls that can actually reject an order (#15).
+
+    `MAX_POSITION_PCT` was withdrawn because it could never be the binding
+    minimum, yet this reply presented it as an active control. What replaces it
+    is the runtime portfolio-exposure ceiling and the cash reserve.
+    """
+    cfg = get()
+    await _reply(halt)
+    text = await _reply(resume)
+    lowered = text.lower()
+
+    assert f"{cfg.daily_loss_limit_pct}%" in text
+    assert f"{cfg.position_size_pct}%" in text
+    assert f"{cfg.cash_reserve_pct}%" in text
+    assert str(cfg.max_open_positions) in text
+    assert str(cfg.reentry_cooldown_minutes) in text
+    # The exposure ceiling is allocated capital itself: the summed cost of open
+    # positions may not exceed it (risk.sizing headroom, gate PORTFOLIO_EXPOSURE).
+    assert "portfolio exposure" in lowered
+    assert "100000.00" in text
+    # Exit rules bind too, and are read from the same configuration.
+    assert f"{cfg.stop_loss_pct}%" in text
+    assert f"{cfg.take_profit_pct}%" in text
+    assert str(cfg.max_holding_days) in text
+
+    for withdrawn in ("max position", "maximum per position", "per-position cap"):
+        assert withdrawn not in lowered, f"/resume still reports {withdrawn}"
+
+
+async def test_configuration_is_read_through_the_memoised_accessor(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Handlers read `config.get()`, so limits cannot drift under a live process."""
+    warm = get()
+    monkeypatch.setenv("POSITION_SIZE_PCT", "7")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "777")
+
+    await _reply(halt)
+    text = await _reply(resume)
+    assert get() is warm
+    assert f"{warm.position_size_pct}%" in text
+    assert "7%" not in text
+
+    # The authorised chat is the memoised one, never a re-read of the environment.
+    intruder = _FakeUpdate(777)
+    await status(intruder, None)
+    assert intruder.message.replies == []
