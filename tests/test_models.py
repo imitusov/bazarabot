@@ -384,6 +384,47 @@ def test_approved_and_rejected_risk_decisions_construct() -> None:
     assert rejected.reason is RejectionReason.INSUFFICIENT_CASH
 
 
+# --- RejectionReason membership (v1.30) --------------------------------------
+
+
+def test_rejection_reason_members_are_exactly_the_contract() -> None:
+    # The reasons are written to `signals.rejection_reason` as TEXT and read
+    # back; a member added or renamed without the spec saying so is a silent
+    # schema change. Pinning the whole set catches that in one place.
+    assert {member.name for member in RejectionReason} == {
+        "HALTED",
+        "SESSION_CLOSED",
+        "INSTRUMENT_NOT_TRADING",
+        "DUPLICATE_TICKER",
+        "MAX_POSITIONS",
+        "COOLDOWN_ACTIVE",
+        "INSUFFICIENT_CASH",
+        "ZERO_LOTS",
+        "PORTFOLIO_EXPOSURE",
+        "BROKER_LOT_LIMIT",
+    }
+
+
+def test_portfolio_exposure_replaces_the_withdrawn_position_cap() -> None:
+    # `POSITION_CAP` was unreachable: `config.load()` refused any configuration
+    # in which the per-position cap could bind, so no order could ever carry
+    # that reason while `/resume` advertised it as an active control (#15).
+    # The portfolio ceiling can bind, because the portfolio grows independently
+    # of any one order's size.
+    assert RejectionReason.PORTFOLIO_EXPOSURE.value == "PORTFOLIO_EXPOSURE"
+    assert "POSITION_CAP" not in RejectionReason.__members__
+    with pytest.raises(ValueError):
+        RejectionReason("POSITION_CAP")
+
+
+def test_portfolio_exposure_rejects_a_risk_decision() -> None:
+    decision = RiskDecision(
+        approved=False, lots=None, reason=RejectionReason.PORTFOLIO_EXPOSURE
+    )
+    assert decision.approved is False
+    assert decision.reason is RejectionReason.PORTFOLIO_EXPOSURE
+
+
 # --- enum round-trip ---------------------------------------------------------
 
 
