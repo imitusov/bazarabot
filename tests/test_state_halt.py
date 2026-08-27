@@ -48,6 +48,18 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         await disconnect()
 
 
+@pytest.fixture
+def alerts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Capture alerts at the `telegram.notifier` boundary; never send."""
+    sent: list[str] = []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        sent.append(text)
+
+    monkeypatch.setattr("zarabot.state.halt.alert", _alert, raising=False)
+    return sent
+
+
 async def test_halt_then_read_reports_reason(db: Path) -> None:
     await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
     assert await is_halted() is True
@@ -118,13 +130,113 @@ async def test_resume_when_not_halted_returns_false(db: Path) -> None:
     assert after == before
 
 
-async def test_second_halt_is_idempotent(db: Path) -> None:
+async def test_second_halt_for_the_same_reason_is_idempotent(
+    db: Path, alerts: list[str]
+) -> None:
     await halt(HaltReason.MANUAL, "first", NOW)
-    await halt(HaltReason.RECONCILIATION_MISMATCH, "second", NOW + timedelta(hours=1))
+    await halt(HaltReason.MANUAL, "second", NOW + timedelta(hours=1))
     state = await current()
     assert state is not None
     assert state.reason is HaltReason.MANUAL
     assert state.detail == "first"
+    assert state.halted_at == NOW
+    assert alerts == []
+
+
+async def test_daily_loss_halt_replaces_manual_halt_and_alerts(
+    db: Path, alerts: list[str]
+) -> None:
+    await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
+    later = NOW + timedelta(hours=1)
+    await halt(HaltReason.DAILY_LOSS_LIMIT, "daily loss 5% reached limit 5%", later)
+    state = await current()
+    assert state is not None
+    assert state.halted is True
+    assert state.reason is HaltReason.DAILY_LOSS_LIMIT
+    assert state.detail == "daily loss 5% reached limit 5%"
+    assert len(alerts) == 1
+    assert "daily loss 5% reached limit 5%" in alerts[0]
+
+
+async def test_manual_halt_during_daily_loss_halt_changes_nothing(
+    db: Path, alerts: list[str]
+) -> None:
+    await halt(HaltReason.DAILY_LOSS_LIMIT, "daily loss breached", NOW)
+    await halt(HaltReason.MANUAL, "owner pressed halt", NOW + timedelta(hours=1))
+    state = await current()
+    assert state is not None
+    assert state.halted is True
+    assert state.reason is HaltReason.DAILY_LOSS_LIMIT
+    assert state.detail == "daily loss breached"
+    assert state.halted_at == NOW
+    assert alerts == []
+
+
+async def test_reconciliation_mismatch_replaces_manual_halt_and_alerts(
+    db: Path, alerts: list[str]
+) -> None:
+    await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
+    await halt(
+        HaltReason.RECONCILIATION_MISMATCH,
+        "holdings disagree",
+        NOW + timedelta(hours=1),
+    )
+    state = await current()
+    assert state is not None
+    assert state.reason is HaltReason.RECONCILIATION_MISMATCH
+    assert state.detail == "holdings disagree"
+    assert len(alerts) == 1
+    assert "holdings disagree" in alerts[0]
+
+
+async def test_reconciliation_mismatch_does_not_replace_daily_loss_halt(
+    db: Path, alerts: list[str]
+) -> None:
+    await halt(HaltReason.DAILY_LOSS_LIMIT, "daily loss breached", NOW)
+    await halt(
+        HaltReason.RECONCILIATION_MISMATCH,
+        "holdings disagree",
+        NOW + timedelta(hours=1),
+    )
+    state = await current()
+    assert state is not None
+    assert state.reason is HaltReason.DAILY_LOSS_LIMIT
+    assert state.detail == "daily loss breached"
+    assert alerts == []
+
+
+async def test_severity_upgrade_keeps_the_halt_persistent_and_resumable(
+    db: Path, alerts: list[str]
+) -> None:
+    await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
+    later = NOW + timedelta(hours=1)
+    await halt(HaltReason.DAILY_LOSS_LIMIT, "daily loss breached", later)
+    await disconnect()
+    await connect(str(db))
+    survived = await current()
+    assert survived is not None
+    assert survived.reason is HaltReason.DAILY_LOSS_LIMIT
+    assert survived.detail == "daily loss breached"
+    assert survived.resumed_at is None
+    assert survived.resumed_by is None
+    assert await resume("owner", later + timedelta(minutes=1)) is True
+    assert await is_halted() is False
+
+
+async def test_severity_upgrade_rejects_a_naive_datetime(
+    db: Path, alerts: list[str]
+) -> None:
+    await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
+    with pytest.raises(ValueError):
+        await halt(
+            HaltReason.DAILY_LOSS_LIMIT,
+            "daily loss breached",
+            NOW.replace(tzinfo=None),
+        )
+    state = await current()
+    assert state is not None
+    assert state.reason is HaltReason.MANUAL
+    assert alerts == []
 
 
 async def test_halt_does_not_block_exits_or_exit_orders(db: Path) -> None:
