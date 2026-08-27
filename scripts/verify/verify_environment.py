@@ -8,6 +8,7 @@ services.
 """
 
 import pathlib
+import platform
 import shutil
 import socket
 import subprocess
@@ -20,6 +21,8 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 DATA_DIR = pathlib.Path(env("ZARABOT_DATA_DIR", required=False,
                             default=str(_REPO_ROOT / "data")))
 
+MAX_CLOCK_OFFSET_SECONDS = 2.0
+
 v = Verifier("V9", "host environment")
 
 v.check("python is 3.12 or newer", sys.version_info >= (3, 12),
@@ -31,14 +34,41 @@ compose = subprocess.run(["docker", "compose", "version"],
 v.check("docker compose plugin is available",
         compose is not None and compose.returncode == 0)
 
+# The clock check is about the DEPLOYMENT host (rule 29: V9 confirms it before
+# the bot is deployed). timedatectl is systemd, so on a macOS development
+# machine it does not exist and the whole suite stopped here — which is why
+# `make verify` had never completed. Ask the platform's own time daemon, and
+# say plainly which host was measured.
+def _clock_synchronised():
+    if shutil.which("timedatectl"):
+        out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized",
+                              "--value"], capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() == "yes", out.stdout.strip()
+    if shutil.which("sntp"):
+        # Measures the thing rule 29 actually cares about — how far this clock
+        # is from true — rather than whether a daemon is enabled. Non-privileged;
+        # `systemsetup -getusingnetworktime` needs admin and cannot run here.
+        out = subprocess.run(["sntp", "-t", "5", "time.apple.com"],
+                             capture_output=True, text=True, timeout=20)
+        text = (out.stdout or out.stderr).strip().splitlines()[-1:]
+        line = text[0] if text else ""
+        try:
+            offset = abs(float(line.split()[0]))
+        except (IndexError, ValueError):
+            return False, "could not parse sntp output: {}".format(line[:80])
+        return offset < MAX_CLOCK_OFFSET_SECONDS, (
+            "offset {:+.3f}s (limit {}s) — {}".format(
+                offset, MAX_CLOCK_OFFSET_SECONDS, line[:60]))
+    return False, "no supported time daemon query on this platform"
+
+
 try:
-    out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
-                         capture_output=True, text=True, timeout=10)
-    synced = out.stdout.strip() == "yes"
-    v.check("system clock is NTP synchronised", synced, out.stdout.strip())
+    synced, detail = _clock_synchronised()
+    v.check("system clock is NTP synchronised on {}".format(platform.node()),
+            synced, detail)
 except Exception as exc:  # noqa: BLE001
     v.check("system clock is NTP synchronised", False,
-            "could not query timedatectl ({})".format(type(exc).__name__))
+            "could not query the time daemon ({})".format(type(exc).__name__))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 probe = DATA_DIR / ".write-probe"

@@ -23,8 +23,14 @@ async def body():
     now = dt.datetime.now(dt.timezone.utc)
 
     async with client(TOKEN) as c:
+        # The broker measures the horizon from the START OF THE DAY, and says so
+        # when you get it wrong: "The required period should not exceed 14 days".
+        # from_=now with a 14-day span is rejected with INVALID_ARGUMENT/30002,
+        # which is the defect that kept the bot from ever seeing a session (#39).
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         response = await c.instruments.trading_schedules(
-            from_=now, to=now + dt.timedelta(days=14))
+            exchange=EXCHANGE_HINT,
+            from_=day_start, to=day_start + dt.timedelta(days=14))
 
         exchanges = list(response.exchanges)
         v.check("trading schedules are retrievable", bool(exchanges),

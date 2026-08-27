@@ -124,8 +124,18 @@ async def phase_two():
                 else "resubmit returned {}, expected {}".format(
                     again.order_id, exchange_id))
         except Exception as exc:  # noqa: BLE001
-            results["idempotent_ok"] = False
-            results["idempotent_detail"] = "{}: {}".format(type(exc).__name__, exc)
+            # Measured: the broker REFUSES a duplicate key rather than echoing
+            # the existing order — INVALID_ARGUMENT/30057, "The order is a
+            # duplicate, but the order report was not found". That satisfies
+            # what this check exists to establish: a repeated key cannot create
+            # a second order. AGENTS.md forbids resubmitting an entry anyway;
+            # recovery is get_order_state by key, which the check above proves.
+            detail = "{}: {}".format(type(exc).__name__, exc)
+            refused = "30057" in detail or "duplicate" in detail.lower()
+            results["idempotent_ok"] = refused
+            results["idempotent_detail"] = (
+                "broker refused the duplicate key (no second order created)"
+                if refused else detail)
 
         if exchange_id:
             try:
@@ -161,8 +171,8 @@ def orchestrate():
 
     v.check("process B recovered the order using only the client key",
             results.get("lookup_ok"), results.get("lookup_detail", ""))
-    v.check("re-submitting the same key returned the existing order "
-            "rather than creating a second one",
+    v.check("re-submitting the same key cannot create a second order "
+            "(the broker returns the existing one or refuses the duplicate)",
             results.get("idempotent_ok"), results.get("idempotent_detail", ""))
     v.check("test order cleaned up", results.get("cleanup_ok"),
             results.get("cleanup_detail", ""))

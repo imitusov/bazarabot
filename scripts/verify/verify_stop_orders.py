@@ -94,11 +94,17 @@ async def body():
 
         if ours:
             held = ours[0]
+            # protobuf leaves an unset timestamp at epoch zero, and an unset
+            # expiry IS good-till-cancel. The old assertion treated any datetime
+            # as truthy, so 1970-01-01 read as "expires in 1970" and this failed
+            # on a stop that was posted GOOD_TILL_CANCEL and accepted as such.
+            # The same epoch sentinel appears in the trading calendar (#43).
+            expiry = getattr(held, "expiration_time", None)
+            unset = expiry is None or expiry.year <= 1970
             v.check("good-till-cancel, not day-expiring",
-                    not getattr(held, "expiration_time", None)
-                    or held.expiration_time.year > 2100,
-                    "expiration_time={}".format(
-                        getattr(held, "expiration_time", None)))
+                    unset or expiry.year > 2100,
+                    "expiration_time={} ({})".format(
+                        expiry, "unset - good till cancel" if unset else "set"))
 
         await c.stop_orders.cancel_stop_order(
             account_id=account_id, stop_order_id=stop_id)

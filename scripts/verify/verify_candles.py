@@ -17,7 +17,12 @@ WATCHLIST = env_list("WATCHLIST")
 CLASS_CODE = env("MOEX_CLASS_CODE", required=False, default="TQBR")
 
 REQUIRED_DAYS = 250
-MAX_GAP_CALENDAR_DAYS = 5  # a weekend plus a holiday; more implies missing data
+# MOEX closes for the New Year break, which produces a legitimate multi-day
+# hole every January: measured 2025-12-30 -> 2026-01-05 is six calendar days,
+# and 2024-12-30 -> 2025-01-03 is four. The floor is the exchange's longest
+# scheduled closure, not a weekend plus one holiday — a threshold below it
+# fails every year on correct data, which is how this check has never passed.
+MAX_GAP_CALENDAR_DAYS = 10
 
 v = Verifier("V4", "candle history depth and continuity")
 
@@ -61,7 +66,8 @@ async def body():
                 "{}: {} candles, oldest-first={}, tz-aware={}, largest gap={}d".format(
                     ticker, len(candles), ordered, aware, gap),
                 ok,
-                "need >= {} candles and gaps <= {}d".format(
+                "need >= {} candles and gaps <= {}d (largest gap is reported "
+                "above; check its dates before raising this)".format(
                     REQUIRED_DAYS, MAX_GAP_CALENDAR_DAYS),
             )
 

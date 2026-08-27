@@ -41,4 +41,4 @@ image:
 
 # Needs a token and network. Never runs in CI.
 verify:
-	@set -a && . ./.env && set +a && PYTHON=$(PY) ./scripts/verify/run_all.sh
+	@set -a && . ./.env && set +a && PYTHON=$(CURDIR)/$(PY) ./scripts/verify/run_all.sh
