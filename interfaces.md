@@ -110,14 +110,18 @@ range, or a cross-field rule fails. The message names the offending variable.
 **`Config`** (frozen)
 `tinvest_token: str`, `tinvest_account_id: str`, `trading_mode: str`,
 `telegram_bot_token: str`, `telegram_chat_id: int`, `allocated_capital: Decimal`,
-`position_size_pct: Decimal`, `max_position_pct: Decimal`, `stop_loss_pct: Decimal`,
+`position_size_pct: Decimal`, `stop_loss_pct: Decimal`,
 `take_profit_pct: Decimal`, `max_holding_days: int`, `max_open_positions: int`,
 `reentry_cooldown_minutes: int`, `daily_loss_limit_pct: Decimal`,
 `watchlist: tuple[str, ...]`, `enabled_strategies: tuple[str, ...]`,
 `ml_model_path: Path | None`, `poll_interval_seconds: int`, `db_path: Path`,
 `backup_dir: Path`, `log_level: str`, `tz: str`, `ssl_tbank_verify: bool = True`,
 `price_max_age_seconds: int = 120`, `price_max_move_pct: Decimal = Decimal("20")`,
-`allow_foreign_holdings: bool = False`.
+`cash_reserve_pct: Decimal = Decimal("1")`, `allow_foreign_holdings: bool = False`.
+`max_position_pct` was withdrawn in v1.30 (#15): the cross-field check that
+guaranteed `position_size_pct <= max_position_pct` made the per-position cap
+unreachable in sizing while `/resume` displayed it as an active limit. The
+field is gone from `Config` and `MAX_POSITION_PCT` is read by nothing.
 
 **`load() → Config`**
 `tinvest_token` and `tinvest_account_id` are resolved for the mode in force: in
@@ -128,7 +132,12 @@ to pick credentials.
 Reads the brief's environment-variable table. Applies documented defaults to
 non-risk optional variables. `SSL_TBANK_VERIFY` defaults to `true`; only the
 strings `true` and `false` are accepted. `PRICE_MAX_AGE_SECONDS` defaults to
-`120`; `PRICE_MAX_MOVE_PCT` defaults to `20`. `ALLOW_FOREIGN_HOLDINGS` defaults
+`120`; `PRICE_MAX_MOVE_PCT` defaults to `20`. `CASH_RESERVE_PCT` defaults to
+`1` and is bounded `0`-`50` **inclusive at both ends**, unlike every other
+percentage here: it is the slice of cash `risk.sizing` holds back so fees and
+rounding cannot make an approved order unaffordable, `0` is a legitimate
+choice, and a reserve above half the cash is a configuration error rather than
+a preference. `ALLOW_FOREIGN_HOLDINGS` defaults
 to `false` and, like `SSL_TBANK_VERIFY`, accepts only the strings `true` and
 `false`; it is not a risk limit, so an unset or blank value takes the default.
 `app.startup` acts on it — `config` only exposes it.
@@ -137,7 +146,7 @@ When `ssl_tbank_verify` is false,
 on the connection that carries the trading token; the token value is never
 logged. Never substitutes a default for missing `ALLOCATED_CAPITAL`. Raises
 `ConfigError` naming the variable when: a required variable is missing or empty;
-a percentage is `<= 0` or `> 100`; `POSITION_SIZE_PCT` exceeds `MAX_POSITION_PCT`;
+a percentage is `<= 0` or `> 100` (`CASH_RESERVE_PCT` is outside `0`-`50`);
 `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `TAKE_PROFIT_PCT` is not
 greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty; `TRADING_MODE` is not
 `live` or `sandbox`; `SSL_TBANK_VERIFY` or `ALLOW_FOREIGN_HOLDINGS` is not

@@ -14,7 +14,7 @@ _log = logging.getLogger(__name__)
 _DEFAULTS: dict[str, str] = {
     "TRADING_MODE": "live",
     "POSITION_SIZE_PCT": "10",
-    "MAX_POSITION_PCT": "20",
+    "CASH_RESERVE_PCT": "1",
     "STOP_LOSS_PCT": "5",
     "TAKE_PROFIT_PCT": "10",
     "MAX_HOLDING_DAYS": "3",
@@ -46,7 +46,6 @@ _RISK_VARS = frozenset(
     {
         "ALLOCATED_CAPITAL",
         "POSITION_SIZE_PCT",
-        "MAX_POSITION_PCT",
         "STOP_LOSS_PCT",
         "TAKE_PROFIT_PCT",
         "MAX_HOLDING_DAYS",
@@ -109,6 +108,14 @@ def _pct(name: str, raw: str) -> Decimal:
     return value
 
 
+def _pct_inclusive(name: str, raw: str, low: Decimal, high: Decimal) -> Decimal:
+    """A percentage whose bounds are both inclusive, unlike `_pct`."""
+    value = _decimal(name, raw)
+    if value < low or value > high:
+        raise ConfigError(f"{name} is out of range")
+    return value
+
+
 def _positive_int(name: str, raw: str) -> int:
     value = _int(name, raw)
     if value <= 0:
@@ -137,7 +144,6 @@ class Config:
     telegram_chat_id: int
     allocated_capital: Decimal
     position_size_pct: Decimal
-    max_position_pct: Decimal
     stop_loss_pct: Decimal
     take_profit_pct: Decimal
     max_holding_days: int
@@ -155,6 +161,7 @@ class Config:
     ssl_tbank_verify: bool = True
     price_max_age_seconds: int = 120
     price_max_move_pct: Decimal = Decimal("20")
+    cash_reserve_pct: Decimal = Decimal("1")
     allow_foreign_holdings: bool = False
 
     def __repr__(self) -> str:
@@ -167,7 +174,6 @@ class Config:
             f"telegram_chat_id={self.telegram_chat_id!r}, "
             f"allocated_capital={self.allocated_capital!r}, "
             f"position_size_pct={self.position_size_pct!r}, "
-            f"max_position_pct={self.max_position_pct!r}, "
             f"stop_loss_pct={self.stop_loss_pct!r}, "
             f"take_profit_pct={self.take_profit_pct!r}, "
             f"max_holding_days={self.max_holding_days!r}, "
@@ -185,6 +191,7 @@ class Config:
             f"ssl_tbank_verify={self.ssl_tbank_verify!r}, "
             f"price_max_age_seconds={self.price_max_age_seconds!r}, "
             f"price_max_move_pct={self.price_max_move_pct!r}, "
+            f"cash_reserve_pct={self.cash_reserve_pct!r}, "
             f"allow_foreign_holdings={self.allow_foreign_holdings!r})"
         )
 
@@ -216,10 +223,13 @@ def load() -> Config:
     if allocated <= 0:
         raise ConfigError("ALLOCATED_CAPITAL is out of range")
 
+    # MAX_POSITION_PCT was withdrawn in v1.30 (#15) along with its cross-field
+    # check against POSITION_SIZE_PCT. The check guaranteed
+    # position_size_pct <= max_position_pct, so the per-position cap was never
+    # the binding minimum in sizing and could reject nothing — while /resume
+    # named it as an active control. A limit that cannot bind is worse than no
+    # limit, because it is believed. The variable is now read by nothing.
     position_size = _pct("POSITION_SIZE_PCT", _optional("POSITION_SIZE_PCT"))
-    max_position = _pct("MAX_POSITION_PCT", _optional("MAX_POSITION_PCT"))
-    if position_size > max_position:
-        raise ConfigError("POSITION_SIZE_PCT exceeds MAX_POSITION_PCT")
 
     stop_loss = _pct("STOP_LOSS_PCT", _optional("STOP_LOSS_PCT"))
     take_profit = _pct("TAKE_PROFIT_PCT", _optional("TAKE_PROFIT_PCT"))
@@ -251,7 +261,6 @@ def load() -> Config:
         telegram_chat_id=_int("TELEGRAM_CHAT_ID", _require("TELEGRAM_CHAT_ID")),
         allocated_capital=allocated,
         position_size_pct=position_size,
-        max_position_pct=max_position,
         stop_loss_pct=stop_loss,
         take_profit_pct=take_profit,
         max_holding_days=_positive_int(
@@ -279,6 +288,17 @@ def load() -> Config:
             "PRICE_MAX_AGE_SECONDS", _optional("PRICE_MAX_AGE_SECONDS")
         ),
         price_max_move_pct=_pct("PRICE_MAX_MOVE_PCT", _optional("PRICE_MAX_MOVE_PCT")),
+        # The slice of cash risk.sizing holds back so fees and rounding cannot
+        # make an approved order unaffordable. Both bounds are inclusive: 0 is
+        # a legitimate choice, and a reserve above half the cash is a
+        # configuration error rather than a preference, because it would
+        # starve sizing of the money the operator meant it to deploy.
+        cash_reserve_pct=_pct_inclusive(
+            "CASH_RESERVE_PCT",
+            _optional("CASH_RESERVE_PCT"),
+            Decimal("0"),
+            Decimal("50"),
+        ),
         # Not a risk limit, so a missing value takes the safe default. Anything
         # else must be spelled exactly: the flag says the trading account is not
         # the bot's alone, and nobody should arrive at that by writing "yes".

@@ -126,7 +126,17 @@ def test_max_position_pct_is_withdrawn_and_no_longer_binds(
     # entirely: a value that would once have been rejected must load, and the
     # field must be gone from Config rather than kept and unused — an
     # unenforced limit still on the object is one a later reader will display.
-    _env(monkeypatch, {"POSITION_SIZE_PCT": "15", "MAX_POSITION_PCT": "10"})
+    _env(
+        monkeypatch,
+        {
+            "POSITION_SIZE_PCT": "15",
+            "MAX_POSITION_PCT": "10",
+            # 6 × 15 = 90: the surviving cross-field bound must not be what
+            # rejects this configuration, or the test would pass for the wrong
+            # reason.
+            "MAX_OPEN_POSITIONS": "6",
+        },
+    )
     cfg = load()
     assert cfg.position_size_pct == Decimal("15")
     assert not hasattr(cfg, "max_position_pct")
