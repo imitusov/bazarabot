@@ -16,7 +16,6 @@ from zarabot.models import (
 )
 from zarabot.risk.sizing import size_position
 
-_HUNDRED = Decimal("100")
 _TRADING = "NORMAL_TRADING"
 
 
@@ -26,6 +25,21 @@ def _reject(reason: RejectionReason) -> RiskDecision:
 
 def _approve(lots: int) -> RiskDecision:
     return RiskDecision(approved=True, lots=lots, reason=None)
+
+
+def _open_cost(state: PortfolioState) -> Decimal:
+    """Summed entry cost of the open portfolio.
+
+    Read from `state.positions`, which carry lots, lot size and entry price,
+    so the gate needs no extra argument and stays pure.
+    """
+    return sum(
+        (
+            Decimal(position.lots) * Decimal(position.lot_size) * position.entry_price
+            for position in state.positions
+        ),
+        Decimal(0),
+    )
 
 
 def check(
@@ -38,6 +52,12 @@ def check(
     now: datetime,
     config: Config,
 ) -> RiskDecision:
+    """Approve an entry with a lot count, or reject it with exactly one reason.
+
+    Reasons are evaluated in a fixed priority order, never in the order the
+    conditions happen to be cheap to test, so the reason recorded against a
+    signal is deterministic when several apply.
+    """
     del now  # provided for call-site uniformity; the gate is timeless
     if halted:
         return _reject(RejectionReason.HALTED)
@@ -51,28 +71,34 @@ def check(
         return _reject(RejectionReason.MAX_POSITIONS)
     if cooldown_active:
         return _reject(RejectionReason.COOLDOWN_ACTIVE)
-    if signal.side is Side.SELL:
-        return _reject(RejectionReason.ZERO_LOTS)
 
     price = signal.reference_price
     lot_cost = Decimal(instrument.lot) * price
+    open_cost = _open_cost(state)
+    if state.cash < lot_cost:
+        return _reject(RejectionReason.INSUFFICIENT_CASH)
+    if config.allocated_capital - open_cost < lot_cost:
+        # The runtime exposure ceiling (#16). Before v1.30 the only bounds on
+        # exposure were the duplicate-ticker check and a position count, so
+        # nothing stopped a portfolio — including holdings this gate never
+        # sized — from committing more than the allocated capital.
+        return _reject(RejectionReason.PORTFOLIO_EXPOSURE)
+
+    # Exits never route through the gate. The check sits here rather than
+    # earlier so that a SELL cannot pre-empt a higher-priority reason and make
+    # the recorded reason depend on the side of the signal.
+    if signal.side is not Side.BUY:
+        return _reject(RejectionReason.ZERO_LOTS)
+
     lots = size_position(
         price,
         instrument,
         config.allocated_capital,
         state.cash,
         config.position_size_pct,
-        config.max_position_pct,
+        open_cost,
+        config.cash_reserve_pct,
     )
     if lots > 0:
         return _approve(lots)
-
-    if state.cash < lot_cost:
-        return _reject(RejectionReason.INSUFFICIENT_CASH)
-    budget = config.allocated_capital * config.position_size_pct / _HUNDRED
-    if budget < lot_cost:
-        return _reject(RejectionReason.ZERO_LOTS)
-    cap = config.allocated_capital * config.max_position_pct / _HUNDRED
-    if cap < lot_cost:
-        return _reject(RejectionReason.POSITION_CAP)
     return _reject(RejectionReason.ZERO_LOTS)

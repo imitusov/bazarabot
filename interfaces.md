@@ -446,10 +446,19 @@ Pure. No I/O. 95% coverage required. Calls `risk.sizing`. Never mutates `state`.
 **`check(signal: Signal, state: PortfolioState, instrument: Instrument, cooldown_active: bool, session_open: bool, halted: bool, now: datetime, config: Config) → RiskDecision`**
 Approved with lots, or rejected with exactly one reason. Priority:
 `HALTED` → `SESSION_CLOSED` → `INSTRUMENT_NOT_TRADING` → `DUPLICATE_TICKER` →
-`MAX_POSITIONS` → `COOLDOWN_ACTIVE` → `INSUFFICIENT_CASH` → `ZERO_LOTS` →
-`POSITION_CAP`. `MAX_POSITIONS` at or above the configured maximum. `SELL`
-signals are never approved. Instrument is trading iff `trading_status` is
-`NORMAL_TRADING`.
+`MAX_POSITIONS` → `COOLDOWN_ACTIVE` → `INSUFFICIENT_CASH` →
+`PORTFOLIO_EXPOSURE` → `ZERO_LOTS`. `MAX_POSITIONS` at or above the configured
+maximum. `INSUFFICIENT_CASH` when `state.cash < lot_cost`;
+`PORTFOLIO_EXPOSURE` when `allocated_capital − open_cost < lot_cost`, where
+`open_cost` is `Σ lots × lot_size × entry_price` over `state.positions` —
+computed here, so the signature is unchanged and the module stays pure (#16).
+`POSITION_CAP` was withdrawn with `Config.max_position_pct` in v1.30 (#15).
+`SELL` signals are never approved; they are rejected as `ZERO_LOTS`, evaluated
+at that slot in the priority order so a `SELL` cannot pre-empt a
+higher-priority reason. A cash reserve too small to cover a lot also surfaces
+as `ZERO_LOTS`, since `config.cash_reserve_pct` reaches sizing, not the cash
+check. Instrument is trading iff `trading_status` is `NORMAL_TRADING`. A
+sector or correlation cap is deliberately absent — see the spec.
 
 ## `zarabot.lifecycle.exits`
 
