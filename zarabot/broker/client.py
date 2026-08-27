@@ -77,6 +77,11 @@ _TRANSPORT_STATUSES = frozenset({StatusCode.UNAVAILABLE, StatusCode.DEADLINE_EXC
 
 _NANO = Decimal("1000000000")
 
+# Cash reaches the portfolio as a currency position. Roubles are RUB000UTSTOM,
+# and roubles are the only buying power: the schema constrains instruments to
+# RUB (migrations/001_initial.sql).
+_RUB_PREFIX = "RUB"
+
 # The only state this module holds: the last accepted price per instrument,
 # which is what makes the implausible-move check possible.
 _last_accepted: dict[str, Decimal] = {}
@@ -399,6 +404,46 @@ async def get_last_price(figi: str) -> Decimal:
     return price
 
 
+def _is_currency(raw: object) -> bool:
+    return str(getattr(raw, "instrument_type", "")).lower() == "currency"
+
+
+def _is_rub(raw: object) -> bool:
+    """Identify the rouble cash position.
+
+    Not by the price's currency code: a currency position is priced in roubles
+    whatever currency it holds, so a dollar balance carries `currency="rub"` on
+    `average_position_price` too. The instrument identifier is what separates
+    them — roubles are RUB000UTSTOM.
+    """
+    return any(
+        str(getattr(raw, attr, "") or "").upper().startswith(_RUB_PREFIX)
+        for attr in ("figi", "ticker")
+    )
+
+
+def _rub_buying_power(response: object) -> Decimal:
+    """RUB buying power: the rouble balance less what the exchange has blocked.
+
+    Not `total_amount_currencies`, which is every currency position converted to
+    roubles with blocked and reserved funds included. Sizing against that figure
+    approves an order the broker then refuses for insufficient funds (#16), and
+    the refusal reads as a broker problem rather than a sizing one. The response
+    separates available from blocked per position, so available wins.
+
+    No rouble position means no cash. Under-reporting costs a trade; the
+    over-report this replaces costs a rejected order.
+    """
+    available = Decimal(0)
+    for raw in getattr(response, "positions", None) or ():
+        if not _is_currency(raw) or not _is_rub(raw):
+            continue
+        held = _decimal_quote(getattr(raw, "quantity", None))
+        blocked = _decimal_quote(getattr(raw, "blocked_lots", None))
+        available += held - blocked
+    return max(available, Decimal(0))
+
+
 async def get_portfolio() -> PortfolioState:
     conn = await _connect()
     cfg = conn.config
@@ -408,13 +453,13 @@ async def get_portfolio() -> PortfolioState:
         )
     except AioRequestError as exc:
         _translate(exc, cfg.tinvest_token, not_found=None)
-    cash = _decimal_money(response.total_amount_currencies)
+    cash = _rub_buying_power(response)
     holdings: list[Position] = []
     for raw in response.positions:
         lots = _lots_from_quote(getattr(raw, "quantity_lots", None))
         if lots <= 0:
             continue
-        if str(getattr(raw, "instrument_type", "")).lower() == "currency":
+        if _is_currency(raw):
             continue
         entry = _decimal_money(raw.average_position_price)
         ticker = getattr(raw, "ticker", "") or ""
