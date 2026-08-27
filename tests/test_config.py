@@ -52,6 +52,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None = None) -
         "ALLOCATED_CAPITAL",
         "POSITION_SIZE_PCT",
         "MAX_POSITION_PCT",
+        "CASH_RESERVE_PCT",
         "STOP_LOSS_PCT",
         "TAKE_PROFIT_PCT",
         "MAX_HOLDING_DAYS",
@@ -91,6 +92,7 @@ def test_complete_environment_produces_populated_config(
     assert cfg.ssl_tbank_verify is True
     assert cfg.price_max_age_seconds == 120
     assert cfg.price_max_move_pct == Decimal("20")
+    assert cfg.cash_reserve_pct == Decimal("1")
 
 
 def test_missing_tinvest_token_raises_naming_the_variable(
@@ -114,22 +116,33 @@ def test_position_size_pct_zero_or_above_100_raises(
         load()
 
 
-def test_position_size_pct_above_max_position_pct_raises(
+def test_max_position_pct_is_withdrawn_and_no_longer_binds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # v1.30 withdrew MAX_POSITION_PCT (#15). The cross-field check that used to
+    # live here guaranteed position_size_pct <= max_position_pct, which is
+    # exactly what made the per-position cap unreachable in sizing while
+    # /resume reported it as an active limit. The variable is now ignored
+    # entirely: a value that would once have been rejected must load, and the
+    # field must be gone from Config rather than kept and unused — an
+    # unenforced limit still on the object is one a later reader will display.
     _env(monkeypatch, {"POSITION_SIZE_PCT": "15", "MAX_POSITION_PCT": "10"})
-    with pytest.raises(ConfigError, match="POSITION_SIZE_PCT"):
-        load()
+    cfg = load()
+    assert cfg.position_size_pct == Decimal("15")
+    assert not hasattr(cfg, "max_position_pct")
+    assert "max_position_pct" not in str(cfg) + repr(cfg)
 
 
 def test_max_open_positions_times_size_exceeding_100_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The one cross-field bound that survives v1.30: the allocation cannot be
+    # structurally over-committed. Unlike the per-position cap, this one can
+    # bind, so it stays a configuration-time refusal.
     _env(
         monkeypatch,
         {
             "POSITION_SIZE_PCT": "20",
-            "MAX_POSITION_PCT": "20",
             "MAX_OPEN_POSITIONS": "6",
         },
     )
@@ -252,6 +265,62 @@ def test_price_max_move_pct_out_of_range_raises(
     _env(monkeypatch, {"PRICE_MAX_MOVE_PCT": "101"})
     with pytest.raises(ConfigError, match="PRICE_MAX_MOVE_PCT"):
         load()
+
+
+def test_cash_reserve_pct_defaults_to_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch)
+    assert load().cash_reserve_pct == Decimal("1")
+
+
+def test_cash_reserve_pct_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch, {"CASH_RESERVE_PCT": "2.5"})
+    assert load().cash_reserve_pct == Decimal("2.5")
+
+
+def test_cash_reserve_pct_accepts_the_inclusive_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 0 is a legitimate choice — hold nothing back — and 50 is the documented
+    # ceiling. Both bounds are inclusive, unlike every other percentage here,
+    # which is why this one cannot go through the ordinary 0 < x <= 100 rule.
+    _env(monkeypatch, {"CASH_RESERVE_PCT": "0"})
+    assert load().cash_reserve_pct == Decimal("0")
+    _env(monkeypatch, {"CASH_RESERVE_PCT": "50"})
+    assert load().cash_reserve_pct == Decimal("50")
+
+
+@pytest.mark.parametrize("raw", ["-1", "50.01", "51", "100"])
+def test_cash_reserve_pct_out_of_range_raises(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    # A reserve above half of cash is a configuration error, not a preference:
+    # it would starve sizing of the cash the operator meant it to deploy.
+    _env(monkeypatch, {"CASH_RESERVE_PCT": raw})
+    with pytest.raises(ConfigError, match="CASH_RESERVE_PCT"):
+        load()
+
+
+def test_cash_reserve_pct_not_a_number_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch, {"CASH_RESERVE_PCT": "one"})
+    with pytest.raises(ConfigError, match="CASH_RESERVE_PCT"):
+        load()
+
+
+def test_cash_reserve_pct_is_a_decimal_never_a_float(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # It scales cash before sizing divides by a lot cost; a float here would
+    # put binary rounding on the affordability arithmetic.
+    _env(monkeypatch, {"CASH_RESERVE_PCT": "1"})
+    assert isinstance(load().cash_reserve_pct, Decimal)
+
+
+def test_cash_reserve_pct_appears_in_the_string_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"CASH_RESERVE_PCT": "3"})
+    text = str(load()) + repr(load())
+    assert "cash_reserve_pct" in text
 
 
 def test_ssl_tbank_verify_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
