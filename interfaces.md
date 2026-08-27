@@ -656,7 +656,12 @@ connection. Access before `connect` or after `disconnect` raises
 The singleton row, or `None` if missing.
 
 **`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
-Persists halt. No-op when already halted. Raises `ValueError` on naive `at`.
+Persists halt. Raises `ValueError` on naive `at`. Severity orders the reasons —
+`DAILY_LOSS_LIMIT` > `RECONCILIATION_MISMATCH` > `MANUAL`. A strictly more severe
+reason replaces a standing halt, rewriting `reason` and `detail` and alerting
+through `telegram.notifier`; `halted_at` keeps the moment the halt began, since
+the suspension has been continuous. The same reason or a weaker one is a no-op
+and sends nothing, so re-halting adds no alert noise (#9).
 
 **`async resume(actor: str, at: datetime) → bool`**
 Clears the halt and records `actor`. `False` when not halted.

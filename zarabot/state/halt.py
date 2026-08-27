@@ -8,6 +8,16 @@ import aiosqlite
 
 from zarabot.db.connection import shared, transaction
 from zarabot.models import HaltReason, HaltState
+from zarabot.telegram.notifier import alert
+
+# Severity order: DAILY_LOSS_LIMIT > RECONCILIATION_MISMATCH > MANUAL. A halt
+# for a strictly more severe reason replaces a weaker one; the same reason or a
+# weaker one is a no-op, so re-halting adds no alert noise (#9).
+_SEVERITY: dict[HaltReason, int] = {
+    HaltReason.MANUAL: 1,
+    HaltReason.RECONCILIATION_MISMATCH: 2,
+    HaltReason.DAILY_LOSS_LIMIT: 3,
+}
 
 
 def _reject_naive(moment: datetime) -> None:
@@ -51,24 +61,40 @@ async def is_halted() -> bool:
 async def halt(reason: HaltReason, detail: str, at: datetime) -> None:
     _reject_naive(at)
     conn = _conn()
-    cursor = await conn.execute("SELECT halted FROM halt_state WHERE id = 1")
+    cursor = await conn.execute("SELECT halted, reason FROM halt_state WHERE id = 1")
     row = await cursor.fetchone()
+    standing: HaltReason | None = None
+    replacing = False
     if row is not None and row["halted"]:
-        return
+        standing = HaltReason(row["reason"]) if row["reason"] else None
+        if standing is not None and _SEVERITY[reason] <= _SEVERITY[standing]:
+            return
+        replacing = True
     async with transaction() as conn:
-        await conn.execute(
-            """
-            UPDATE halt_state
-            SET halted = 1,
-                reason = ?,
-                detail = ?,
-                halted_at = ?,
-                resumed_at = NULL,
-                resumed_by = NULL
-            WHERE id = 1
-            """,
-            (reason.value, detail, at.isoformat()),
-        )
+        if replacing:
+            # The halt has been in force since its original `halted_at`; only
+            # the reason and its detail are superseded.
+            await conn.execute(
+                "UPDATE halt_state SET reason = ?, detail = ? WHERE id = 1",
+                (reason.value, detail),
+            )
+        else:
+            await conn.execute(
+                """
+                UPDATE halt_state
+                SET halted = 1,
+                    reason = ?,
+                    detail = ?,
+                    halted_at = ?,
+                    resumed_at = NULL,
+                    resumed_by = NULL
+                WHERE id = 1
+                """,
+                (reason.value, detail, at.isoformat()),
+            )
+    if replacing:
+        previous = standing.value if standing is not None else "an unrecorded reason"
+        await alert(f"Halt escalated from {previous} to {reason.value}: {detail}")
 
 
 async def resume(actor: str, at: datetime) -> bool:
