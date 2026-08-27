@@ -166,7 +166,10 @@ def run(
                 config.allocated_capital,
                 cash,
                 config.position_size_pct,
-                config.max_position_pct,
+                # No position is open on this branch, so nothing is committed
+                # to the portfolio yet and the headroom is the whole allocation.
+                Decimal(0),
+                config.cash_reserve_pct,
             )
             if lots <= 0:
                 continue

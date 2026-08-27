@@ -32,7 +32,6 @@ def _config() -> Config:
         telegram_chat_id=1,
         allocated_capital=Decimal("100000"),
         position_size_pct=Decimal("10"),
-        max_position_pct=Decimal("20"),
         stop_loss_pct=Decimal("5"),
         take_profit_pct=Decimal("10"),
         max_holding_days=3,
