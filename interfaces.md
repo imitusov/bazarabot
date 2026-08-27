@@ -688,15 +688,31 @@ Clears the halt and records `actor`. `False` when not halted.
 ## `zarabot.pnl`
 
 Commission is never estimated. `realised` uses the stored net figure on a closed
-row. Positive `daily_loss_pct` is a loss versus the snapshot opening baseline.
+row. Positive `daily_loss_pct` is a loss versus the session-open baseline.
+Reads configuration through `config.get()`. Writes nothing: the session-open
+`daily_snapshots` row belongs to `app.loops`.
 
 **`realised(position: Position) → Decimal`**
 **`unrealised(position: Position, price: Decimal) → Decimal`**
 Mark-to-market vs entry, `lots × lot_size` units.
 
+**`async bot_equity() → Decimal`**
+`allocated_capital + realised P&L of every closed position + unrealised P&L of
+every open position at `get_last_price``. **Never reads broker cash or broker
+equity**, so a deposit or a withdrawal cannot move it — a transfer is not a
+trading result (#9). With no positions it equals `allocated_capital`, never
+`None`.
+
 **`async daily_loss_pct(now: datetime) → Decimal`**
-`(opening_equity - current_equity) / opening_equity × 100`. Writes today's
-snapshot from the broker portfolio when the row is missing (rule 12).
+`(opening bot equity − bot_equity()) / allocated_capital × 100`; positive is a
+loss. **The denominator is `ALLOCATED_CAPITAL`**, not account equity — dividing
+by equity let a 5% limit permit a 10% loss of the allocation (#9). The baseline
+is `daily_snapshots.opening_equity` for the Moscow date of `now`, written at the
+session open by `app.loops`. With no row for the day, the baseline is
+reconstructed as `allocated_capital + realised P&L of every position closed
+before today` — deliberately tight, since overnight unrealised movement counts
+against today — and `telegram.notifier.alert` fires once per Moscow date.
+Raises `ValueError` on a naive `now`.
 
 **`async benchmark_return(start: date, end: date) → Decimal | None`**
 Equal-weight buy-and-hold over the watchlist. `None` if any constituent's

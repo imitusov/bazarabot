@@ -291,7 +291,7 @@ async def test_missing_snapshot_reconstructs_baseline_and_alerts_once(
         ),
     ]
     ctx.open = [_open_position()]
-    ctx.prices["BBG000000002"] = Decimal("97.5")  # 20 units * -2.5 = -500
+    ctx.prices["BBG000000002"] = Decimal("75")  # 20 units * -25 = -500
 
     # Baseline 100000 - 2000 = 98000; now 100000 - 3000 - 500 = 96500.
     assert await daily_loss_pct(NOW) == Decimal("1.5")
