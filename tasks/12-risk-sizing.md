@@ -59,8 +59,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - Rounding is always downward: a budget worth 2.9 lots returns 2 (proves the
   intended direction of error).
 - The returned lot count multiplied by lot size and price never exceeds
-  `MAX_POSITION_PCT` of allocated capital for any input (proves the ceiling is
-  structural).
+  `allocated − open_cost` for any input (proves the ceiling is structural, as a
+  property over the input space rather than an example).
+- Integer division truncates rather than dividing then rounding down. At the
+  default decimal context `8.999…9 / 3` evaluates to exactly `3`, so dividing
+  first would return three lots costing 9 against 8.999…9 of headroom — one lot
+  of real money above the ceiling the function exists to enforce.
 
 ## Expected output
 

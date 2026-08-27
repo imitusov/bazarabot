@@ -1,6 +1,6 @@
 # Zarabot — Business Brief
 
-**Version:** 1.9
+**Version:** 1.10
 **Date:** 2026-08-27
 **Status:** Ready for technical spec
 
@@ -99,7 +99,7 @@ touches production.
   │   │ RISK GATE        ├──────────────┐                │             │
   │   │ • trading halted?│              ▼                │             │
   │   │ • session open?  │   ┌────────────────────────┐  │             │
-  │   │ • position cap   │   │ Record rejection +     │  │             │
+  │   │ • exposure cap   │   │ Record rejection +     │  │             │
   │   │ • open positions │   │ reason. No order sent. │  │             │
   │   │ • re-entry wait  │   └────────────────────────┘  │             │
   │   │ • daily loss     │                               │             │
@@ -377,7 +377,7 @@ its chance to reach the target first, and so the order goes out while the market
 is liquid rather than at the open.
 
 **Exits are never blocked.** An exit order bypasses the risk gate entirely. The
-position cap, the re-entry cooldown, and an active kill-switch halt all apply to
+portfolio exposure ceiling, the re-entry cooldown, and an active kill-switch halt all apply to
 entries only. A risk limit must never be able to trap the bot inside a position
 it has decided to leave — a halt means stop making new bets, not stop defending
 the ones already placed.
@@ -530,7 +530,7 @@ the order is not sent.
 | Limit | Value | Purpose |
 |---|---|---|
 | Position size on entry | 10% of allocated capital | Every position is the same size, so per-strategy results are directly comparable and no single mistake is expensive. |
-| Maximum per position | 20% of allocated capital | Hard ceiling above the entry size, so a sizing or lot-arithmetic bug is caught before it can double an intended position. Enforced at order time only — a holding that grows past it through price appreciation is left alone rather than trimmed. |
+| Total portfolio exposure | 100% of allocated capital | The summed cost of open positions, plus any new order, stays within the allocation. Checked at order time, against holdings the bot did not necessarily open — an adopted position or a lowered allocation is exactly when it binds. Replaces the per-position cap, which could not bind. |
 | Exit rules: stop −5%, target +10%, max age 3 trading days | See *Position lifecycle* | Bound what any single position can lose and how long it can tie up capital. Exits are never blocked by any other limit on this table. |
 | Maximum concurrent open positions | 10 | Bounds total exposure. At 10% per entry this allows the full allocation to be deployed and nothing beyond it. |
 | Re-entry cooldown per instrument | 2 hours after closing | Prevents a strategy from looping on the same ticker. Constrains repetition without capping how much the bot may trade in a day. |
@@ -712,7 +712,7 @@ of its own behaviour.
   never coincides with an open order.
 - **Fail-fast configuration.** On startup the bot validates every required
   variable and refuses to start if any is missing, malformed, or contradictory —
-  for example a per-position cap and a maximum position count that together
+  for example an exposure ceiling and a maximum position count that together
   exceed the allocated capital. It never substitutes a default for a missing
   risk limit and never begins trading on assumed values. A refusal to start is
   loud, in the logs and — if Telegram credentials are among the valid ones — as a
@@ -742,7 +742,7 @@ of its own behaviour.
 | `TELEGRAM_CHAT_ID` | Yes | — | The single chat authorised to command the bot. All others are refused. |
 | `ALLOCATED_CAPITAL` | Yes | — | Capital the bot may deploy, in roubles. Every risk limit is a percentage of this. |
 | `POSITION_SIZE_PCT` | No | `10` | Size of each new position as a percentage of allocated capital. |
-| `MAX_POSITION_PCT` | No | `20` | Hard ceiling on any single position as a percentage of allocated capital. |
+| `CASH_RESERVE_PCT` | No | `1` | Slice of cash held back from every order so fees and rounding cannot make an approved order unaffordable. Bounded 0–50. Not an estimate of commission. |
 | `STOP_LOSS_PCT` | No | `5` | How far below entry price a position is closed automatically. |
 | `TAKE_PROFIT_PCT` | No | `10` | How far above entry price a position is closed automatically. |
 | `MAX_HOLDING_DAYS` | No | `3` | Trading days after which an open position is closed regardless of result. |
@@ -770,7 +770,7 @@ depends on the bot being profitable.
 2. It has placed **at least one real order on the live account** that filled, and
    the trade appears correctly in both the database and the broker's own records.
 3. Every risk limit has been **verified as enforced**: an order that would exceed
-   the per-position cap or the open-position count, or that would re-enter an
+   the exposure ceiling or the open-position count, or that would re-enter an
    instrument still inside its cooldown, is rejected and the rejection is
    recorded with its reason.
 4. The **kill switch has been triggered deliberately** in testing: the bot halted,

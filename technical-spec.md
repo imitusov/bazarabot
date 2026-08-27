@@ -1,8 +1,8 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.30
+**Version:** 1.31
 **Date:** 2026-08-18
-**Implements:** `business-brief.md` v1.9
+**Implements:** `business-brief.md` v1.10
 
 **Companion document.** Read the brief first. When this spec and the brief
 conflict, **the brief takes precedence**.
@@ -318,8 +318,8 @@ it proves.
 - A missing `TINVEST_TOKEN` raises `ConfigError` naming that variable (proves
   fail-fast and that the message identifies the offender).
 - `POSITION_SIZE_PCT` of 0 or above 100 raises `ConfigError` (boundary).
-- `POSITION_SIZE_PCT` above `MAX_POSITION_PCT` raises `ConfigError` (proves
-  cross-field validation, not just per-field).
+- `CASH_RESERVE_PCT` above 50 raises `ConfigError` (boundary — a reserve above
+  half of cash is a configuration error, not a preference).
 - `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeding 100 raises `ConfigError`
   (proves the allocation cannot be structurally over-committed).
 - `TAKE_PROFIT_PCT` less than or equal to `STOP_LOSS_PCT` raises `ConfigError`
@@ -625,8 +625,12 @@ Additionally, `strategies.ml_model`:
 - Rounding is always downward: a budget worth 2.9 lots returns 2 (proves the
   intended direction of error).
 - The returned lot count multiplied by lot size and price never exceeds
-  `MAX_POSITION_PCT` of allocated capital for any input (proves the ceiling is
-  structural).
+  `allocated − open_cost` for any input (proves the ceiling is structural, as a
+  property over the input space rather than an example).
+- Integer division truncates rather than dividing then rounding down. At the
+  default decimal context `8.999…9 / 3` evaluates to exactly `3`, so dividing
+  first would return three lots costing 9 against 8.999…9 of headroom — one lot
+  of real money above the ceiling the function exists to enforce.
 
 **`risk.gate`**
 - Open positions whose summed cost leaves less than one lot of headroom reject
@@ -1015,8 +1019,9 @@ Loads and validates every setting once at startup.
   control nobody can audit after the fact. `app.startup` raises the matching
   alert — see its own contract.
 - Raises `ConfigError` naming the offending variable when: a required variable is
-  missing or empty; a numeric value is out of range; `POSITION_SIZE_PCT` exceeds
-  `MAX_POSITION_PCT`; `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100;
+  missing or empty; a numeric value is out of range;
+  `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `CASH_RESERVE_PCT` is
+  outside 0–50;
   `TAKE_PROFIT_PCT` is not greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty;
   or `ML_MODEL_PATH` is set but unreadable.
 - Must never substitute a default for a missing **risk** variable.
@@ -1822,7 +1827,15 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
   `PORTFOLIO_EXPOSURE` → `ZERO_LOTS`.
 - `MAX_POSITIONS` applies at or above the configured maximum.
 - **`PORTFOLIO_EXPOSURE`** rejects when the summed cost of open positions leaves
-  less headroom than one lot: `allocated − open_cost < lot_cost`. The gate
+  less headroom than one lot: `allocated − open_cost < lot_cost`.
+  **It cannot bind on a portfolio the gate sized by itself**, and that is not a
+  defect. If every open position cost at most one budget and at most
+  `max_open_positions − 1` are open, the surviving configuration bound
+  `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT ≤ 100` guarantees headroom for another.
+  It binds on holdings the gate did not size: a position adopted by
+  `broker.reconcile` during crash recovery, or `ALLOCATED_CAPITAL` lowered
+  between runs. Those are precisely the runtime cases #16 names, and the ones a
+  configuration-time check cannot see. The gate
   computes `open_cost` from `state.positions`, which carry entry price, lots and
   lot size, so this stays pure and needs no new argument. Before v1.30 the only
   exposure controls were the duplicate-ticker check and a position count, so
@@ -1836,7 +1849,15 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
   on the current four-instrument watchlist, four distinct sectors, it would bind
   on nothing. It becomes required before the watchlist holds two names in one
   sector, and this paragraph is the reminder.
-- Rejects any signal whose side is `SELL`. Exits never pass through this module.
+- Rejects any signal whose side is `SELL`, with `ZERO_LOTS`, evaluated in that
+  reason's slot rather than earlier — so the side of a signal cannot change which
+  reason is recorded for a state where several apply. Exits never pass through
+  this module.
+- A rejection caused by the **cash reserve** rather than by raw cash surfaces as
+  `ZERO_LOTS`, not `INSUFFICIENT_CASH`: `INSUFFICIENT_CASH` is defined on cash
+  before the reserve is applied. The distinction is deliberate but makes a
+  near-miss on funds read as a sizing result in the rejection statistics, which
+  is worth knowing when reading them.
 - Must never perform I/O, and must never mutate `state`.
 
 ### `zarabot/lifecycle/exits.py`
@@ -2028,7 +2049,11 @@ realised P&L slightly and permanently wrong.
 already halted, so a `DAILY_LOSS_LIMIT` breach arriving during a `MANUAL` halt
 was discarded — the more serious reason and its detail lost. A halt reason of
 strictly greater severity must replace a weaker one and re-alert;
-`DAILY_LOSS_LIMIT` outranks `MANUAL` and `RECONCILIATION_MISMATCH`. Re-halting
+`DAILY_LOSS_LIMIT` outranks `MANUAL` and `RECONCILIATION_MISMATCH`. **`halted_at`
+keeps its original value across an upgrade**: trading has been suspended
+continuously since the first halt, and moving the timestamp forward would assert
+it was live in between. The moment the more severe condition arrived reaches the
+owner in the alert. Re-halting
 for a reason already recorded stays a no-op, so this adds no alert noise.
 
 **`async benchmark_return(start: date, end: date) → Decimal | None`**

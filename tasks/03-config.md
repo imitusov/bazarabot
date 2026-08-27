@@ -48,8 +48,9 @@ Loads and validates every setting once at startup.
   control nobody can audit after the fact. `app.startup` raises the matching
   alert — see its own contract.
 - Raises `ConfigError` naming the offending variable when: a required variable is
-  missing or empty; a numeric value is out of range; `POSITION_SIZE_PCT` exceeds
-  `MAX_POSITION_PCT`; `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100;
+  missing or empty; a numeric value is out of range;
+  `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `CASH_RESERVE_PCT` is
+  outside 0–50;
   `TAKE_PROFIT_PCT` is not greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty;
   or `ML_MODEL_PATH` is set but unreadable.
 - Must never substitute a default for a missing **risk** variable.
@@ -91,8 +92,8 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A missing `TINVEST_TOKEN` raises `ConfigError` naming that variable (proves
   fail-fast and that the message identifies the offender).
 - `POSITION_SIZE_PCT` of 0 or above 100 raises `ConfigError` (boundary).
-- `POSITION_SIZE_PCT` above `MAX_POSITION_PCT` raises `ConfigError` (proves
-  cross-field validation, not just per-field).
+- `CASH_RESERVE_PCT` above 50 raises `ConfigError` (boundary — a reserve above
+  half of cash is a configuration error, not a preference).
 - `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeding 100 raises `ConfigError`
   (proves the allocation cannot be structurally over-committed).
 - `TAKE_PROFIT_PCT` less than or equal to `STOP_LOSS_PCT` raises `ConfigError`

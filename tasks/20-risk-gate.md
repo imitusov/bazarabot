@@ -26,7 +26,15 @@ Module **20** of 40 in `dependency-order.md`. Everything before it is complete a
   `PORTFOLIO_EXPOSURE` → `ZERO_LOTS`.
 - `MAX_POSITIONS` applies at or above the configured maximum.
 - **`PORTFOLIO_EXPOSURE`** rejects when the summed cost of open positions leaves
-  less headroom than one lot: `allocated − open_cost < lot_cost`. The gate
+  less headroom than one lot: `allocated − open_cost < lot_cost`.
+  **It cannot bind on a portfolio the gate sized by itself**, and that is not a
+  defect. If every open position cost at most one budget and at most
+  `max_open_positions − 1` are open, the surviving configuration bound
+  `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT ≤ 100` guarantees headroom for another.
+  It binds on holdings the gate did not size: a position adopted by
+  `broker.reconcile` during crash recovery, or `ALLOCATED_CAPITAL` lowered
+  between runs. Those are precisely the runtime cases #16 names, and the ones a
+  configuration-time check cannot see. The gate
   computes `open_cost` from `state.positions`, which carry entry price, lots and
   lot size, so this stays pure and needs no new argument. Before v1.30 the only
   exposure controls were the duplicate-ticker check and a position count, so
@@ -40,7 +48,15 @@ Module **20** of 40 in `dependency-order.md`. Everything before it is complete a
   on the current four-instrument watchlist, four distinct sectors, it would bind
   on nothing. It becomes required before the watchlist holds two names in one
   sector, and this paragraph is the reminder.
-- Rejects any signal whose side is `SELL`. Exits never pass through this module.
+- Rejects any signal whose side is `SELL`, with `ZERO_LOTS`, evaluated in that
+  reason's slot rather than earlier — so the side of a signal cannot change which
+  reason is recorded for a state where several apply. Exits never pass through
+  this module.
+- A rejection caused by the **cash reserve** rather than by raw cash surfaces as
+  `ZERO_LOTS`, not `INSUFFICIENT_CASH`: `INSUFFICIENT_CASH` is defined on cash
+  before the reserve is applied. The distinction is deliberate but makes a
+  near-miss on funds read as a sizing result in the rejection statistics, which
+  is worth knowing when reading them.
 - Must never perform I/O, and must never mutate `state`.
 
 ## Test cases

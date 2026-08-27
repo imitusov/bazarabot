@@ -111,7 +111,11 @@ realised P&L slightly and permanently wrong.
 already halted, so a `DAILY_LOSS_LIMIT` breach arriving during a `MANUAL` halt
 was discarded — the more serious reason and its detail lost. A halt reason of
 strictly greater severity must replace a weaker one and re-alert;
-`DAILY_LOSS_LIMIT` outranks `MANUAL` and `RECONCILIATION_MISMATCH`. Re-halting
+`DAILY_LOSS_LIMIT` outranks `MANUAL` and `RECONCILIATION_MISMATCH`. **`halted_at`
+keeps its original value across an upgrade**: trading has been suspended
+continuously since the first halt, and moving the timestamp forward would assert
+it was live in between. The moment the more severe condition arrived reaches the
+owner in the alert. Re-halting
 for a reason already recorded stays a no-op, so this adds no alert noise.
 
 **`async benchmark_return(start: date, end: date) → Decimal | None`**
