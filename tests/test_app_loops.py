@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -17,7 +17,9 @@ from zarabot.broker.client import (
     OrderRejected,
     PriceRejected,
 )
+from zarabot.clock import moscow_date
 from zarabot.config import Config
+from zarabot.db.snapshots import DailySnapshot
 from zarabot.execution.orders import ExitFailed
 from zarabot.models import (
     Candle,
@@ -45,6 +47,10 @@ SESSION = SessionInfo(
     end=datetime(2026, 3, 16, 15, 50, tzinfo=UTC),
     is_trading_day=True,
 )
+# Before the session opens: a process running from here is present at the open.
+PRE_OPEN = datetime(2026, 3, 16, 6, 0, tzinfo=UTC)
+# Well after the open: a process whose first cycle lands here missed it.
+LATE = datetime(2026, 3, 16, 11, 0, tzinfo=UTC)
 
 
 def _config() -> Config:
@@ -248,6 +254,51 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     loops._cache_exhausted_alerted = False
     loops._price_rejected_alerted = False
     loops._refreshed_on = None
+    loops._snapshot_on = None
+    loops._first_cycle_at = None
+    loops._loss_unmeasurable_alerted = False
+
+
+def _snapshot(opening: Decimal) -> DailySnapshot:
+    return DailySnapshot(
+        trade_date=moscow_date(NOW),
+        opening_equity=opening,
+        closing_equity=None,
+        cash=opening,
+        realised_pnl=Decimal(0),
+        unrealised_pnl=Decimal(0),
+        open_positions=0,
+        orders_placed=0,
+        benchmark_value=None,
+    )
+
+
+def _patch_pnl(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    equity: Decimal | Exception = Decimal("100000"),
+    rows: list[DailySnapshot] | None = None,
+    written: list[DailySnapshot] | None = None,
+) -> None:
+    """Patch the P&L collaborators step 4 uses. `pnl` and `db.snapshots` are
+    other modules' code; this module is under test, not theirs."""
+    import zarabot.app.loops as loops
+
+    async def _equity() -> Decimal:
+        if isinstance(equity, Exception):
+            raise equity
+        return equity
+
+    async def _rows(start: date, end: date) -> list[DailySnapshot]:
+        return list(rows or [])
+
+    async def _write(snapshot: DailySnapshot) -> None:
+        if written is not None:
+            written.append(snapshot)
+
+    monkeypatch.setattr(loops, "bot_equity", _equity)
+    monkeypatch.setattr(loops, "list_for_period", _rows)
+    monkeypatch.setattr(loops, "write_daily", _write)
 
 
 async def test_session_closed_makes_no_market_data_call(
@@ -917,9 +968,15 @@ async def test_exit_failure_is_retried_next_cycle(
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
 
 
-async def test_rollover_backfills_after_daily_loss(
+async def test_rollover_backfills_without_reading_the_daily_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """`daily_loss_pct` no longer writes, so calling it here bought nothing.
+
+    It reads the day's opening snapshot; at rollover there is none yet, so the
+    call would only fire `pnl`'s reconstruction alert. The snapshot is written
+    by the first cycle of the session, in `trading_cycle` step 4.
+    """
     from zarabot.app.loops import run
 
     calls: list[str] = []
@@ -961,9 +1018,8 @@ async def test_rollover_backfills_after_daily_loss(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert "rollover_loss" in calls
     assert "backfill" in calls
-    assert calls.index("rollover_loss") < calls.index("backfill")
+    assert "rollover_loss" not in calls
     assert windows
     assert windows[0] == (NOW - timedelta(days=7), NOW)
 
@@ -1328,3 +1384,259 @@ async def test_live_stop_keyed_only_by_broker_id_is_not_reported_missing(
 
     assert booked == []
     assert [a for a in alerts if "no confirmed execution" in a] == []
+
+
+# ---------------------------------------------------------------------------
+# #9: the day's opening snapshot, and what happens when the loss cannot be
+# measured. `pnl.daily_loss_pct` reads the baseline and writes nothing, so
+# step 4 of the cycle owns the write.
+# ---------------------------------------------------------------------------
+
+
+async def test_first_cycle_of_the_session_writes_the_opening_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The baseline is the session open, not whenever the process first asked."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    written: list[DailySnapshot] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    clock = {"now": PRE_OPEN}
+    monkeypatch.setattr(loops, "now", lambda: clock["now"])
+    monkeypatch.setattr(
+        loops,
+        "is_open",
+        lambda moment: SESSION.start is not None and moment >= SESSION.start,
+    )
+    _patch_pnl(monkeypatch, equity=Decimal("101234.50"), rows=[], written=written)
+
+    # Running before the open: the session guard returns, nothing is written.
+    await trading_cycle(_ctx())
+    assert written == []
+
+    clock["now"] = NOW
+    await trading_cycle(_ctx())
+
+    assert len(written) == 1
+    snapshot = written[0]
+    assert snapshot.trade_date == moscow_date(NOW)
+    assert snapshot.opening_equity == Decimal("101234.50")
+    assert snapshot.closing_equity is None
+    assert "daily_loss" in calls
+
+    # Every later cycle of the same day measures against that row.
+    clock["now"] = NOW + timedelta(minutes=5)
+    await trading_cycle(_ctx())
+    assert len(written) == 1
+
+
+async def test_restart_later_the_same_day_does_not_overwrite_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row written this morning is the baseline; a restart must not move it."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    written: list[DailySnapshot] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    clock = {"now": PRE_OPEN}
+    monkeypatch.setattr(loops, "now", lambda: clock["now"])
+    monkeypatch.setattr(
+        loops,
+        "is_open",
+        lambda moment: SESSION.start is not None and moment >= SESSION.start,
+    )
+    _patch_pnl(
+        monkeypatch,
+        equity=Decimal("90000"),
+        rows=[_snapshot(Decimal("99000"))],
+        written=written,
+    )
+
+    await trading_cycle(_ctx())
+    clock["now"] = NOW
+    await trading_cycle(_ctx())
+
+    assert written == []
+    assert "daily_loss" in calls
+
+
+async def test_process_that_missed_the_open_writes_no_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its equity now is not the session open, so `pnl` reconstructs instead.
+
+    Writing here would seed the baseline at 11:00 and make the morning's
+    drawdown structurally invisible — the defect #9 named.
+    """
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    written: list[DailySnapshot] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    monkeypatch.setattr(loops, "now", lambda: LATE)
+    _patch_pnl(monkeypatch, equity=Decimal("90000"), rows=[], written=written)
+
+    await trading_cycle(_ctx())
+
+    assert written == []
+    assert "daily_loss" in calls
+
+
+async def test_price_rejected_in_pnl_skips_entries_alerts_once_and_no_halt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unmarkable position makes the day's loss unknowable, not imprecise."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    halted: list[HaltReason] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _loss(moment: datetime) -> Decimal:
+        calls.append("daily_loss")
+        raise PriceRejected("unusable")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    async def _do_halt(reason: HaltReason, detail: str, at: datetime) -> None:
+        halted.append(reason)
+
+    _patch_pnl(monkeypatch)
+    monkeypatch.setattr(loops, "daily_loss_pct", _loss)
+    monkeypatch.setattr(loops, "alert", _alert)
+    monkeypatch.setattr(loops, "halt", _do_halt)
+    loops._market_failures = 0
+    loops._market_alerted = False
+
+    await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+
+    assert halted == []
+    assert "candles" not in calls
+    assert len(alerts) == 1
+    assert loops._market_failures == 0
+
+
+async def test_broker_unavailable_in_pnl_skips_entries_without_halting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A halt would outlive a condition that is usually momentary."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    halted: list[HaltReason] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _loss(moment: datetime) -> Decimal:
+        calls.append("daily_loss")
+        raise BrokerUnavailable("down")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    async def _do_halt(reason: HaltReason, detail: str, at: datetime) -> None:
+        halted.append(reason)
+
+    _patch_pnl(monkeypatch)
+    monkeypatch.setattr(loops, "daily_loss_pct", _loss)
+    monkeypatch.setattr(loops, "alert", _alert)
+    monkeypatch.setattr(loops, "halt", _do_halt)
+
+    await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+
+    assert halted == []
+    assert "candles" not in calls
+    assert len(alerts) == 1
+
+
+async def test_unmeasurable_loss_alerts_once_until_a_clean_cycle_rearms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The latch every alert in this module keeps: a muted bot is unmonitored."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    failing = True
+
+    async def _loss(moment: datetime) -> Decimal:
+        if failing:
+            raise PriceRejected("unusable")
+        return Decimal("0")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    _patch_pnl(monkeypatch)
+    monkeypatch.setattr(loops, "daily_loss_pct", _loss)
+    monkeypatch.setattr(loops, "alert", _alert)
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1
+    failing = False
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1
+    failing = True
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 2
+
+
+async def test_unmarkable_equity_writes_no_opening_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A baseline the broker could not price is worse than no baseline."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    written: list[DailySnapshot] = []
+    alerts: list[str] = []
+    halted: list[HaltReason] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    clock = {"now": PRE_OPEN}
+    monkeypatch.setattr(loops, "now", lambda: clock["now"])
+    monkeypatch.setattr(
+        loops,
+        "is_open",
+        lambda moment: SESSION.start is not None and moment >= SESSION.start,
+    )
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    async def _do_halt(reason: HaltReason, detail: str, at: datetime) -> None:
+        halted.append(reason)
+
+    _patch_pnl(
+        monkeypatch, equity=PriceRejected("unusable"), rows=[], written=written
+    )
+    monkeypatch.setattr(loops, "alert", _alert)
+    monkeypatch.setattr(loops, "halt", _do_halt)
+
+    await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+    clock["now"] = NOW
+    await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+
+    assert written == []
+    assert halted == []
+    assert "daily_loss" not in calls
+    assert "candles" not in calls
+    assert len(alerts) == 1
