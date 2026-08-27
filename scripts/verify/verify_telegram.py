@@ -18,7 +18,7 @@ from _harness import Verifier, env  # noqa: E402
 
 BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", secret=True)
 CHAT_ID = env("TELEGRAM_CHAT_ID")
-WAIT_SECONDS = 45
+WAIT_SECONDS = 120
 
 v = Verifier("V8", "Telegram transport")
 
@@ -45,8 +45,10 @@ try:
             "the truncation contract assumes this is the ceiling")
 
     api("sendMessage", {"chat_id": CHAT_ID,
-                        "text": "Reply with /status within {}s to finish V8.".format(
-                            WAIT_SECONDS)})
+                        "text": "V8 is listening now — reply /status within {}s. "
+                                "A command sent before this message may already "
+                                "have been consumed by another poller.".format(
+                                    WAIT_SECONDS)})
     v.note("waiting up to {}s for a command from chat {}".format(WAIT_SECONDS, CHAT_ID))
 
     deadline = time.time() + WAIT_SECONDS
