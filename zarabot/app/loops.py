@@ -26,6 +26,7 @@ from zarabot.clock import moscow_date, now, to_moscow, trading_days_between
 from zarabot.db.cooldowns import is_active
 from zarabot.db.positions import list_open
 from zarabot.db.signals import record
+from zarabot.db.snapshots import DailySnapshot, list_for_period, write_daily
 from zarabot.db.stop_orders import active_for_position
 from zarabot.execution.orders import (
     ExitFailed,
@@ -47,7 +48,7 @@ from zarabot.models import (
 from zarabot.ops.backup import prune
 from zarabot.ops.backup import run as backup_run
 from zarabot.ops.commissions import backfill
-from zarabot.pnl import daily_loss_pct
+from zarabot.pnl import bot_equity, daily_loss_pct
 from zarabot.reporter.weekly import send as send_report
 from zarabot.risk.gate import check
 from zarabot.state.halt import halt, is_halted
@@ -64,7 +65,10 @@ _market_failures = 0
 _market_alerted = False
 _price_rejected_alerted = False
 _stop_discrepancy_alerted = False
+_loss_unmeasurable_alerted = False
 _started_at: datetime | None = None
+_first_cycle_at: datetime | None = None
+_snapshot_on: date | None = None
 _rolled_on: date | None = None
 _backed_up_on: date | None = None
 _heartbeat_on: date | None = None
@@ -228,13 +232,82 @@ async def _submit_exits(
             _LOG.exception("exit failed for %s trigger=%s", position.ticker, trigger)
 
 
-async def _maybe_halt_on_loss(ctx: AppContext, moment: datetime) -> None:
-    loss = await daily_loss_pct(moment)
-    if loss < ctx.config.daily_loss_limit_pct:
+async def _write_opening_snapshot(moment: datetime, open_count: int) -> None:
+    """Record the session-open bot equity, once per Moscow day.
+
+    `pnl.daily_loss_pct` reads this row and writes nothing, so the baseline is
+    whatever is written here. Writing it on the first cycle of a session is what
+    makes it the session open rather than whenever the process first happened to
+    ask: a bot restarted at 14:00 finds this morning's row and measures the whole
+    day, instead of seeding a baseline at 14:00 and being structurally blind to
+    the morning's drawdown (#9).
+
+    Two guards keep that promise. An existing row is never overwritten. And a
+    process that was not yet running when the session opened writes nothing at
+    all — the equity it can measure now is not the open, so `pnl` reconstructs
+    the baseline from realised P&L and alerts, which is deliberately tighter.
+    """
+    global _snapshot_on
+    today = moscow_date(moment)
+    if _snapshot_on == today:
         return
-    detail = f"daily loss {loss}% reached limit {ctx.config.daily_loss_limit_pct}%"
-    await halt(HaltReason.DAILY_LOSS_LIMIT, detail, moment)
-    await alert(detail)
+    session = current_session(moment)
+    if session is None or session.start is None:
+        return
+    if _first_cycle_at is None or _first_cycle_at > session.start:
+        return
+    if await list_for_period(today, today):
+        _snapshot_on = today
+        return
+    equity = await bot_equity()
+    await write_daily(
+        DailySnapshot(
+            trade_date=today,
+            opening_equity=equity,
+            closing_equity=None,
+            cash=equity,
+            realised_pnl=Decimal(0),
+            unrealised_pnl=Decimal(0),
+            open_positions=open_count,
+            orders_placed=0,
+            benchmark_value=None,
+        )
+    )
+    _snapshot_on = today
+    _LOG.info("opening_snapshot trade_date=%s opening_equity=%s", today, equity)
+
+
+async def _measure_daily_loss(
+    ctx: AppContext, moment: datetime, open_count: int
+) -> bool:
+    """Step 4. `False` when the day's loss could not be measured.
+
+    `pnl.bot_equity` marks every open position to market, so one `PriceRejected`
+    or `BrokerUnavailable` makes the loss unknowable rather than merely
+    imprecise. Entries stop for that cycle and the owner is alerted, latched —
+    but the bot is not halted: the exits at step 3 have already run and must not
+    be blocked, and a halt would outlive a condition that is usually momentary.
+    """
+    global _loss_unmeasurable_alerted
+    try:
+        await _write_opening_snapshot(moment, open_count)
+        loss = await daily_loss_pct(moment)
+    except (PriceRejected, BrokerUnavailable) as exc:
+        _LOG.warning("daily loss unmeasurable (%s); entries skipped", exc)
+        if not _loss_unmeasurable_alerted:
+            _loss_unmeasurable_alerted = True
+            await alert(
+                "Daily loss could not be measured this cycle "
+                f"({type(exc).__name__}: {exc}); entries skipped. Exits still "
+                "run and trading is not halted."
+            )
+        return False
+    _loss_unmeasurable_alerted = False
+    if loss >= ctx.config.daily_loss_limit_pct:
+        detail = f"daily loss {loss}% reached limit {ctx.config.daily_loss_limit_pct}%"
+        await halt(HaltReason.DAILY_LOSS_LIMIT, detail, moment)
+        await alert(detail)
+    return True
 
 
 async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
@@ -284,8 +357,13 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
 
 async def trading_cycle(ctx: AppContext) -> None:
     """One iteration: session guard, exits, daily-loss halt, then entries."""
-    global _cache_exhausted_alerted
+    global _cache_exhausted_alerted, _first_cycle_at
     moment = now()
+    # Recorded before the session guard: a cycle that returns because the market
+    # is shut is still evidence this process was running before the open, which
+    # is what entitles it to write the day's opening snapshot at step 4.
+    if _first_cycle_at is None:
+        _first_cycle_at = moment
     if not is_open(moment):
         if cache_exhausted(moment):
             if not _cache_exhausted_alerted:
@@ -303,7 +381,8 @@ async def trading_cycle(ctx: AppContext) -> None:
         prices = await _prices_for(positions)
         executed = await _close_executed(positions)
         await _submit_exits(positions, prices, executed, moment, ctx)
-        await _maybe_halt_on_loss(ctx, moment)
+        if not await _measure_daily_loss(ctx, moment, len(positions)):
+            return
         if await is_halted():
             _note_data_success()
             return
@@ -329,7 +408,10 @@ async def _rollover_loop(ctx: AppContext) -> None:
         moment = now()
         day = moscow_date(moment)
         if is_open(moment) and _rolled_on != day:
-            await daily_loss_pct(moment)
+            # No daily_loss_pct here. It used to be called to force the lazy
+            # snapshot write; it now only reads the row, which at rollover does
+            # not exist yet, so the call would fire `pnl`'s reconstruction alert
+            # and nothing else. The row is written by trading_cycle step 4.
             await backfill(moment - _BACKFILL_LOOKBACK, moment)
             _rolled_on = day
         await asyncio.sleep(_poll_seconds(ctx))
