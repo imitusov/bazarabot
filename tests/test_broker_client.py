@@ -128,6 +128,66 @@ def _board(name: str, *, weekends_trade: bool, days: int) -> SimpleNamespace:
     return SimpleNamespace(exchange=name, days=entries)
 
 
+# Cash is a currency position in the portfolio. RUB is the only currency the
+# schema allows an instrument to trade in (migrations/001_initial.sql), so it is
+# the only one that is buying power.
+RUB_FIGI = "RUB000UTSTOM"
+USD_FIGI = "BBG0013HGFT4"
+
+
+def _currency_position(
+    figi: str, ticker: str, quantity: Decimal, blocked: Decimal = Decimal(0)
+) -> SimpleNamespace:
+    """`quantity` is the balance held, `blocked_lots` the part already reserved."""
+    return SimpleNamespace(
+        figi=figi,
+        ticker=ticker,
+        instrument_type="currency",
+        quantity=decimal_to_quotation(quantity),
+        quantity_lots=decimal_to_quotation(quantity),
+        # A currency position is priced in roubles whatever currency it holds,
+        # so the price's currency code does not identify it.
+        average_position_price=decimal_to_money(Decimal("1"), "rub"),
+        current_price=decimal_to_money(Decimal("1"), "rub"),
+        blocked=blocked > 0,
+        blocked_lots=decimal_to_quotation(blocked),
+    )
+
+
+def _share_position(
+    figi: str, ticker: str, lots: int, lot_size: int, entry: Decimal
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        figi=figi,
+        ticker=ticker,
+        instrument_type="share",
+        quantity=decimal_to_quotation(Decimal(lots * lot_size)),
+        quantity_lots=decimal_to_quotation(Decimal(lots)),
+        average_position_price=decimal_to_money(entry, "rub"),
+        current_price=decimal_to_money(entry, "rub"),
+        blocked=False,
+        blocked_lots=decimal_to_quotation(Decimal(0)),
+    )
+
+
+# 60000 RUB on the account, 10000 of it blocked by a standing order, plus 100
+# USD worth 80000 RUB. total_amount_currencies converts and sums all of it.
+PORTFOLIO_RUB = Decimal("60000")
+PORTFOLIO_RUB_BLOCKED = Decimal("10000")
+PORTFOLIO_AVAILABLE_RUB = PORTFOLIO_RUB - PORTFOLIO_RUB_BLOCKED
+PORTFOLIO_TOTAL_CURRENCIES = Decimal("140000")
+
+
+def _default_portfolio_positions() -> list[SimpleNamespace]:
+    return [
+        _currency_position(
+            RUB_FIGI, "RUB000UTSTOM", PORTFOLIO_RUB, PORTFOLIO_RUB_BLOCKED
+        ),
+        _currency_position(USD_FIGI, "USD000UTSTOM", Decimal("1000")),
+        _share_position("BBG000000001", "SBER", 3, 10, Decimal("250")),
+    ]
+
+
 class _Capture:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -142,6 +202,8 @@ class _Capture:
         self.last_price = Decimal("123.45")
         self.last_price_time: datetime | None = NOW
         self.schedule_override: list[SimpleNamespace] | None = None
+        self.portfolio_positions: list[SimpleNamespace] = _default_portfolio_positions()
+        self.portfolio_total_currencies = PORTFOLIO_TOTAL_CURRENCIES
 
     @property
     def target(self) -> str | None:
@@ -215,8 +277,10 @@ class _Services:
     async def get_portfolio(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_portfolio", kwargs)
         return SimpleNamespace(
-            total_amount_currencies=decimal_to_money(Decimal("50000"), "rub"),
-            positions=[],
+            total_amount_currencies=decimal_to_money(
+                self._capture.portfolio_total_currencies, "rub"
+            ),
+            positions=list(self._capture.portfolio_positions),
         )
 
     async def trading_schedules(self, **kwargs: Any) -> SimpleNamespace:
@@ -437,8 +501,82 @@ async def test_get_last_price_is_decimal(capture: _Capture) -> None:
 async def test_get_portfolio_returns_portfolio_state(capture: _Capture) -> None:
     state = await get_portfolio()
     assert isinstance(state, PortfolioState)
-    assert state.cash == Decimal("50000")
+    assert state.cash == PORTFOLIO_AVAILABLE_RUB
     assert isinstance(state.cash, Decimal)
+
+
+# --------------------------------------------------------------------------
+# #16 — cash is RUB buying power, never total_amount_currencies.
+# --------------------------------------------------------------------------
+
+
+async def test_get_portfolio_cash_is_available_rub_not_total_currencies(
+    capture: _Capture,
+) -> None:
+    """The discriminating case: the converted total dwarfs the spendable roubles.
+
+    `total_amount_currencies` sums every currency position converted to roubles,
+    blocked funds included, so an order sized against it is refused for
+    insufficient funds (#16).
+    """
+    state = await get_portfolio()
+    assert capture.portfolio_total_currencies > PORTFOLIO_AVAILABLE_RUB
+    assert state.cash == PORTFOLIO_AVAILABLE_RUB
+    assert state.cash != capture.portfolio_total_currencies
+
+
+async def test_get_portfolio_cash_excludes_blocked_rub(capture: _Capture) -> None:
+    """Where the response separates available from blocked, available wins."""
+    capture.portfolio_positions = [
+        _currency_position(RUB_FIGI, "RUB000UTSTOM", Decimal("60000"), Decimal("25000"))
+    ]
+    state = await get_portfolio()
+    assert state.cash == Decimal("35000")
+
+
+async def test_get_portfolio_cash_ignores_non_rub_currency_positions(
+    capture: _Capture,
+) -> None:
+    """A dollar balance is not rouble buying power, whatever it converts to."""
+    capture.portfolio_positions = [
+        _currency_position(USD_FIGI, "USD000UTSTOM", Decimal("1000")),
+        _currency_position(RUB_FIGI, "RUB000UTSTOM", Decimal("7000")),
+    ]
+    state = await get_portfolio()
+    assert state.cash == Decimal("7000")
+
+
+async def test_get_portfolio_without_a_rub_position_reports_no_cash(
+    capture: _Capture,
+) -> None:
+    """No rouble position means nothing to spend — never the converted total."""
+    capture.portfolio_positions = [
+        _currency_position(USD_FIGI, "USD000UTSTOM", Decimal("1000"))
+    ]
+    state = await get_portfolio()
+    assert state.cash == Decimal(0)
+
+
+async def test_get_portfolio_cash_is_never_negative(capture: _Capture) -> None:
+    """More blocked than held is not negative buying power, it is none."""
+    capture.portfolio_positions = [
+        _currency_position(RUB_FIGI, "RUB000UTSTOM", Decimal("1000"), Decimal("4000"))
+    ]
+    state = await get_portfolio()
+    assert state.cash == Decimal(0)
+
+
+async def test_get_portfolio_reports_share_holdings_not_currency_positions(
+    capture: _Capture,
+) -> None:
+    """Currency rows are cash; only instruments become positions."""
+    state = await get_portfolio()
+    assert [position.ticker for position in state.positions] == ["SBER"]
+    holding = state.positions[0]
+    assert holding.lots == 3
+    assert holding.lot_size == 10
+    assert holding.entry_price == Decimal("250")
+    assert holding.adopted is True
 
 
 async def test_get_trading_schedule_returns_session_info(capture: _Capture) -> None:
