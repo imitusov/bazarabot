@@ -784,6 +784,34 @@ async def test_max_lots_zero_records_rejection(env: _Broker) -> None:
     assert env.calls.count("post:BUY") == 0
 
 
+async def test_close_executed_stop_records_the_brokers_order_id(
+    env: _Broker,
+) -> None:
+    """The local row's key is a UUID this module invented; without the broker's
+    own id a late commission on it can never be re-queried (#8)."""
+    position = await open_position(_signal(), 2, _instrument())
+    fill = _stop_fill(price=Decimal("95"), commission=Decimal("0.4"), key="exch-77")
+    await close_executed_stop(position, fill)
+    closed = (await list_closed())[0]
+    assert closed.close_order_key is not None
+    order = await get_order(closed.close_order_key)
+    assert order is not None
+    assert order.broker_order_id == "exch-77"
+
+
+async def test_close_executed_stop_books_without_a_commission(
+    env: _Broker,
+) -> None:
+    """The commission is a correction, not the substance. Leaving the position
+    open would let reconciliation file a stop-out as EXTERNAL — the wrong
+    trigger, recorded permanently."""
+    position = await open_position(_signal(), 2, _instrument())
+    fill = _stop_fill(price=Decimal("95"), commission=None, key="exch-78")
+    closed = await close_executed_stop(position, fill)
+    assert closed.status == "CLOSED"
+    assert closed.exit_trigger is ExitTrigger.STOP_LOSS
+
+
 async def test_close_executed_stop_does_not_sell(env: _Broker) -> None:
     position = await open_position(_signal(), 2, _instrument())
     env.calls.clear()
@@ -1352,10 +1380,15 @@ def _stop_fill(
     price: Decimal | None,
     lots: int = 2,
     commission: Decimal | None = Decimal("1.25"),
+    key: str = "exch-1",
 ) -> OrderRecord:
-    """The broker's record of an exchange stop execution (spec §4, rule 33)."""
+    """The broker's record of an exchange stop execution (spec §4, rule 33).
+
+    `get_executed_stop_fills` keys these by the broker's `exchange_order_id`,
+    so `key` here is the broker's identifier, not one of ours.
+    """
     return OrderRecord(
-        key="exch-1",
+        key=key,
         ticker="SBER",
         figi="BBG000000001",
         side=Side.SELL,

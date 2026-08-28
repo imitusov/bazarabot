@@ -42,6 +42,7 @@ from zarabot.broker.client import (
     get_max_lots,
     get_operations,
     get_order_state,
+    get_order_state_by_broker_id,
     get_portfolio,
     get_trading_schedule,
     list_stop_orders,
@@ -661,6 +662,25 @@ async def test_list_stop_orders_returns_domain_records(capture: _Capture) -> Non
     assert records
     assert isinstance(records[0], StopOrderRecord)
     assert isinstance(records[0].stop_price, Decimal)
+
+
+async def test_get_order_state_by_broker_id_uses_the_exchange_lookup(
+    capture: _Capture,
+) -> None:
+    """A row filed under a key the broker never saw can only be found by the
+    broker's own identifier (#8)."""
+    record = await get_order_state_by_broker_id("exch-77")
+    called = [kwargs for name, kwargs in capture.calls if name == "get_order_state"]
+    assert called[-1]["order_id"] == "exch-77"
+    assert called[-1]["order_id_type"] is OrderIdType.ORDER_ID_TYPE_EXCHANGE
+    assert record.key == "exch-77"
+    assert record.commission is not None
+
+
+async def test_get_order_state_by_broker_id_not_found(capture: _Capture) -> None:
+    capture.fail = AioRequestError(StatusCode.NOT_FOUND, "no such order", None)
+    with pytest.raises(OrderNotFound):
+        await get_order_state_by_broker_id("exch-77")
 
 
 async def test_get_max_lots_returns_int(capture: _Capture) -> None:
