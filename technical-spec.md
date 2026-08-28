@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.40
+**Version:** 1.42
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -215,6 +215,7 @@ that inspection could not have falsified.
 | Lot sizes | SBER 1, **GAZP 10**, LKOH 1, MGNT 1 | Sizing is in lots; a wrong lot size is a wrong position size |
 | Price steps | SBER/GAZP 0.01, **LKOH/MGNT 0.50** | A stop price off-step is rejected by the exchange |
 | Candle depth | 456 daily candles available | Floor is 250; the longest lookback plus a margin |
+| **Trading schedule, past** | **Not obtainable.** Any `from_` before today's midnight is rejected with `INVALID_ARGUMENT` / **30003** | Measured 2026-08-28 against the live account across seven ranges — 14 days back, 7, 1, and every end date from midnight to +7d. Every one failed; only a range starting at today's midnight is served. This is why `MAX_AGE` cannot simply be given a backward window (#45) |
 | Longest legitimate candle gap | **6 calendar days** (2025-12-30 → 2026-01-05, the New Year closure) | Recurs annually; a continuity check below it fails on correct data |
 | Market-data rate limit | 200 requests / 60s | Measured headroom 400× the loop's 1.0 calls/min |
 | **`PostOrder` rate limit** | **2 / second** | The one limit close enough to matter; an exit loop slicing an order can reach it |
@@ -2053,6 +2054,14 @@ is the failure this cadence exists to prevent.
 - The cached schedule as a `TradingCalendar`, for callers that need to count
   trading days rather than ask whether a moment is inside a session. Empty
   calendar when the cache is empty; never `None`.
+- **It spans forwards only, and that is why `MAX_AGE` still cannot fire (#45).**
+  v1.41 proposed a second, backward fetch; it was implemented, deployed, and
+  aborted startup — the broker rejects *any* `from_` before today's midnight
+  with `INVALID_ARGUMENT` / 30003 (§2.1). It was reverted. The remaining
+  approach is to persist what each forward fetch already tells us: the window
+  fetched on day N covers days N through N+14, so the union of past fetches
+  covers the span any position can be open. That needs somewhere durable to put
+  it, which is a decision not yet taken.
 - Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
   minute** for data that changes at most daily and that this module already
   holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow

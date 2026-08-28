@@ -73,6 +73,14 @@ is the failure this cadence exists to prevent.
 - The cached schedule as a `TradingCalendar`, for callers that need to count
   trading days rather than ask whether a moment is inside a session. Empty
   calendar when the cache is empty; never `None`.
+- **It spans forwards only, and that is why `MAX_AGE` still cannot fire (#45).**
+  v1.41 proposed a second, backward fetch; it was implemented, deployed, and
+  aborted startup — the broker rejects *any* `from_` before today's midnight
+  with `INVALID_ARGUMENT` / 30003 (§2.1). It was reverted. The remaining
+  approach is to persist what each forward fetch already tells us: the window
+  fetched on day N covers days N through N+14, so the union of past fetches
+  covers the span any position can be open. That needs somewhere durable to put
+  it, which is a decision not yet taken.
 - Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
   minute** for data that changes at most daily and that this module already
   holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
