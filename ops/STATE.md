@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-28 · spec v1.39 · brief v1.11 · 19 open issues
+Updated: 2026-08-28 · spec v1.40 · brief v1.11 · 17 open issues
 
 ## What this is
 
@@ -264,6 +264,31 @@ rather than once per backfill run — daily, and again before every weekly repor
 forever. An alert that repeats forever is equivalent to no alert, in a channel
 whose whole premise is that silence means healthy.
 
+## The noise cluster — and the defect it uncovered
+
+#19, #24, #32 closed; #34 was already done and is now closed with the evidence
+rather than reimplemented. Two follow-ups filed rather than smuggled in: #46
+(instrument metadata caching — needs a new repository, and a real decision about
+whether `trading_status` is cacheable at all) and #45, below.
+
+**#45 is the find, and it is worse than anything in the cluster.** `MAX_AGE` can
+never fire. `get_trading_schedule` is anchored to the start of the current UTC
+day and runs *forward* — correct for `is_open`, and #39's own fix — but
+`trading_days_between` counts only dates present in the calendar, and every day
+between a position's entry and yesterday is before the window. Measured: **1
+counted against 7 actual.** With the shipped `MAX_HOLDING_DAYS=3` the trigger is
+unreachable.
+
+It survived because both sides of the seam are individually correct and
+individually tested. `lifecycle.exits` is pure and receives `trading_days_open`
+as an argument, so its tests pass the number directly and prove the *rule*.
+`clock.trading_days_between` is tested with a calendar built to span the range
+being asked about. Neither test asks the question the wiring asks: *does the
+calendar `app.loops` actually holds contain those days?* **A test that
+constructs its own fixture cannot discover that production builds a different
+one.** That is a sixth failure class, and it is the one that hid an exit trigger
+that has never worked.
+
 ## Failure classes that keep recurring
 
 Recorded because they will happen again, and three of them were mine.
@@ -284,6 +309,12 @@ Recorded because they will happen again, and three of them were mine.
 5. **Defensive fallbacks that convert a loud failure into a silent one.** #33:
    probing for a field that does not exist turns a rename into total rejection
    with a plausible-sounding message instead of an `AttributeError`.
+6. **A test that builds its own fixture cannot see that production builds a
+   different one.** #45: `trading_days_between` is tested against a calendar
+   spanning the query, and the calendar production hands it spans the opposite
+   direction. Both sides pass, the seam is broken, and no gate looks at seams.
+   The check is to construct the fixture *the way the caller constructs it*, or
+   to assert on the caller's output rather than the callee's.
 
 ## Validation earns its place
 
