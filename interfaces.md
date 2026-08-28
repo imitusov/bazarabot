@@ -507,7 +507,7 @@ sector or correlation cap is deliberately absent — see the spec.
 
 Pure. No I/O. 95% coverage required. Never consults halt.
 
-**`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int, config: Config) → ExitTrigger | None`**
+**`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int | None, config: Config) → ExitTrigger | None`**
 `STOP_LOSS` iff `price ≤ stop_price` and `stop_protection is LOCAL`.
 `TAKE_PROFIT` iff `price ≥ target_price`. `MAX_AGE` iff
 `trading_days_open >= max_holding_days` and `session.in_closing_window(now)`.
@@ -1034,7 +1034,10 @@ market-data outage counter. Rejections latch like the other alerts in this
 module: one alert when a cycle first rejects anything, naming the count, and
 none until a cycle rejects nothing and re-arms it.
 The calendar for max-age comes from `market.session.calendar()`; this module
-never fetches a trading schedule (#19). A ticker already opened earlier in the
+never fetches a trading schedule (#19). A position whose entry
+`market.session.covers` does not reach is evaluated with
+`trading_days_open=None`, suppressing MAX_AGE for it alone, with a latched
+alert (#45). A ticker already opened earlier in the
 same pass is skipped before the gate and recorded `DUPLICATE_TICKER`, and
 `OrderRejected`, `PositionStateError` and `DuplicateOrderError` from
 `open_position` are all ordinary outcomes that continue the pass (#24).

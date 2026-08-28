@@ -40,6 +40,7 @@ from zarabot.market.data import candles_for_watchlist
 from zarabot.market.session import (
     cache_exhausted,
     calendar,
+    covers,
     current_session,
     is_open,
     refresh,
@@ -51,6 +52,7 @@ from zarabot.models import (
     RejectionReason,
     RiskDecision,
     StopProtection,
+    TradingCalendar,
 )
 from zarabot.ops.backup import prune
 from zarabot.ops.backup import run as backup_run
@@ -73,6 +75,7 @@ _market_alerted = False
 _price_rejected_alerted = False
 _stop_discrepancy_alerted = False
 _loss_unmeasurable_alerted = False
+_age_unmeasurable_alerted = False
 _started_at: datetime | None = None
 _first_cycle_at: datetime | None = None
 _snapshot_on: date | None = None
@@ -204,6 +207,29 @@ async def _close_executed(positions: list[Position]) -> set[int]:
     return closed
 
 
+async def _age_in_trading_days(
+    position: Position, moment: datetime, cal: TradingCalendar
+) -> int | None:
+    """Trading days open, or None when the recorded calendar cannot reach back.
+
+    A count taken against a calendar that does not span the entry comes back
+    short, which reads as a young position and silently suppresses MAX_AGE —
+    that was #45. `None` says so instead, and `lifecycle.exits` then leaves the
+    age trigger alone while stop and target carry on.
+    """
+    global _age_unmeasurable_alerted
+    if not covers(moscow_date(position.entry_at)):
+        if not _age_unmeasurable_alerted:
+            _age_unmeasurable_alerted = True
+            await alert(
+                f"age unmeasurable for {position.ticker}: the recorded trading "
+                "calendar does not reach its entry, so MAX_AGE is suspended for "
+                "it. Stop-loss and take-profit are unaffected."
+            )
+        return None
+    return trading_days_between(position.entry_at, moment, cal)
+
+
 async def _submit_exits(
     positions: list[Position],
     prices: dict[str, Decimal],
@@ -226,7 +252,7 @@ async def _submit_exits(
         price = prices.get(position.ticker)
         if price is None:
             continue
-        days = trading_days_between(position.entry_at, moment, calendar_now)
+        days = await _age_in_trading_days(position, moment, calendar_now)
         trigger = evaluate(position, price, moment, session, days, ctx.config)
         if trigger is None:
             continue
