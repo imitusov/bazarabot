@@ -18,6 +18,7 @@ from zarabot.broker.client import (
     OrderNotFound,
     OrderRejected,
     StopOrderRejected,
+    cancel_order,
     cancel_stop_order,
     get_instrument,
     get_max_lots,
@@ -32,7 +33,12 @@ from zarabot.db.cooldowns import start as start_cooldown
 from zarabot.db.orders import OrderStateError, record_submitting
 from zarabot.db.orders import list_unresolved as list_unresolved_orders
 from zarabot.db.orders import settle as settle_order
-from zarabot.db.positions import PositionStateError, list_open, set_stop_protection
+from zarabot.db.positions import (
+    PositionStateError,
+    list_open,
+    set_stop_protection,
+    update_lots,
+)
 from zarabot.db.positions import close as close_row
 from zarabot.db.positions import get as get_position
 from zarabot.db.positions import open as open_row
@@ -127,6 +133,43 @@ async def _signal_for_recovered_entry(order: OrderRecord, moment: datetime) -> S
         side=Side.BUY,
         generated_at=moment,
         reference_price=price,
+    )
+
+
+async def _resolve_partial_entry(key: str) -> OrderRecord | None:
+    """Abandon a partial entry's remainder and settle from the broker's re-read.
+
+    A `SUBMITTED` entry with lots filled is a live order holding shares we have
+    no position row and no stop against. The remainder is abandoned — the
+    strategy's entry price is stale by then — but abandoning it means cancelling
+    it. What gets written down comes from the `get_order_state` that follows,
+    never from the pre-cancel response, which was already stale when it arrived
+    (rule 33/34).
+
+    Returns `None` when the broker's own record is not in hand, having written
+    nothing: the order stays unresolved and the next cycle repeats this.
+    """
+    try:
+        await cancel_order(key)
+        state = await get_order_state(key)
+    except (OrderNotFound, BrokerUnavailable, BrokerRateLimited):
+        return None
+    filled = state.filled_lots if state.filled_lots is not None else 0
+    if filled <= 0 or state.filled_price is None:
+        return await _write(
+            settle_order(
+                key, OrderStatus.CANCELLED, 0, None, state.commission, "cancelled"
+            )
+        )
+    return await _write(
+        settle_order(
+            key,
+            OrderStatus.FILLED,
+            filled,
+            state.filled_price,
+            state.commission,
+            state.broker_reason,
+        )
     )
 
 
@@ -291,6 +334,18 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
             raise
         filled_lots = posted.filled_lots if posted.filled_lots is not None else 0
         fill_price = posted.filled_price
+        if posted.status is OrderStatus.SUBMITTED and filled_lots > 0:
+            settled = await _resolve_partial_entry(key)
+            if settled is None:
+                raise BrokerUnavailable("entry partial fill unresolved")
+            got = settled.filled_lots if settled.filled_lots is not None else 0
+            if got <= 0 or settled.filled_price is None:
+                raise OrderRejected("entry cancelled with nothing filled")
+            await alert(f"partial entry fill for {signal.ticker}: {got} of {lots}")
+            return await _open_from_fill(signal, settled, instrument)
+        # A SUBMITTED order that has filled nothing is left alone. Nothing is
+        # held, so nothing is unprotected, and cancelling a market order that is
+        # merely pending would turn every slow fill into a missed entry.
         if (
             posted.status is not OrderStatus.FILLED
             or filled_lots <= 0
@@ -307,10 +362,6 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
                 posted.broker_reason,
             )
         )
-        if filled_lots < lots:
-            await alert(
-                f"partial entry fill for {signal.ticker}: {filled_lots} of {lots}"
-            )
         return await _open_from_fill(signal, settled, instrument)
 
 
@@ -339,47 +390,46 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
             raise ValueError("STOP_LOSS on EXCHANGE is closed from the exchange fill")
         if current.stop_protection is StopProtection.EXCHANGE:
             current = await _cancel_stop_to_local(current)
-        remaining = current.lots
-        last_order: OrderRecord | None = None
-        while remaining > 0:
-            key = str(uuid4())
+        # Exactly one sell order, for the whole position. Until v1.34 this
+        # looped until flat and then booked the close from the last slice
+        # alone, dropping every earlier slice's price and commission from
+        # realised P&L with nothing capping how many orders it could submit
+        # (#10). A partial settles nothing now, so there is no second slice.
+        key = str(uuid4())
+        await _write(
+            record_submitting(
+                key, current.ticker, Side.SELL, current.lots, "EXIT", trigger
+            )
+        )
+        try:
+            posted = await post_market_order(key, current.figi, Side.SELL, current.lots)
+        except OrderRejected as exc:
             await _write(
-                record_submitting(
-                    key, current.ticker, Side.SELL, remaining, "EXIT", trigger
-                )
+                settle_order(key, OrderStatus.REJECTED, 0, None, None, exc.reason)
             )
-            try:
-                posted = await post_market_order(
-                    key, current.figi, Side.SELL, remaining
-                )
-            except OrderRejected as exc:
-                await _write(
-                    settle_order(key, OrderStatus.REJECTED, 0, None, None, exc.reason)
-                )
-                await alert(f"exit rejected for {current.ticker}: {exc.reason}")
-                raise ExitFailed(exc.reason) from exc
-            except (BrokerUnavailable, BrokerRateLimited) as exc:
-                await alert(f"exit unreachable for {current.ticker}: {exc}")
-                raise ExitFailed(str(exc)) from exc
-            filled = posted.filled_lots if posted.filled_lots is not None else 0
-            price = posted.filled_price
-            if posted.status is not OrderStatus.FILLED or filled <= 0 or price is None:
-                await alert(f"exit outcome unknown for {current.ticker}")
-                raise ExitFailed("exit outcome unknown")
-            last_order = await _write(
-                settle_order(
-                    key,
-                    OrderStatus.FILLED,
-                    filled,
-                    price,
-                    posted.commission,
-                    posted.broker_reason,
-                )
+            await alert(f"exit rejected for {current.ticker}: {exc.reason}")
+            raise ExitFailed(exc.reason) from exc
+        except (BrokerUnavailable, BrokerRateLimited) as exc:
+            await alert(f"exit unreachable for {current.ticker}: {exc}")
+            raise ExitFailed(str(exc)) from exc
+        filled = posted.filled_lots if posted.filled_lots is not None else 0
+        price = posted.filled_price
+        if posted.status is not OrderStatus.FILLED or filled <= 0 or price is None:
+            # The remainder of an exit is never abandoned: the caller retries on
+            # the next cycle under rule 4.
+            await alert(f"exit outcome unknown for {current.ticker}")
+            raise ExitFailed("exit outcome unknown")
+        order = await _write(
+            settle_order(
+                key,
+                OrderStatus.FILLED,
+                filled,
+                price,
+                posted.commission,
+                posted.broker_reason,
             )
-            remaining -= filled
-        if last_order is None:  # pragma: no cover
-            raise ExitFailed("no exit fill")
-        return await _finish_close(current, last_order, trigger, clock_now())
+        )
+        return await _finish_close(current, order, trigger, clock_now())
 
 
 async def close_executed_stop(position: Position, fill: OrderRecord) -> Position:
@@ -392,9 +442,7 @@ async def close_executed_stop(position: Position, fill: OrderRecord) -> Position
     """
     fill_price = fill.filled_price
     if fill_price is None:
-        raise ValueError(
-            f"stop fill for {position.ticker} carries no executed price"
-        )
+        raise ValueError(f"stop fill for {position.ticker} carries no executed price")
     async with _locks(position.ticker):
         current = await get_position(position.id)
         if current is None:
@@ -470,7 +518,7 @@ async def _resolve_one(order: OrderRecord, now: datetime) -> OrderRecord | None:
         return settled
     if state.status in {OrderStatus.REJECTED, OrderStatus.CANCELLED}:
         filled = state.filled_lots if state.filled_lots is not None else 0
-        return await _write(
+        settled = await _write(
             settle_order(
                 order.key,
                 state.status,
@@ -480,7 +528,58 @@ async def _resolve_one(order: OrderRecord, now: datetime) -> OrderRecord | None:
                 state.broker_reason,
             )
         )
+        await _apply_terminal_exit(settled, now)
+        return settled
+    if (
+        state.status is OrderStatus.SUBMITTED
+        and order.intent == "ENTRY"
+        and (state.filled_lots or 0) > 0
+    ):
+        resolved = await _resolve_partial_entry(order.key)
+        if resolved is None:
+            return None
+        await _apply_discovered_fill(resolved, now)
+        return resolved
     return None
+
+
+async def _apply_terminal_exit(order: OrderRecord, now: datetime) -> None:
+    """Book, or shrink, a position whose exit order ended without completing.
+
+    A terminal exit that sold part of a position reduces it to the unsold
+    remainder and leaves it open. Closing it would leave shares at the broker
+    with no local row, which the next reconciliation reports as a foreign
+    holding and `app.startup` then refuses to start on (rule 32).
+
+    The sold slice's profit or loss goes unbooked: `db.positions.close` books a
+    whole position against one exit price, and a blended figure would be a price
+    no order achieved. The gap is bounded above by one position's stop loss,
+    alerted, and recorded permanently as a `LOTS_ADJUSTED` event (rule 34).
+    """
+    if order.intent != "EXIT" or order.side is not Side.SELL:
+        return
+    filled = order.filled_lots if order.filled_lots is not None else 0
+    if filled <= 0 or order.filled_price is None:
+        return
+    position = await _already_open(order.ticker)
+    if position is None:
+        return
+    if filled >= position.lots:
+        # A cancel that landed after a full fill: the exit really did complete.
+        if order.exit_trigger is None:
+            await alert(
+                f"exit order {order.key} has no trigger; leaving {order.ticker} open"
+            )
+            return
+        await _cancel_stop_to_local(position)
+        await _finish_close(position, order, order.exit_trigger, now)
+        return
+    remaining = position.lots - filled
+    await _write(update_lots(position.id, remaining))
+    await alert(
+        f"partial exit for {position.ticker}: sold {filled} at "
+        f"{order.filled_price}, {remaining} lots still open"
+    )
 
 
 async def _apply_discovered_fill(order: OrderRecord, now: datetime) -> None:

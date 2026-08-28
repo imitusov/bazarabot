@@ -568,7 +568,7 @@ async def test_partial_exit_submits_one_order_and_raises(env: _Broker) -> None:
     assert env.calls.count("post:SELL") == 1
 
 
-async def _unresolved_exit(lots: int, filled: int, status: OrderStatus) -> str:
+async def _unresolved_exit(lots: int) -> str:
     from zarabot.db.orders import record_submitting
 
     order = await record_submitting(
@@ -606,7 +606,7 @@ async def test_terminal_partial_exit_reduces_the_position_and_leaves_it_open(
 ) -> None:
     """Closing it would leave shares at the broker with no local row (rule 32)."""
     position = await open_position(_signal(), 5, _instrument())
-    key = await _unresolved_exit(5, 2, OrderStatus.CANCELLED)
+    key = await _unresolved_exit(5)
     env.state[key] = _broker_exit(key, 5, 2, OrderStatus.CANCELLED)
     await resolve_unfinished(NOW)
     reloaded = await get_position(position.id)
@@ -620,7 +620,7 @@ async def test_terminal_partial_exit_records_the_adjustment_not_a_close(
     env: _Broker,
 ) -> None:
     position = await open_position(_signal(), 5, _instrument())
-    key = await _unresolved_exit(5, 2, OrderStatus.CANCELLED)
+    key = await _unresolved_exit(5)
     env.state[key] = _broker_exit(key, 5, 2, OrderStatus.CANCELLED)
     await resolve_unfinished(NOW)
     events = [event.event for event in await list_events(position.id)]
@@ -628,10 +628,125 @@ async def test_terminal_partial_exit_records_the_adjustment_not_a_close(
     assert "CLOSED" not in events
 
 
+async def test_recovery_resolves_a_still_live_partial_entry(env: _Broker) -> None:
+    """The same cancel-and-re-read, reached from the recovery path (v1.34)."""
+    from zarabot.db.orders import record_submitting
+
+    order = await record_submitting(
+        "live-partial-key-00000000001", "SBER", Side.BUY, 3, "ENTRY"
+    )
+    env.state[order.key] = OrderRecord(
+        key=order.key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=3,
+        status=OrderStatus.SUBMITTED,
+        filled_lots=1,
+        filled_price=Decimal("100"),
+        commission=Decimal("1"),
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=None,
+    )
+    await resolve_unfinished(NOW)
+    assert env.cancelled == [order.key]
+    positions = await list_open()
+    assert [position.lots for position in positions] == [1]
+
+
+async def test_recovery_leaves_a_partial_entry_alone_when_cancel_fails(
+    env: _Broker,
+) -> None:
+    from zarabot.db.orders import record_submitting
+
+    order = await record_submitting(
+        "live-partial-key-00000000002", "SBER", Side.BUY, 3, "ENTRY"
+    )
+    env.state[order.key] = OrderRecord(
+        key=order.key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=3,
+        status=OrderStatus.SUBMITTED,
+        filled_lots=1,
+        filled_price=Decimal("100"),
+        commission=None,
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=None,
+    )
+    env.cancel_unavailable = True
+    assert await resolve_unfinished(NOW) == []
+    assert await list_open() == []
+    assert await list_unresolved()
+
+
+async def test_terminal_partial_exit_without_an_open_position_does_nothing(
+    env: _Broker,
+) -> None:
+    key = await _unresolved_exit(5)
+    env.state[key] = _broker_exit(key, 5, 2, OrderStatus.CANCELLED)
+    await resolve_unfinished(NOW)
+    assert await list_open() == []
+
+
+async def test_terminal_exit_with_nothing_filled_leaves_the_position_whole(
+    env: _Broker,
+) -> None:
+    position = await open_position(_signal(), 5, _instrument())
+    key = await _unresolved_exit(5)
+    env.state[key] = replace(
+        _broker_exit(key, 5, 0, OrderStatus.CANCELLED),
+        filled_lots=0,
+        filled_price=None,
+    )
+    await resolve_unfinished(NOW)
+    reloaded = await get_position(position.id)
+    assert reloaded is not None
+    assert reloaded.lots == 5
+
+
+async def test_terminal_full_exit_without_a_trigger_alerts_and_leaves_open(
+    env: _Broker,
+) -> None:
+    """A missing trigger is a data defect, not a value to guess at."""
+    from zarabot.config import load
+
+    position = await open_position(_signal(), 5, _instrument())
+    key = "defective-full-exit-key-000001"
+    # `record_submitting` refuses an EXIT with no trigger, so the row can only
+    # arise from corruption. That is exactly the case this guard is for.
+    async with aiosqlite.connect(load().db_path) as conn:
+        await conn.execute(
+            """
+            INSERT INTO orders (
+                key, ticker, figi, side, intent, lots, status,
+                filled_lots, filled_price, commission, broker_reason,
+                created_at, settled_at, exit_trigger
+            ) VALUES (
+                ?, 'SBER', '', 'SELL', 'EXIT', 5, 'SUBMITTING',
+                NULL, NULL, NULL, NULL, ?, NULL, NULL
+            )
+            """,
+            (key, NOW.isoformat()),
+        )
+        await conn.commit()
+    env.state[key] = _broker_exit(key, 5, 5, OrderStatus.CANCELLED)
+    await resolve_unfinished(NOW)
+    reloaded = await get_position(position.id)
+    assert reloaded is not None
+    assert reloaded.status == "OPEN"
+    assert any("has no trigger" in text for text in env.alerts)
+
+
 async def test_terminal_exit_reaching_the_full_count_closes(env: _Broker) -> None:
     """The race where a cancel lands after a full fill still books the exit."""
     position = await open_position(_signal(), 5, _instrument())
-    key = await _unresolved_exit(5, 5, OrderStatus.CANCELLED)
+    key = await _unresolved_exit(5)
     env.state[key] = _broker_exit(key, 5, 5, OrderStatus.CANCELLED)
     await resolve_unfinished(NOW)
     reloaded = await get_position(position.id)
