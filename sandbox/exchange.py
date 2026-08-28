@@ -74,7 +74,6 @@ class SimulatedExchange:
 
     _now: datetime | None = None
     _orders: dict[str, OrderRecord] = field(default_factory=dict)
-    _pending: list[str] = field(default_factory=list)
     _stops: dict[str, StopOrderRecord] = field(default_factory=dict)
     _executed_stops: dict[str, OrderRecord] = field(default_factory=dict)
     _holdings: dict[str, _Holding] = field(default_factory=dict)
@@ -96,6 +95,19 @@ class SimulatedExchange:
     def _bar_at(self, ticker: str, moment: datetime) -> Candle | None:
         for bar in self.bars.get(ticker, []):
             if bar.timestamp == moment:
+                return bar
+        return None
+
+    def _next_bar(self, ticker: str) -> Candle | None:
+        """The bar after the cursor — where a market order gets its price.
+
+        The exchange may see it; the strategy may not. That asymmetry is what
+        makes the fill free of look-ahead while keeping it synchronous.
+        """
+        if self._now is None:
+            return None
+        for bar in self.bars.get(ticker, []):
+            if bar.timestamp > self._now:
                 return bar
         return None
 
@@ -125,43 +137,30 @@ class SimulatedExchange:
     # ------------------------------------------------------------------ clock
 
     async def advance(self, moment: datetime) -> None:
-        """Move the cursor and settle whatever the newly-visible bar triggers."""
+        """Move the cursor and fire any stop the newly-visible bar triggers."""
         self._now = moment
-        self._fill_pending(moment)
         self._fire_stops(moment)
 
-    def _fill_pending(self, moment: datetime) -> None:
-        """Fill at this bar's OPEN — the decision was made on the previous close.
-
-        Filling on the bar the decision came from is look-ahead: that bar's
-        close was not knowable when the order was placed.
-        """
-        for key in list(self._pending):
-            order = self._orders[key]
-            ticker = self._ticker_for(order.figi)
-            bar = self._bar_at(ticker, moment)
-            if bar is None:
-                continue
-            price = self._slipped(bar.open, order.side)
-            units = Decimal(order.lots * self.instruments[ticker].lot)
-            turnover = price * units
-            fee = self.commission.on(turnover)
-            if order.side is Side.BUY:
-                self.cash -= turnover + fee
-                held = self._holdings.get(order.figi)
-                self._holdings[order.figi] = _Holding(
-                    lots=(held.lots if held else 0) + order.lots,
-                    average_price=price,
-                )
-            else:
-                self.cash += turnover - fee
-                held = self._holdings.get(order.figi)
-                if held is not None:
-                    held.lots -= order.lots
-                    if held.lots <= 0:
-                        del self._holdings[order.figi]
-            self._orders[key] = _settled(order, price, fee, moment)
-            self._pending.remove(key)
+    def _apply_fill(self, order: OrderRecord, price: Decimal) -> OrderRecord:
+        ticker = self._ticker_for(order.figi)
+        units = Decimal(order.lots * self.instruments[ticker].lot)
+        turnover = price * units
+        fee = self.commission.on(turnover)
+        if order.side is Side.BUY:
+            self.cash -= turnover + fee
+            held = self._holdings.get(order.figi)
+            self._holdings[order.figi] = _Holding(
+                lots=(held.lots if held else 0) + order.lots,
+                average_price=price,
+            )
+        else:
+            self.cash += turnover - fee
+            held = self._holdings.get(order.figi)
+            if held is not None:
+                held.lots -= order.lots
+                if held.lots <= 0:
+                    del self._holdings[order.figi]
+        return _settled(order, price, fee, self._moment())
 
     def _fire_stops(self, moment: datetime) -> None:
         """A standing stop fires on the bar's low, filling no better than its open."""
@@ -264,9 +263,20 @@ class SimulatedExchange:
             created_at=self._moment(),
             settled_at=None,
         )
-        self._orders[key] = order
-        self._pending.append(key)
-        return order
+        # Priced at the NEXT bar's open — that price was not knowable when the
+        # decision was made — but returned now. Deferring the fill would send
+        # every entry through open_position's crash-recovery path and trip the
+        # outage counter, a live/backtest divergence on the ordinary path
+        # (v1.47).
+        following = self._next_bar(ticker)
+        if following is None:
+            # History ran out. Inventing a price here is the look-ahead the
+            # next-open rule exists to prevent.
+            self._orders[key] = order
+            return order
+        settled = self._apply_fill(order, self._slipped(following.open, side))
+        self._orders[key] = settled
+        return settled
 
     async def get_order_state(self, key: str) -> OrderRecord:
         found = self._orders.get(key)
@@ -275,9 +285,8 @@ class SimulatedExchange:
         return found
 
     async def cancel_order(self, key: str) -> None:
-        if key in self._pending:
-            self._pending.remove(key)
-            order = self._orders[key]
+        order = self._orders.get(key)
+        if order is not None and order.status is OrderStatus.SUBMITTED:
             self._orders[key] = _cancelled(order, self._moment())
 
     async def post_stop_loss(
