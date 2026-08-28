@@ -309,6 +309,25 @@ the row is absent, already closed, or `lots` is not positive.
 **`async list_events(position_id: int) → list[PositionEvent]`**
 That position's events, oldest first, or `[]`. Never `None`.
 
+## `zarabot.db.job_runs`
+
+Sole owner of `job_runs`. All SQL runs on `db.connection.shared()` inside
+`transaction()`. Exists because schedule state lived in module globals, so every
+restart re-armed every job and a restart through the report hour lost the week
+silently (#27).
+
+**`async has_run(job: str, period_key: str) → bool`**
+Whether `job` has completed for that period. `period_key` is a Moscow date for a
+daily job, a week-start date for the weekly report.
+
+**`async mark_run(job: str, period_key: str, ran_at: datetime) → None`**
+Records completion. Idempotent, keeping the first `ran_at`. Raises `ValueError`
+on a naive datetime.
+
+**`async last_run(job: str) → datetime | None`**
+Most recent completion, or `None`. Makes "did the weekly report go out?"
+answerable from the database.
+
 ## `zarabot.db.trading_days`
 
 Sole owner of `trading_days`. All SQL runs on `db.connection.shared()` inside
