@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from collections.abc import AsyncIterator
+from datetime import UTC, date, datetime, timedelta
 
+import aiosqlite
 import pytest
 
 import zarabot.market.session as session_mod
 from zarabot.market.session import (
     cache_exhausted,
     calendar,
+    covers,
     current_session,
     in_closing_window,
     is_open,
@@ -17,6 +20,15 @@ from zarabot.market.session import (
     refresh,
 )
 from zarabot.models import SessionInfo, TradingCalendar
+
+REQUIRED_ENV = {
+    "TINVEST_TOKEN": "token",
+    "TINVEST_ACCOUNT_ID": "acct",
+    "TELEGRAM_BOT_TOKEN": "tg",
+    "TELEGRAM_CHAT_ID": "1",
+    "ALLOCATED_CAPITAL": "100000",
+    "WATCHLIST": "SBER",
+}
 
 OPEN = datetime(2026, 3, 16, 6, 50, tzinfo=UTC)
 CLOSE = datetime(2026, 3, 16, 15, 50, tzinfo=UTC)
@@ -44,6 +56,7 @@ def _holiday() -> SessionInfo:
 @pytest.fixture(autouse=True)
 def _reset_cache(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     session_mod._cache = None
+    session_mod._history = None
     session_mod._alerted = False
     alerts: list[str] = []
 
@@ -52,6 +65,139 @@ def _reset_cache(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(session_mod, "alert", _alert, raising=False)
     return alerts
+
+
+@pytest.fixture
+async def store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[SessionInfo]]:
+    """A real db.trading_days, on a temporary file database."""
+    import tempfile
+
+    from zarabot.db.connection import connect, disconnect
+    from zarabot.db.migrations import apply
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/zarabot.db"
+        for key, value in REQUIRED_ENV.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("DB_PATH", path)
+        conn = await connect(path)
+        await apply(conn)
+        try:
+            yield []
+        finally:
+            await disconnect()
+
+
+def _day(n: int) -> SessionInfo:
+    base = datetime(2026, 3, n, tzinfo=UTC)
+    trading = base.weekday() < 5
+    return SessionInfo(
+        start=base.replace(hour=6, minute=50) if trading else None,
+        end=base.replace(hour=15, minute=50) if trading else None,
+        is_trading_day=trading,
+    )
+
+
+async def test_refresh_records_the_whole_window_not_only_today(
+    store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fourteen-day width is the property the design rests on: one run
+    covers the next fortnight, so an outage shorter than that leaves no gap."""
+    from zarabot.db.trading_days import list_since
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [_day(n) for n in range(16, 30)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    await refresh(14)
+
+    recorded = await list_since(date(2026, 3, 1))
+    assert len(recorded) == 10, "ten weekdays in the fortnight, all recorded"
+
+
+async def test_calendar_remembers_a_day_that_has_since_passed(
+    store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The past cannot be fetched (§2.1), so it has to have been written down."""
+
+    async def _first(days: int) -> list[SessionInfo]:
+        return [_day(n) for n in range(2, 7)]
+
+    async def _later(days: int) -> list[SessionInfo]:
+        return [_day(n) for n in range(16, 21)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _first)
+    await refresh(5)
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _later)
+    await refresh(5)
+
+    dates = [s.start.date() for s in calendar().sessions if s.start is not None]
+    assert date(2026, 3, 2) in dates, "the earlier window is remembered"
+    assert date(2026, 3, 20) in dates
+    assert dates == sorted(dates)
+
+
+async def test_a_weeks_old_position_counts_its_trading_days(
+    store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Against the calendar `refresh` actually builds — the seam #45 lived in
+    while both sides passed their own tests."""
+    from zarabot.clock import trading_days_between
+
+    async def _early(days: int) -> list[SessionInfo]:
+        return [_day(n) for n in range(2, 16)]
+
+    async def _now(days: int) -> list[SessionInfo]:
+        return [_day(n) for n in range(16, 21)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _early)
+    await refresh(14)
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _now)
+    await refresh(14)
+
+    entry = datetime(2026, 3, 5, 10, 0, tzinfo=UTC)
+    now = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
+    # 6, 9, 10, 11, 12, 13, 16 March are weekdays -> 7 trading days.
+    assert trading_days_between(entry, now, calendar()) == 7
+
+
+async def test_covers_reports_what_the_history_reaches(
+    store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unmeasurable age must be detectable; that is the whole difference
+    between this and the silent undercount #45 was."""
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [_day(n) for n in range(16, 21)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    await refresh(5)
+
+    assert covers(date(2026, 3, 17)) is True
+    assert covers(date(2026, 3, 16)) is True
+    assert covers(date(2026, 3, 10)) is False
+
+
+async def test_covers_is_false_with_no_history_at_all() -> None:
+    assert covers(date(2026, 3, 16)) is False
+
+
+async def test_a_failed_history_write_leaves_the_schedule_cached(
+    store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Degraded age counting must not stop the market session working."""
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [_weekday()]
+
+    async def _boom(sessions: list[SessionInfo]) -> int:
+        raise aiosqlite.Error("disk full")
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    monkeypatch.setattr("zarabot.market.session.record_many", _boom)
+    await refresh(7)
+
+    assert is_open(INSIDE) is True
 
 
 @pytest.fixture
