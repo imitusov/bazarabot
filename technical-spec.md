@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.42
+**Version:** 1.43
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -215,6 +215,8 @@ that inspection could not have falsified.
 | Lot sizes | SBER 1, **GAZP 10**, LKOH 1, MGNT 1 | Sizing is in lots; a wrong lot size is a wrong position size |
 | Price steps | SBER/GAZP 0.01, **LKOH/MGNT 0.50** | A stop price off-step is rejected by the exchange |
 | Candle depth | 456 daily candles available | Floor is 250; the longest lookback plus a margin |
+| `LastPrice` fields | Exactly `figi`, `price`, `time`, `instrument_uid`, `last_price_type`. **No `timestamp`** | Measured 2026-08-28. `_quote_time` probed for a `timestamp` that has never existed; the probe could only ever mask a rename of `time` as a rejected quote (#33) |
+| SDK deprecations | `share_by` and `get_last_prices` are **deprecated as of SDK 1.0.0** | Both are on the hot path. Noted, not acted on: they work at 1.49.1, and a migration is its own change with its own verification |
 | **Trading schedule, past** | **Not obtainable.** Any `from_` before today's midnight is rejected with `INVALID_ARGUMENT` / **30003** | Measured 2026-08-28 against the live account across seven ranges — 14 days back, 7, 1, and every end date from midnight to +7d. Every one failed; only a range starting at today's midnight is served. This is why `MAX_AGE` cannot simply be given a backward window (#45) |
 | Longest legitimate candle gap | **6 calendar days** (2025-12-30 → 2026-01-05, the New Year closure) | Recurs annually; a continuity check below it fails on correct data |
 | Market-data rate limit | 200 requests / 60s | Measured headroom 400× the loop's 1.0 calls/min |
@@ -523,6 +525,10 @@ it proves.
   configuration is not re-read and re-validated per request).
 - A rate-limit response raises `BrokerRateLimited` carrying the retry hint
   (proves the caller can back off correctly).
+- A quote object with no `time` attribute raises `AttributeError`, **not**
+  `PriceRejected` (proves a renamed SDK field surfaces as the integration break
+  it is, rather than as every quote in every cycle looking like bad broker data
+  — the state in which no `LOCAL` stop-loss can fire).
 - A zero-valued quote raises `PriceRejected`, not `BrokerUnavailable` and not
   `Decimal(0)` (proves the mass-liquidation path is closed at its source, and
   that bad data is distinguishable from an outage).
@@ -1645,6 +1651,18 @@ for an outage and useless for a bug, and the difference between them is exactly
 what the type is for (#23). `from None` is forbidden: it discards the traceback
 that names the real fault. Token redaction already prevents secret leakage, and
 that is what makes preserving the cause safe.
+
+**A quote's timestamp is read directly, never probed for (v1.43).**
+`_quote_time` read `raw.time` and fell back to `raw.timestamp`, a field
+`LastPrice` has never had (§2.1). The fallback was not merely dead: if `time`
+were ever renamed, every quote would come back with no timestamp, be rejected
+under rule 9b, and the owner would see "N prices rejected" every cycle — a
+message that reads like a broker data problem while the real fault is an
+integration break. **No `LOCAL` position's stop-loss would fire again**, because
+that exit path needs a price. An `AttributeError` names the field and the line;
+a defensive `getattr` chain names nothing. This is failure class 5 in
+`ops/STATE.md`, and the rule generalises: where the broker's own field is the
+contract, read it, and let its absence be loud.
 
 **A partial fill is not a fill.** `EXECUTION_REPORT_STATUS_PARTIALLYFILL` maps to
 `SUBMITTED` — the order is still live at the broker — with `filled_lots` carrying

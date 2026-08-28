@@ -73,6 +73,18 @@ what the type is for (#23). `from None` is forbidden: it discards the traceback
 that names the real fault. Token redaction already prevents secret leakage, and
 that is what makes preserving the cause safe.
 
+**A quote's timestamp is read directly, never probed for (v1.43).**
+`_quote_time` read `raw.time` and fell back to `raw.timestamp`, a field
+`LastPrice` has never had (§2.1). The fallback was not merely dead: if `time`
+were ever renamed, every quote would come back with no timestamp, be rejected
+under rule 9b, and the owner would see "N prices rejected" every cycle — a
+message that reads like a broker data problem while the real fault is an
+integration break. **No `LOCAL` position's stop-loss would fire again**, because
+that exit path needs a price. An `AttributeError` names the field and the line;
+a defensive `getattr` chain names nothing. This is failure class 5 in
+`ops/STATE.md`, and the rule generalises: where the broker's own field is the
+contract, read it, and let its absence be loud.
+
 **A partial fill is not a fill.** `EXECUTION_REPORT_STATUS_PARTIALLYFILL` maps to
 `SUBMITTED` — the order is still live at the broker — with `filled_lots` carrying
 what has filled so far. `FILLED` means `filled_lots == lots` and nothing further
@@ -388,6 +400,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   configuration is not re-read and re-validated per request).
 - A rate-limit response raises `BrokerRateLimited` carrying the retry hint
   (proves the caller can back off correctly).
+- A quote object with no `time` attribute raises `AttributeError`, **not**
+  `PriceRejected` (proves a renamed SDK field surfaces as the integration break
+  it is, rather than as every quote in every cycle looking like bad broker data
+  — the state in which no `LOCAL` stop-loss can fire).
 - A zero-valued quote raises `PriceRejected`, not `BrokerUnavailable` and not
   `Decimal(0)` (proves the mass-liquidation path is closed at its source, and
   that bad data is distinguishable from an outage).
