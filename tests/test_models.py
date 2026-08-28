@@ -139,9 +139,25 @@ def _operation(**overrides: object) -> OperationRecord:
         "payment": Decimal("-2010.00"),
         "price": PRICE,
         "quantity": 20,
+        "operation_type": "OPERATION_TYPE_SELL",
+        "state": "OPERATION_STATE_EXECUTED",
+        "parent_operation_id": None,
     }
     fields.update(overrides)
     return OperationRecord(**fields)  # type: ignore[arg-type]
+
+
+def test_operation_carries_the_brokers_own_type_and_state() -> None:
+    """A sale used to be identifiable only by the sign of `payment`, and a fee
+    only by a substring of a name the dataclass did not expose (#11)."""
+    operation = _operation(
+        operation_type="OPERATION_TYPE_BROKER_FEE",
+        state="OPERATION_STATE_EXECUTED",
+        parent_operation_id="op-parent",
+    )
+    assert operation.operation_type == "OPERATION_TYPE_BROKER_FEE"
+    assert operation.state == "OPERATION_STATE_EXECUTED"
+    assert operation.parent_operation_id == "op-parent"
 
 
 def _session(**overrides: object) -> SessionInfo:

@@ -197,6 +197,7 @@ class _Capture:
         self.constructed = 0
         self.closed = 0
         self.fail: BaseException | None = None
+        self.operations_override: list[SimpleNamespace] | None = None
         self.order_status = OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
         self.order_lots_executed: int | None = None
         self.order_message = ""
@@ -387,6 +388,8 @@ class _Services:
 
     async def get_operations(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_operations", kwargs)
+        if self._capture.operations_override is not None:
+            return SimpleNamespace(operations=self._capture.operations_override)
         return SimpleNamespace(
             operations=[
                 SimpleNamespace(
@@ -397,6 +400,8 @@ class _Services:
                     price=decimal_to_money(Decimal("100"), "rub"),
                     quantity=10,
                     operation_type=SimpleNamespace(name="OPERATION_TYPE_BROKER_FEE"),
+                    state=SimpleNamespace(name="OPERATION_STATE_EXECUTED"),
+                    parent_operation_id="op-parent",
                 )
             ]
         )
@@ -666,6 +671,78 @@ async def test_get_operations_returns_domain_records(capture: _Capture) -> None:
     ops = await get_operations(NOW - timedelta(days=1), NOW)
     assert ops
     assert isinstance(ops[0], OperationRecord)
+
+
+def _raw_operation(**overrides: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "id": "op-1",
+        "figi": "BBG000000001",
+        "date": NOW,
+        "payment": decimal_to_money(Decimal("9000"), "rub"),
+        "price": decimal_to_money(Decimal("100"), "rub"),
+        "quantity": 90,
+        "operation_type": SimpleNamespace(name="OPERATION_TYPE_SELL"),
+        "state": SimpleNamespace(name="OPERATION_STATE_EXECUTED"),
+        "parent_operation_id": "",
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+async def test_get_operations_carries_type_state_and_parent(
+    capture: _Capture,
+) -> None:
+    """A sale is identified by what the broker called it, never by the sign of
+    `payment` (#11)."""
+    capture.operations_override = [
+        _raw_operation(),
+        _raw_operation(
+            id="op-2",
+            payment=decimal_to_money(Decimal("-1.25"), "rub"),
+            operation_type=SimpleNamespace(name="OPERATION_TYPE_BROKER_FEE"),
+            parent_operation_id="op-1",
+        ),
+    ]
+    sale, fee = await get_operations(NOW - timedelta(days=1), NOW)
+    assert sale.operation_type == "OPERATION_TYPE_SELL"
+    assert sale.state == "OPERATION_STATE_EXECUTED"
+    assert sale.parent_operation_id is None
+    assert fee.operation_type == "OPERATION_TYPE_BROKER_FEE"
+    assert fee.parent_operation_id == "op-1"
+
+
+async def test_get_operations_takes_commission_from_the_type_not_a_substring(
+    capture: _Capture,
+) -> None:
+    capture.operations_override = [
+        _raw_operation(),
+        _raw_operation(
+            id="op-2",
+            payment=decimal_to_money(Decimal("-1.25"), "rub"),
+            operation_type=SimpleNamespace(name="OPERATION_TYPE_BROKER_FEE"),
+        ),
+    ]
+    sale, fee = await get_operations(NOW - timedelta(days=1), NOW)
+    assert sale.commission == Decimal("0")
+    assert fee.commission == Decimal("1.25")
+
+
+async def test_get_operations_omits_operations_that_did_not_happen(
+    capture: _Capture,
+) -> None:
+    """A cancelled or still-progressing operation is not something that
+    happened, and counting one as a cost or as a sale is the same error."""
+    capture.operations_override = [
+        _raw_operation(),
+        _raw_operation(
+            id="op-2", state=SimpleNamespace(name="OPERATION_STATE_CANCELED")
+        ),
+        _raw_operation(
+            id="op-3", state=SimpleNamespace(name="OPERATION_STATE_PROGRESS")
+        ),
+    ]
+    ops = await get_operations(NOW - timedelta(days=1), NOW)
+    assert [op.id for op in ops] == ["op-1"]
     assert isinstance(ops[0].commission, Decimal)
 
 
