@@ -33,6 +33,7 @@ from zarabot.broker.client import (
     OrderNotFound,
     OrderRejected,
     PriceRejected,
+    cancel_order,
     cancel_stop_order,
     get_candles,
     get_executed_stop_fills,
@@ -357,6 +358,10 @@ class _Services:
         self._record("cancel_stop_order", kwargs)
         return SimpleNamespace()
 
+    async def cancel_order(self, **kwargs: Any) -> SimpleNamespace:
+        self._record("cancel_order", kwargs)
+        return SimpleNamespace()
+
     async def get_stop_orders(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_stop_orders", kwargs)
         return SimpleNamespace(
@@ -617,6 +622,33 @@ async def test_cancel_stop_order_is_idempotent(capture: _Capture) -> None:
     assert await cancel_stop_order("stop-1") is None
     capture.fail = AioRequestError(StatusCode.NOT_FOUND, "already gone", None)
     assert await cancel_stop_order("stop-1") is None
+
+
+async def test_cancel_order_uses_the_request_key(capture: _Capture) -> None:
+    """By our own key: after a crash the exchange identifier is what was lost."""
+    assert await cancel_order("k-1") is None
+    name, kwargs = next(c for c in capture.calls if c[0] == "cancel_order")
+    assert kwargs["order_id"] == "k-1"
+    assert kwargs["order_id_type"] is OrderIdType.ORDER_ID_TYPE_REQUEST
+
+
+async def test_cancel_order_is_idempotent(capture: _Capture) -> None:
+    """The caller races the exchange; an order already gone is not an error."""
+    capture.fail = AioRequestError(StatusCode.NOT_FOUND, "already gone", None)
+    assert await cancel_order("k-1") is None
+
+
+async def test_cancel_order_raises_on_transport_failure(capture: _Capture) -> None:
+    capture.fail = AioRequestError(StatusCode.UNAVAILABLE, "down", None)
+    with pytest.raises(BrokerUnavailable):
+        await cancel_order("k-1")
+
+
+async def test_cancel_order_propagates_a_defect(capture: _Capture) -> None:
+    """INVALID_ARGUMENT is a malformed request, not an outage (#23)."""
+    capture.fail = AioRequestError(StatusCode.INVALID_ARGUMENT, "bad", None)
+    with pytest.raises(AioRequestError):
+        await cancel_order("k-1")
 
 
 async def test_list_stop_orders_returns_domain_records(capture: _Capture) -> None:
