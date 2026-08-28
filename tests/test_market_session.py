@@ -57,6 +57,7 @@ def _holiday() -> SessionInfo:
 def _reset_cache(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     session_mod._cache = None
     session_mod._history = None
+    session_mod._earliest = None
     session_mod._alerted = False
     alerts: list[str] = []
 

@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, date, datetime
 
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
     get_trading_schedule,
 )
+from zarabot.db.trading_days import earliest, list_since, record_many
 from zarabot.models import SessionInfo, TradingCalendar
 from zarabot.telegram.notifier import alert
 
 _LOG = logging.getLogger(__name__)
 _cache: list[SessionInfo] | None = None
+# Days already observed and written down. The broker serves no schedule before
+# today (§2.1), so the past is remembered rather than fetched (#45). Reloaded
+# on each refresh so `calendar()` stays synchronous and costs nothing a cycle.
+_history: list[SessionInfo] | None = None
+_earliest: date | None = None
 _alerted = False
 _UNAVAILABLE = "trading schedule unavailable; treating market as closed"
 
@@ -52,18 +58,60 @@ async def refresh(days: int) -> None:
     # schedule that went unavailable, recovered, and went unavailable again was
     # silent from here for the rest of the process lifetime (#32).
     _alerted = False
+    await _remember(fetched)
+
+
+async def _remember(fetched: list[SessionInfo]) -> None:
+    """Write the observed window down, then reload what is known.
+
+    The window is fourteen days wide, not one, so a single run records the next
+    fortnight and a bot that ran at any point in the last fortnight has every
+    day since on disk — including days it was switched off for.
+
+    A write failure degrades age counting, which `covers` then reports, and must
+    not stop the bot trading: the schedule itself is already cached by now.
+    """
+    global _history, _earliest
+    try:
+        await record_many(fetched)
+        _earliest = await earliest()
+        _history = await list_since(_earliest) if _earliest is not None else []
+    except Exception:
+        _LOG.exception("could not record the observed trading calendar")
+
+
+def _sort_key(session: SessionInfo) -> datetime:
+    if session.start is None:
+        return datetime.min.replace(tzinfo=UTC)
+    return session.start
 
 
 def calendar() -> TradingCalendar:
-    """The cached schedule, for callers counting trading days rather than
-    asking whether a moment is inside a session.
+    """Recorded history plus the live window, oldest first.
 
     `app.loops` fetched a fourteen-day schedule every cycle — once a minute,
     for data that changes at most daily and that this module already holds,
-    refreshed daily by `run`'s schedule task (#19). Empty when the cache is
-    empty; never `None`.
+    refreshed daily by `run`'s schedule task (#19). It spans the past because
+    the question it serves is asked about the past, and the broker will not
+    serve a schedule for any date before today (#45). Empty when nothing is
+    known; never `None`.
     """
-    return TradingCalendar(sessions=tuple(_cache or ()))
+    merged = list(_history or ()) + list(_cache or ())
+    by_day: dict[datetime, SessionInfo] = {}
+    for session in sorted(merged, key=_sort_key):
+        by_day[_sort_key(session)] = session
+    return TradingCalendar(sessions=tuple(by_day.values()))
+
+
+def covers(day: date) -> bool:
+    """Whether the recorded calendar reaches back to `day`.
+
+    Lets a caller tell a count it can stand behind from one it cannot. The
+    failure this guards is silent by nature: an uncovered day is simply not
+    counted, `trading_days_open` comes back short, and MAX_AGE never fires with
+    nothing raised. #45 lived on exactly that.
+    """
+    return _earliest is not None and day >= _earliest
 
 
 def current_session(now: datetime) -> SessionInfo | None:

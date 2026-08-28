@@ -699,15 +699,24 @@ Cached broker calendar. Closed when the schedule is missing. Never hardcodes
 weekdays.
 
 **`async refresh(days: int) → None`**
-Loads `broker.client.get_trading_schedule`. Unavailable broker, or a response
-with no trading sessions, leaves any existing cache intact, logs WARNING, and
-alerts once (rule 10). The latch is cleared on the success path, so "once" is
-per incident rather than per process (#32). Does not raise.
+Loads `broker.client.get_trading_schedule` and **records the whole window** via
+`db.trading_days.record_many`, then reloads the history into memory.
+Unavailable broker, or a response with no trading sessions, leaves the cache
+intact, logs WARNING, and alerts once (rule 10). The latch is cleared on the
+success path, so "once" is per incident rather than per process (#32). A failed
+history write is logged and does not propagate — degraded age counting must not
+stop the bot trading. Does not raise.
 
 **`calendar() → TradingCalendar`**
-The cached schedule, for callers counting trading days. Empty calendar when the
-cache is empty; never `None`. `app.loops` reads this instead of fetching a
-fourteen-day schedule every cycle (#19).
+Recorded history plus the live window, oldest first, one entry per day. Empty
+when nothing is known; never `None`. `app.loops` reads this instead of fetching
+a fourteen-day schedule every cycle (#19), and it spans the past because the
+broker serves no schedule before today (#45).
+
+**`covers(day: date) → bool`**
+Whether the recorded calendar reaches back to `day`. `False` with no history.
+Lets a caller tell a count it can stand behind from one it cannot — an
+uncovered day is simply not counted, and nothing raises.
 
 **`is_open(now: datetime) → bool`**
 True iff `now` is in a trading session, inclusive of `start`, exclusive of
