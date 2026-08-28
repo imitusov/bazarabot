@@ -29,6 +29,21 @@ Loads and validates every setting once at startup.
   never branches on mode — sandbox remains selected by endpoint alone.
 - Adds `price_max_age_seconds` (default 120) and `price_max_move_pct` (default
   20), the bounds `broker.client` validates quotes against.
+- **`MAX_HOLDING_DAYS` may not exceed 8** (v1.41). A position's age is counted
+  against a calendar the broker will only serve 14 days at a time (#39), and 14
+  calendar days contain at most 10 weekdays, fewer once holidays are taken out.
+  A limit above that could not be measured, and the failure would be silent —
+  the count would come back short and `MAX_AGE` would not fire, which is #45 in
+  a new place. 8 is the largest value the one available window carries with a
+  holiday margin. `config.load()` refuses more, naming the broker horizon as the
+  cause rather than reporting a bare range error.
+
+  Below that ceiling the window is always sufficient, and the arithmetic is
+  worth stating because it is what makes a coverage check unnecessary: a
+  position old enough to predate the window has been held for every trading day
+  the window contains, which is at least 8, so the count still clears the
+  threshold. The undercount can only understate toward a number that still
+  fires the exit.
 - **`MAX_POSITION_PCT` is removed** (v1.30), with its cross-field check against
   `POSITION_SIZE_PCT`. It could not bind: the check guaranteed
   `position_size_pct ≤ max_position_pct`, which made the cap unreachable in
@@ -88,6 +103,9 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
+- `MAX_HOLDING_DAYS=9` is refused and 8 accepted (proves the ceiling the
+  broker's 14-day calendar horizon imposes is enforced at load, rather than
+  discovered later as an exit that never fires).
 - A complete environment produces a populated config object (happy path).
 - A missing `TINVEST_TOKEN` raises `ConfigError` naming that variable (proves
   fail-fast and that the message identifies the offender).

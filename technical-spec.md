@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.40
+**Version:** 1.41
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -317,6 +317,9 @@ it proves.
   enforced, not merely documented).
 
 **`config`**
+- `MAX_HOLDING_DAYS=9` is refused and 8 accepted (proves the ceiling the
+  broker's 14-day calendar horizon imposes is enforced at load, rather than
+  discovered later as an exit that never fires).
 - A complete environment produces a populated config object (happy path).
 - A missing `TINVEST_TOKEN` raises `ConfigError` naming that variable (proves
   fail-fast and that the message identifies the offender).
@@ -487,6 +490,10 @@ it proves.
   (proves the date is the key).
 
 **`broker.client`**
+- `get_past_trading_schedule` requests a range **ending** at the start of the
+  current UTC day, and refuses more than 14 days with the same `ValueError` as
+  its forward sibling (proves both windows respect the horizon the broker
+  actually enforces).
 - Each method returns the documented domain type given a scripted broker
   response (happy path per method).
 - A transport error raises `BrokerUnavailable` (proves transport failures are
@@ -603,6 +610,14 @@ it proves.
   modules outside `db.*` that were opening their own).
 
 **`market.session`**
+- `calendar()` after a refresh contains days **before** today as well as after
+  (proves the union — the forward-only window is why `MAX_AGE` could never fire).
+- A position entered 7 trading days ago reports 7 from
+  `clock.trading_days_between` against the calendar `refresh` actually builds,
+  not one the test constructed to span the query (proves the seam, which is
+  where #45 lived while both sides passed their own tests).
+- A backward fetch that fails leaves the forward cache populated and alerts
+  (proves the more urgent question still gets an answer).
 - A refresh that fails, then succeeds, then fails again alerts **twice** (proves
   the latch is per incident: it was set once and never cleared, so every outage
   after the first was silent from this module for the life of the process).
@@ -1144,6 +1159,21 @@ Loads and validates every setting once at startup.
   never branches on mode — sandbox remains selected by endpoint alone.
 - Adds `price_max_age_seconds` (default 120) and `price_max_move_pct` (default
   20), the bounds `broker.client` validates quotes against.
+- **`MAX_HOLDING_DAYS` may not exceed 8** (v1.41). A position's age is counted
+  against a calendar the broker will only serve 14 days at a time (#39), and 14
+  calendar days contain at most 10 weekdays, fewer once holidays are taken out.
+  A limit above that could not be measured, and the failure would be silent —
+  the count would come back short and `MAX_AGE` would not fire, which is #45 in
+  a new place. 8 is the largest value the one available window carries with a
+  holiday margin. `config.load()` refuses more, naming the broker horizon as the
+  cause rather than reporting a bare range error.
+
+  Below that ceiling the window is always sufficient, and the arithmetic is
+  worth stating because it is what makes a coverage check unnecessary: a
+  position old enough to predate the window has been held for every trading day
+  the window contains, which is at least 8, so the count still clears the
+  threshold. The undercount can only understate toward a number that still
+  fires the exit.
 - **`MAX_POSITION_PCT` is removed** (v1.30), with its cross-field check against
   `POSITION_SIZE_PCT`. It could not bind: the check guaranteed
   `position_size_pct ≤ max_position_pct`, which made the cap unreachable in
@@ -1729,6 +1759,22 @@ consecutive-failure alert and is retried as though waiting would help.
   contract to amend, and V10's recorded SDK version is what makes the change
   visible.
 
+**`async get_past_trading_schedule(days: int) → list[SessionInfo]`**
+- The `days` days **ending** at the start of the current UTC day, in order.
+  Same 14-day ceiling and the same `ValueError` above it, for the same reason:
+  the broker measures the horizon from the start of the day of `from_` and
+  rejects a longer one with `INVALID_ARGUMENT` / 30002 (#39).
+- Added in v1.41 because `get_trading_schedule` looks **forward**, which is
+  right for "is the market open" and wrong for "how long has this position been
+  held". `clock.trading_days_between` counts only dates the calendar contains,
+  so every day between a position's entry and yesterday fell outside it,
+  `trading_days_open` was capped at 1, and the `MAX_AGE` exit could never fire
+  (#45). Measured before the fix: 1 counted against 7 actual.
+- It is a separate function rather than a flag on `get_trading_schedule`,
+  because that function's anchoring is the one thing in this module verified
+  against the live account, and the two windows answer different questions.
+  Both compose the same private range call.
+
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 - Submits a market order using `key` as the broker-side idempotency key.
 - Raises `OrderRejected` carrying the broker's reason, `BrokerUnavailable`, or
@@ -1997,7 +2043,10 @@ was one of the eight sites opening its own connection.
 ### `zarabot/market/session.py`
 
 **`async refresh(days: int) → None`**
-- Caches the schedule. Called at startup and once per trading day.
+- Caches the schedule — **both windows** since v1.41, forward through
+  `get_trading_schedule` and backward through `get_past_trading_schedule`.
+  Called at startup and once per trading day, so this is two broker calls a
+  day, not two a cycle.
 - **The unavailability latch is cleared on the success path**, next to the cache
   write (v1.40). It was set on the first failure and never cleared, so a schedule
   that went unavailable, recovered, and went unavailable again produced silence
@@ -2053,6 +2102,15 @@ is the failure this cadence exists to prevent.
 - The cached schedule as a `TradingCalendar`, for callers that need to count
   trading days rather than ask whether a moment is inside a session. Empty
   calendar when the cache is empty; never `None`.
+- **It spans backwards as well as forwards (v1.41).** `refresh` fetches both
+  windows and this returns their union, oldest first, because the question it
+  serves — how many trading days a position has been open — is asked about the
+  past, and the forward window contains none of it (#45). The session questions
+  below read only the forward cache; nothing about them changes.
+- A failed backward fetch leaves the backward cache as it was and alerts under
+  rule 10, exactly like the forward one. It does not stop `refresh` storing a
+  forward window that did arrive: whether the market is open is the more urgent
+  of the two questions, and one answer is better than none.
 - Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
   minute** for data that changes at most daily and that this module already
   holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
