@@ -678,7 +678,13 @@ weekdays.
 **`async refresh(days: int) → None`**
 Loads `broker.client.get_trading_schedule`. Unavailable broker, or a response
 with no trading sessions, leaves any existing cache intact, logs WARNING, and
-alerts once (rule 10). Does not raise.
+alerts once (rule 10). The latch is cleared on the success path, so "once" is
+per incident rather than per process (#32). Does not raise.
+
+**`calendar() → TradingCalendar`**
+The cached schedule, for callers counting trading days. Empty calendar when the
+cache is empty; never `None`. `app.loops` reads this instead of fetching a
+fourteen-day schedule every cycle (#19).
 
 **`is_open(now: datetime) → bool`**
 True iff `now` is in a trading session, inclusive of `start`, exclusive of

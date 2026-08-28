@@ -10,7 +10,7 @@ from zarabot.broker.client import (
     BrokerUnavailable,
     get_trading_schedule,
 )
-from zarabot.models import SessionInfo
+from zarabot.models import SessionInfo, TradingCalendar
 from zarabot.telegram.notifier import alert
 
 _LOG = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ async def _report_unavailable() -> None:
 
 
 async def refresh(days: int) -> None:
-    global _cache
+    global _cache, _alerted
     try:
         fetched = await get_trading_schedule(days)
     except (BrokerUnavailable, BrokerRateLimited):
@@ -48,6 +48,22 @@ async def refresh(days: int) -> None:
         await _report_unavailable()
         return
     _cache = fetched
+    # Rule 10's "alert once" is per incident, not per process. Without this a
+    # schedule that went unavailable, recovered, and went unavailable again was
+    # silent from here for the rest of the process lifetime (#32).
+    _alerted = False
+
+
+def calendar() -> TradingCalendar:
+    """The cached schedule, for callers counting trading days rather than
+    asking whether a moment is inside a session.
+
+    `app.loops` fetched a fourteen-day schedule every cycle — once a minute,
+    for data that changes at most daily and that this module already holds,
+    refreshed daily by `run`'s schedule task (#19). Empty when the cache is
+    empty; never `None`.
+    """
+    return TradingCalendar(sessions=tuple(_cache or ()))
 
 
 def current_session(now: datetime) -> SessionInfo | None:
