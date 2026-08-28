@@ -113,6 +113,9 @@ Loads and validates every setting once at startup. Tokens never appear in
 **`ConfigError`**
 Raised when a required variable is missing or empty, a numeric value is out of
 range, or a cross-field rule fails. The message names the offending variable.
+`MAX_HOLDING_DAYS` is capped at 8 — the broker serves 14 days of calendar at a
+time, and a limit the calendar cannot measure would make `MAX_AGE` silently
+never fire (#45).
 
 **`Config`** (frozen)
 `tinvest_token: str`, `tinvest_account_id: str`, `trading_mode: str`,
@@ -623,6 +626,11 @@ order. A day that is not a session — `is_trading_day` false, or `1970-01-01`
 timestamps whatever the flag says — comes back as
 `SessionInfo(start=None, end=None, is_trading_day=False)`. Empty list when the
 exchange is absent from the response.
+**`async get_past_trading_schedule(days: int) → list[SessionInfo]`**
+The `days` days **ending** at the start of the current UTC day, same MOEX board
+and same 14-day `ValueError` as the forward one. Exists because
+`get_trading_schedule` looks forward, so counting a position's age against it
+found nothing before today and `MAX_AGE` could never fire (#45).
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 `confirm_margin_trade=False`. Raises `OrderRejected`. `commission` is
 `executed_commission` converted with `money_to_decimal`, or `None` until filled.

@@ -57,6 +57,13 @@ _RISK_VARS = frozenset(
 
 _REDACT = "***"
 
+# A position's age is counted against a calendar the broker serves 14 days at a
+# time (#39), and 14 calendar days hold at most 10 weekdays — fewer once
+# holidays are taken out. A limit above this could not be measured, and the
+# failure would be silent: the count comes back short and MAX_AGE never fires
+# (#45).
+_MAX_HOLDING_DAYS_CEILING = 8
+
 
 class ConfigError(Exception):
     """Invalid or missing configuration. Message names the variable, never a token."""
@@ -240,6 +247,16 @@ def load() -> Config:
     if max_open * position_size > 100:
         raise ConfigError("MAX_OPEN_POSITIONS × POSITION_SIZE_PCT exceeds 100")
 
+    max_holding = _positive_int("MAX_HOLDING_DAYS", _optional("MAX_HOLDING_DAYS"))
+    if max_holding > _MAX_HOLDING_DAYS_CEILING:
+        raise ConfigError(
+            f"MAX_HOLDING_DAYS must not exceed {_MAX_HOLDING_DAYS_CEILING}: a "
+            "position's age is counted against a calendar the broker serves 14 "
+            "days at a time, and 14 calendar days hold at most 10 weekdays. A "
+            "larger limit could not be measured and MAX_AGE would silently "
+            "never fire"
+        )
+
     watchlist = _csv(_require("WATCHLIST"))
     if not watchlist:
         raise ConfigError("WATCHLIST is missing or empty")
@@ -263,9 +280,7 @@ def load() -> Config:
         position_size_pct=position_size,
         stop_loss_pct=stop_loss,
         take_profit_pct=take_profit,
-        max_holding_days=_positive_int(
-            "MAX_HOLDING_DAYS", _optional("MAX_HOLDING_DAYS")
-        ),
+        max_holding_days=max_holding,
         max_open_positions=max_open,
         reentry_cooldown_minutes=_positive_int(
             "REENTRY_COOLDOWN_MINUTES", _optional("REENTRY_COOLDOWN_MINUTES")
