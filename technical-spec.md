@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.46
+**Version:** 1.47
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -1083,9 +1083,15 @@ Additionally, on exits booked from an exchange stop:
 - A failing backup alerts and does not stop trading (proves the priority order).
 
 **`sandbox.exchange`**
-- A market buy fills at the **next** bar's open, never the bar the decision was
-  made on (proves look-ahead is absent — the decision instant and the fill
-  instant are different bars).
+- A market buy is **priced at the next bar's open**, never at the bar the
+  decision was made on (proves look-ahead is absent: the price was not knowable
+  when the order was placed).
+- That fill is returned on the submitting call, not deferred (proves the
+  control flow matches live — a deferred fill sends every entry through
+  `open_position`'s crash-recovery path and trips the outage counter, which is
+  precisely the live/backtest divergence this rebuild removes).
+- An order placed on the last bar of history stays `SUBMITTED` and never fills
+  (proves history running out is not filled in with an invented price).
 - A bar whose **low** is below the stop triggers `STOP_LOSS`, even when its
   close is above it (proves the optimism is gone: on daily bars this is the
   difference between a 5% stop that fires and one that never does).
@@ -3095,10 +3101,30 @@ live path, with only the broker and the clock replaced.
 **Fill model.** The four rules below are where a backtest is honest or is not:
 
 1. **Decide at a bar's close, fill at the next bar's open.** A strategy sees
-   bars up to and including the one just closed, and any order it produces fills
-   on the next. This removes look-ahead completely. It is *conservative relative
-   to live*, which polls intra-day and can act within the bar — that gap is #13,
-   and it is now a measurable difference rather than a hidden one.
+   bars up to and including the one just closed, and the order it produces is
+   **priced at the next bar's open**. This removes look-ahead completely: the
+   price the order gets was not knowable when the decision was made. It is
+   *conservative relative to live*, which polls intra-day and can act within the
+   bar — that gap is #13, and it is now a measurable difference rather than a
+   hidden one.
+
+   The fill is returned **synchronously**, on the cycle that submitted it, even
+   though its price comes from the following bar (v1.47). Holding the order
+   `SUBMITTED` until the cursor advanced was the first design and it was wrong:
+   `execution.orders.open_position` treats an unfilled submission as an unknown
+   outcome and raises `BrokerUnavailable`, so **every** entry would have gone
+   through the crash-recovery path and every third one would have tripped the
+   market-data outage counter. A backtest whose control flow differs from live
+   on the ordinary path is the exact failure this rebuild exists to remove.
+
+   What that costs is one bar of precision in `entry_at`, and therefore in the
+   age `MAX_AGE` counts. It is named here rather than hidden because it is a
+   real difference; it is the smaller of the two, and the alternative distorted
+   the whole control flow to protect it.
+
+   An order placed on the **last** bar of history has no next open, so it stays
+   `SUBMITTED` and never fills. That is correct: history ran out, and inventing
+   a price for it would be the look-ahead this rule exists to prevent.
 2. **Stops are checked against the bar's low, take-profits against its high.**
    Checking the close, as the old code did, means a day that traded 8% down
    intraday and closed at −1% never triggers a 5% stop — while the exchange stop
