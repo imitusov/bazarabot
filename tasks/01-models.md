@@ -47,7 +47,18 @@ and only separate reasons make the rejection log diagnostic.
 `SessionInfo`, `RiskDecision`, `HaltState`, `ReconciliationReport`,
 `TradingCalendar`, `BacktestResult`.
 
-`OperationRecord` carries the broker's actual commission. `TradingCalendar` is
+`OperationRecord` carries `operation_type` and `state` as well as the broker's
+actual commission (v1.35). It used to carry neither, so the only way to tell a
+sale from a purchase was the sign of `payment`, and the only way to find a fee
+was to look for the substring `FEE` in a name the dataclass did not expose. Both
+are now explicit and both come from the broker verbatim: `operation_type` is the
+`OperationType` member's name (`OPERATION_TYPE_SELL`, `OPERATION_TYPE_BROKER_FEE`
+and so on) and `state` is the `OperationState` member's name.
+`broker.reconcile` has to identify one specific sale of one specific instrument
+to book an external close at the price it actually happened at (#11), and the
+sign of a payment is not a thing to build a money number on. `OperationRecord`
+also carries `parent_operation_id`, which is how a fee is tied to the trade that
+incurred it. `TradingCalendar` is
 the queried schedule that `clock.trading_days_between` and `market.session` read.
 `AppContext` (the assembled dependencies) and `LoadedModel` (an ML model plus its
 feature manifest) are **not** domain types — they live with `app.startup` and
@@ -94,6 +105,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A `Position` with `stop_protection = EXCHANGE` and no stop order key raises,
   as does `LOCAL` with one (proves the ownership pairing at the type level, not
   only in the repository).
+- An `OperationRecord` round-trips `operation_type`, `state` and
+  `parent_operation_id` as the broker's own values (proves a sale is identified
+  by what the broker called it, not inferred from the sign of `payment`).
 
 ## Expected output
 

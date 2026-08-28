@@ -34,6 +34,7 @@ Module **27** of 40 in `dependency-order.md`. Everything before it is complete a
 | `close_order_key` | TEXT NULL | FK → `orders(key)`. Null while open |
 | `exit_trigger` | TEXT NULL | CHECK IN (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`) |
 | `exit_price` | TEXT NULL | |
+| `exit_commission` | TEXT NULL | Decimal string. Set only for an `EXTERNAL` close, where there is no closing order row to carry it |
 | `exit_at` | TEXT NULL | UTC |
 | `realised_pnl` | TEXT NULL | Net of commission, actual not estimated |
 | `stop_protection` | TEXT NOT NULL | CHECK IN (`EXCHANGE`, `LOCAL`). Which side owns the stop trigger |
@@ -104,9 +105,51 @@ was one of the eight sites opening its own connection.
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
 - Compares `broker.client.get_portfolio()` against `db.positions.list_open()`.
-- Locally-open but absent at the broker → closed as `EXTERNAL` at the last known
-  price, passing `order = None`. This module records **no** order row: it did not
-  submit one, and inventing one would contradict its own prohibition on trading.
+- **Locally-open but absent at the broker → the sale is resolved from the
+  operations feed, or the position is not closed at all (v1.35).** Until now this
+  booked the exit at `get_last_price` as of the moment of *detection* — which can
+  be hours or days after the sale, and on a different day entirely if the bot was
+  down — and fell back to the position's own `entry_price` when the broker was
+  unreachable, recording an exit of exactly zero P&L. Both are numbers this
+  module made up, which rule 33 forbids (#11).
+
+  The resolution: `broker.client.get_operations(position.entry_at, now)`,
+  filtered to the position's `figi` and to the sale operation types
+  (`OPERATION_TYPE_SELL` and its `DELIVERY_SELL` and `SELL_MARGIN` variants).
+  Taking those sales oldest-first until their quantities cover the position's
+  units —
+    - `exit_price` is their **quantity-weighted average**;
+    - `closed_at` is the **latest** of their timestamps, which is when the
+      position left the account rather than when the bot noticed;
+    - `exit_commission` is the sum of the fee operations whose
+      `parent_operation_id` is one of those sales, passed through to
+      `db.positions.close`.
+  The window starts at `entry_at`, so a sale that happened at all is inside it,
+  however long the bot was down. This is the one place a weighted price is
+  legitimate, and it is legitimate because every input is a number the broker
+  reported about a trade that occurred — not, as in #10, a blend across orders
+  invented to fit a signature.
+
+  The close still passes `order = None`. This module records **no** order row: it
+  did not submit one, and inventing one would contradict its own prohibition on
+  trading.
+- **A sale that cannot be resolved is reported, not booked.** When the feed
+  returns no covering sale, or is unavailable, the position **stays open** and
+  the report carries
+  `{"type": "EXIT_UNRESOLVED", "ticker", "position_id", "reason"}`, with an
+  alert. Rule 33 already settles which way this falls: a position closed a cycle
+  late is recoverable and one closed at a substituted number is not, because
+  nothing downstream can tell the substituted number from a real one. A covering
+  sale that is genuinely absent means the shares left the account by some route
+  that was not a trade, and that is the owner's to explain rather than this
+  module's to guess.
+- `EXIT_UNRESOLVED` does **not** stop the bot, unlike rule 32's foreign holding.
+  That refusal exists for shares the bot might trade; this is a row describing
+  shares the account no longer has. While it stands, the row still marks to
+  market in `pnl.bot_equity` and `lifecycle.exits` may eventually try to sell it,
+  which the broker will refuse. Both are visible and alerted, and that is a
+  different kind of wrongness from a fabricated exit price written permanently
+  into the trade history.
 - **Present at the broker but unknown locally → reported as `FOREIGN_HOLDING`,
   never adopted.** This module previously called `db.positions.adopt` here, which
   derived a stop and target from the holding's *average cost* and so handed the
@@ -198,8 +241,22 @@ From `technical-spec.md` §8. Handle each exactly as written.
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - Broker and database agreeing produces no adjustments and no alert (happy path).
-- A position open in the database but absent at the broker is closed locally as
-  externally closed and alerted (proves the broker is authoritative).
+- A position open in the database but absent at the broker, whose operations feed
+  shows a sale, is closed locally as externally closed and alerted (proves the
+  broker is authoritative).
+- That close records the sale's price of 110, not the `get_last_price` of 92 at
+  the moment of detection, and dates `exit_at` to the sale rather than to `now`
+  (proves the exit is booked at what was traded and when — #11's own verification
+  case).
+- Two sales of 3 and 2 lots at 100 and 90 covering a 5-lot position record a
+  quantity-weighted 96.00 and an `exit_commission` summing both fee operations
+  (proves aggregation over the feed, and that the fee is no longer lost for want
+  of a closing order row).
+- The broker being unavailable leaves the position **open**, reports
+  `EXIT_UNRESOLVED` and alerts — and in particular records no exit at
+  `entry_price` (proves the zero-P&L fabrication is gone).
+- An operations feed containing no covering sale for the figi behaves identically
+  (proves absence and unavailability are both "unknown", never "zero").
 - A holding present at the broker but absent locally is reported as
   `FOREIGN_HOLDING` naming its ticker, lots and average price, and **no position
   row is written** (proves the bot no longer takes ownership of shares it did not

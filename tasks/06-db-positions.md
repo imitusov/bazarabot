@@ -34,6 +34,7 @@ Module **6** of 40 in `dependency-order.md`. Everything before it is complete an
 | `close_order_key` | TEXT NULL | FK → `orders(key)`. Null while open |
 | `exit_trigger` | TEXT NULL | CHECK IN (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`) |
 | `exit_price` | TEXT NULL | |
+| `exit_commission` | TEXT NULL | Decimal string. Set only for an `EXTERNAL` close, where there is no closing order row to carry it |
 | `exit_at` | TEXT NULL | UTC |
 | `realised_pnl` | TEXT NULL | Net of commission, actual not estimated |
 | `stop_protection` | TEXT NOT NULL | CHECK IN (`EXCHANGE`, `LOCAL`). Which side owns the stop trigger |
@@ -109,7 +110,7 @@ its own (rule 31).
   with `event = 'STOP_PROTECTION_CHANGED'` and `detail` naming the previous and
   new protection and stop-order key.
 
-**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
+**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None, exit_commission: Decimal | None = None) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
   P&L and the closing order.
 - Realised P&L is `(exit − entry) × lots × lot_size` **minus commission on both
@@ -127,6 +128,20 @@ its own (rule 31).
   disappeared at the broker was not closed by an order of ours, and there is
   nothing to record. Any other trigger with `order = None` raises `ValueError`,
   as does `EXTERNAL` **with** an order.
+- **`exit_commission` is the closing leg's commission when there is no closing
+  order to read it from (v1.35)**, which is exactly and only the `EXTERNAL` case.
+  Because `order` was `None` there, the closing commission was zero, and every
+  externally closed position overstated its realised result by the broker's fee —
+  permanently, since nothing later corrects it. `broker.reconcile` now resolves
+  the fee from the operations feed and passes it here. Supplying it with any
+  other trigger raises `ValueError`: everywhere else the commission is on the
+  order row, and a second source for the same number is a way for the two to
+  disagree. `None` with `EXTERNAL` is permitted and means the fee could not be
+  resolved; it contributes zero, as an unknown commission always has.
+- The value is **stored** in `positions.exit_commission`, not merely folded into
+  `realised_pnl`. A realised figure whose inputs are not all recorded cannot be
+  checked, and this is the only commission in the system with no order row of its
+  own to live on.
 - The `orders` table records orders **this bot submitted**. Fabricating a filled
   order row to satisfy a signature would put an order the bot never placed into
   its own audit trail, understate commission, and make "what did the bot do"
@@ -153,6 +168,11 @@ its own (rule 31).
   commissions currently recorded on its two orders. Called only by the commission
   backfill, after a late commission lands.
 - Raises `PositionStateError` when the position is absent or still open.
+- Uses the stored `exit_commission` for a position closed `EXTERNAL`, since there
+  is no closing order to re-read (v1.35). Without it the backfill would silently
+  discard a commission the operations feed had already resolved, turning a
+  correct figure back into the overstated one — a recomputation that makes a
+  number worse is the failure this function exists to prevent.
 - This is the only mutation permitted on a closed position, and it exists because
   a stored figure that silently disagrees with its inputs is worse than one
   corrected once and logged.
@@ -231,6 +251,13 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   as the mutation (proves the trail cannot diverge from the row it describes).
 - A `close` that rolls back leaves no event behind for that attempt (proves the
   event is not committed independently of the mutation).
+- `close` with an `exit_commission` on an `EXTERNAL` trigger nets it from
+  realised P&L and stores it; the same value with any other trigger raises
+  `ValueError` (proves the second commission source exists only where there is no
+  first one).
+- `recompute_realised` on an `EXTERNAL`-closed position preserves that
+  commission rather than dropping it to zero (proves the backfill cannot undo a
+  figure the operations feed resolved).
 - After a sequence of `set_stop_protection` calls, `list_events` reconstructs the
   full stop-ownership history in order (proves post-incident reconstruction needs
   nothing but the database).

@@ -34,6 +34,7 @@ Module **29** of 40 in `dependency-order.md`. Everything before it is complete a
 | `close_order_key` | TEXT NULL | FK → `orders(key)`. Null while open |
 | `exit_trigger` | TEXT NULL | CHECK IN (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`) |
 | `exit_price` | TEXT NULL | |
+| `exit_commission` | TEXT NULL | Decimal string. Set only for an `EXTERNAL` close, where there is no closing order row to carry it |
 | `exit_at` | TEXT NULL | UTC |
 | `realised_pnl` | TEXT NULL | Net of commission, actual not estimated |
 | `stop_protection` | TEXT NOT NULL | CHECK IN (`EXCHANGE`, `LOCAL`). Which side owns the stop trigger |

@@ -225,6 +225,18 @@ consecutive-failure alert and is retried as though waiting would help.
   source: `OperationRecord` carries no order identifier, so attributing an
   operation to an order would mean matching on instrument, time and quantity,
   which is ambiguous exactly when two similar orders are close together.
+- Each record carries `operation_type`, `state` and `parent_operation_id`
+  verbatim (v1.35). `commission` is populated for fee operations, identified by
+  `operation_type`, and is zero elsewhere. It was identified by testing whether
+  the string `FEE` appeared in an attribute the record did not expose, which
+  worked only because every fee type happens to contain it.
+- **Only `OPERATION_STATE_EXECUTED` operations are returned.** A cancelled or
+  still-progressing operation is not something that happened, and counting one
+  as a cost or as a sale is the same error in two places.
+- v1.35 gives this function a second consumer and a second purpose:
+  `broker.reconcile` reads it to answer the one question no order of ours can,
+  which is what a sale **the bot did not submit** was actually done at. That does
+  not make it the per-order commission source; the paragraph above still holds.
 
 **TLS requires the broker's own root certificate.** T-Bank's endpoint presents a
 certificate chaining to the Russian Trusted Root CA, which gRPC's built-in trust

@@ -1,8 +1,8 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.34
+**Version:** 1.35
 **Date:** 2026-08-18
-**Implements:** `business-brief.md` v1.10
+**Implements:** `business-brief.md` v1.11
 
 **Companion document.** Read the brief first. When this spec and the brief
 conflict, **the brief takes precedence**.
@@ -303,6 +303,9 @@ it proves.
 - A `Position` with `stop_protection = EXCHANGE` and no stop order key raises,
   as does `LOCAL` with one (proves the ownership pairing at the type level, not
   only in the repository).
+- An `OperationRecord` round-trips `operation_type`, `state` and
+  `parent_operation_id` as the broker's own values (proves a sale is identified
+  by what the broker called it, not inferred from the sign of `payment`).
 
 **`clock`**
 - `now()` returns a timezone-aware UTC datetime (proves the awareness invariant).
@@ -414,6 +417,13 @@ it proves.
   as the mutation (proves the trail cannot diverge from the row it describes).
 - A `close` that rolls back leaves no event behind for that attempt (proves the
   event is not committed independently of the mutation).
+- `close` with an `exit_commission` on an `EXTERNAL` trigger nets it from
+  realised P&L and stores it; the same value with any other trigger raises
+  `ValueError` (proves the second commission source exists only where there is no
+  first one).
+- `recompute_realised` on an `EXTERNAL`-closed position preserves that
+  commission rather than dropping it to zero (proves the backfill cannot undo a
+  figure the operations feed resolved).
 - After a sequence of `set_stop_protection` calls, `list_events` reconstructs the
   full stop-ownership history in order (proves post-incident reconstruction needs
   nothing but the database).
@@ -515,8 +525,22 @@ it proves.
 
 **`broker.reconcile`**
 - Broker and database agreeing produces no adjustments and no alert (happy path).
-- A position open in the database but absent at the broker is closed locally as
-  externally closed and alerted (proves the broker is authoritative).
+- A position open in the database but absent at the broker, whose operations feed
+  shows a sale, is closed locally as externally closed and alerted (proves the
+  broker is authoritative).
+- That close records the sale's price of 110, not the `get_last_price` of 92 at
+  the moment of detection, and dates `exit_at` to the sale rather than to `now`
+  (proves the exit is booked at what was traded and when — #11's own verification
+  case).
+- Two sales of 3 and 2 lots at 100 and 90 covering a 5-lot position record a
+  quantity-weighted 96.00 and an `exit_commission` summing both fee operations
+  (proves aggregation over the feed, and that the fee is no longer lost for want
+  of a closing order row).
+- The broker being unavailable leaves the position **open**, reports
+  `EXIT_UNRESOLVED` and alerts — and in particular records no exit at
+  `entry_price` (proves the zero-P&L fabrication is gone).
+- An operations feed containing no covering sale for the figi behaves identically
+  (proves absence and unavailability are both "unknown", never "zero").
 - A holding present at the broker but absent locally is reported as
   `FOREIGN_HOLDING` naming its ticker, lots and average price, and **no position
   row is written** (proves the bot no longer takes ownership of shares it did not
@@ -690,6 +714,12 @@ Additionally, `strategies.ml_model`:
   otherwise silently corrupt every exit statistic in the weekly report).
 - A recovered exit fill whose order row carries no trigger alerts and leaves the
   position open (proves a data defect is surfaced rather than guessed past).
+- A recovered entry fill with no matching signal opens the position with strategy
+  `UNATTRIBUTED`, and `ma_crossover`'s weekly figures are unchanged by it (proves
+  the systematic bias is gone — asserted on the report, which is where the harm
+  landed, rather than on the row).
+- An entry order created at 23:58 MSK and recovered at 00:05 MSK finds its signal
+  (proves the lookup follows the order rather than the calendar).
 - A rejected entry records the rejection and opens no position, and is not
   retried (proves entry rejections are terminal).
 - A rejected **exit** is retried on the following cycle and alerts immediately
@@ -971,7 +1001,18 @@ and only separate reasons make the rejection log diagnostic.
 `SessionInfo`, `RiskDecision`, `HaltState`, `ReconciliationReport`,
 `TradingCalendar`, `BacktestResult`.
 
-`OperationRecord` carries the broker's actual commission. `TradingCalendar` is
+`OperationRecord` carries `operation_type` and `state` as well as the broker's
+actual commission (v1.35). It used to carry neither, so the only way to tell a
+sale from a purchase was the sign of `payment`, and the only way to find a fee
+was to look for the substring `FEE` in a name the dataclass did not expose. Both
+are now explicit and both come from the broker verbatim: `operation_type` is the
+`OperationType` member's name (`OPERATION_TYPE_SELL`, `OPERATION_TYPE_BROKER_FEE`
+and so on) and `state` is the `OperationState` member's name.
+`broker.reconcile` has to identify one specific sale of one specific instrument
+to book an external close at the price it actually happened at (#11), and the
+sign of a payment is not a thing to build a money number on. `OperationRecord`
+also carries `parent_operation_id`, which is how a fee is tied to the trade that
+incurred it. `TradingCalendar` is
 the queried schedule that `clock.trading_days_between` and `market.session` read.
 `AppContext` (the assembled dependencies) and `LoadedModel` (an ML model plus its
 feature manifest) are **not** domain types — they live with `app.startup` and
@@ -1211,7 +1252,7 @@ its own (rule 31).
   with `event = 'STOP_PROTECTION_CHANGED'` and `detail` naming the previous and
   new protection and stop-order key.
 
-**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
+**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None, exit_commission: Decimal | None = None) → Position`**
 - Transitions a position to closed, recording the trigger, exit price, realised
   P&L and the closing order.
 - Realised P&L is `(exit − entry) × lots × lot_size` **minus commission on both
@@ -1229,6 +1270,20 @@ its own (rule 31).
   disappeared at the broker was not closed by an order of ours, and there is
   nothing to record. Any other trigger with `order = None` raises `ValueError`,
   as does `EXTERNAL` **with** an order.
+- **`exit_commission` is the closing leg's commission when there is no closing
+  order to read it from (v1.35)**, which is exactly and only the `EXTERNAL` case.
+  Because `order` was `None` there, the closing commission was zero, and every
+  externally closed position overstated its realised result by the broker's fee —
+  permanently, since nothing later corrects it. `broker.reconcile` now resolves
+  the fee from the operations feed and passes it here. Supplying it with any
+  other trigger raises `ValueError`: everywhere else the commission is on the
+  order row, and a second source for the same number is a way for the two to
+  disagree. `None` with `EXTERNAL` is permitted and means the fee could not be
+  resolved; it contributes zero, as an unknown commission always has.
+- The value is **stored** in `positions.exit_commission`, not merely folded into
+  `realised_pnl`. A realised figure whose inputs are not all recorded cannot be
+  checked, and this is the only commission in the system with no order row of its
+  own to live on.
 - The `orders` table records orders **this bot submitted**. Fabricating a filled
   order row to satisfy a signature would put an order the bot never placed into
   its own audit trail, understate commission, and make "what did the bot do"
@@ -1255,6 +1310,11 @@ its own (rule 31).
   commissions currently recorded on its two orders. Called only by the commission
   backfill, after a late commission lands.
 - Raises `PositionStateError` when the position is absent or still open.
+- Uses the stored `exit_commission` for a position closed `EXTERNAL`, since there
+  is no closing order to re-read (v1.35). Without it the backfill would silently
+  discard a commission the operations feed had already resolved, turning a
+  correct figure back into the overstated one — a recomputation that makes a
+  number worse is the failure this function exists to prevent.
 - This is the only mutation permitted on a closed position, and it exists because
   a stored figure that silently disagrees with its inputs is worse than one
   corrected once and logged.
@@ -1611,6 +1671,18 @@ consecutive-failure alert and is retried as though waiting would help.
   source: `OperationRecord` carries no order identifier, so attributing an
   operation to an order would mean matching on instrument, time and quantity,
   which is ambiguous exactly when two similar orders are close together.
+- Each record carries `operation_type`, `state` and `parent_operation_id`
+  verbatim (v1.35). `commission` is populated for fee operations, identified by
+  `operation_type`, and is zero elsewhere. It was identified by testing whether
+  the string `FEE` appeared in an attribute the record did not expose, which
+  worked only because every fee type happens to contain it.
+- **Only `OPERATION_STATE_EXECUTED` operations are returned.** A cancelled or
+  still-progressing operation is not something that happened, and counting one
+  as a cost or as a sale is the same error in two places.
+- v1.35 gives this function a second consumer and a second purpose:
+  `broker.reconcile` reads it to answer the one question no order of ours can,
+  which is what a sale **the bot did not submit** was actually done at. That does
+  not make it the per-order commission source; the paragraph above still holds.
 
 **TLS requires the broker's own root certificate.** T-Bank's endpoint presents a
 certificate chaining to the Russian Trusted Root CA, which gRPC's built-in trust
@@ -1674,9 +1746,51 @@ was one of the eight sites opening its own connection.
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
 - Compares `broker.client.get_portfolio()` against `db.positions.list_open()`.
-- Locally-open but absent at the broker → closed as `EXTERNAL` at the last known
-  price, passing `order = None`. This module records **no** order row: it did not
-  submit one, and inventing one would contradict its own prohibition on trading.
+- **Locally-open but absent at the broker → the sale is resolved from the
+  operations feed, or the position is not closed at all (v1.35).** Until now this
+  booked the exit at `get_last_price` as of the moment of *detection* — which can
+  be hours or days after the sale, and on a different day entirely if the bot was
+  down — and fell back to the position's own `entry_price` when the broker was
+  unreachable, recording an exit of exactly zero P&L. Both are numbers this
+  module made up, which rule 33 forbids (#11).
+
+  The resolution: `broker.client.get_operations(position.entry_at, now)`,
+  filtered to the position's `figi` and to the sale operation types
+  (`OPERATION_TYPE_SELL` and its `DELIVERY_SELL` and `SELL_MARGIN` variants).
+  Taking those sales oldest-first until their quantities cover the position's
+  units —
+    - `exit_price` is their **quantity-weighted average**;
+    - `closed_at` is the **latest** of their timestamps, which is when the
+      position left the account rather than when the bot noticed;
+    - `exit_commission` is the sum of the fee operations whose
+      `parent_operation_id` is one of those sales, passed through to
+      `db.positions.close`.
+  The window starts at `entry_at`, so a sale that happened at all is inside it,
+  however long the bot was down. This is the one place a weighted price is
+  legitimate, and it is legitimate because every input is a number the broker
+  reported about a trade that occurred — not, as in #10, a blend across orders
+  invented to fit a signature.
+
+  The close still passes `order = None`. This module records **no** order row: it
+  did not submit one, and inventing one would contradict its own prohibition on
+  trading.
+- **A sale that cannot be resolved is reported, not booked.** When the feed
+  returns no covering sale, or is unavailable, the position **stays open** and
+  the report carries
+  `{"type": "EXIT_UNRESOLVED", "ticker", "position_id", "reason"}`, with an
+  alert. Rule 33 already settles which way this falls: a position closed a cycle
+  late is recoverable and one closed at a substituted number is not, because
+  nothing downstream can tell the substituted number from a real one. A covering
+  sale that is genuinely absent means the shares left the account by some route
+  that was not a trade, and that is the owner's to explain rather than this
+  module's to guess.
+- `EXIT_UNRESOLVED` does **not** stop the bot, unlike rule 32's foreign holding.
+  That refusal exists for shares the bot might trade; this is a row describing
+  shares the account no longer has. While it stands, the row still marks to
+  market in `pnl.bot_equity` and `lifecycle.exits` may eventually try to sell it,
+  which the broker will refuse. Both are visible and alerted, and that is a
+  different kind of wrongness from a fabricated exit price written permanently
+  into the trade history.
 - **Present at the broker but unknown locally → reported as `FOREIGN_HOLDING`,
   never adopted.** This module previously called `db.positions.adopt` here, which
   derived a stop and target from the holding's *average cost* and so handed the
@@ -2072,6 +2186,25 @@ recorded is a different kind of thing from a wrong number that looks right.
   writes a permanent, plausible-looking lie into the trade history. A row with
   `intent = 'EXIT'` and no trigger is a data defect — alert and leave the
   position open for the owner to resolve.
+- **A discovered entry fill with no matching signal is attributed to
+  `UNATTRIBUTED`, never to a strategy (v1.35).** It was attributed to
+  `ma_crossover` — a real strategy whose weekly figures decide whether it stays
+  enabled — so every crash-recovered trade biased the evidence for one named
+  strategy, systematically and always in the same direction (#11).
+  `UNATTRIBUTED` is a sentinel in the same family as `ADOPTED`: the `positions`
+  schema already accepts it, `telegram.commands` iterates the *enabled*
+  strategies and so never shows it under one, and `reporter.weekly` groups by the
+  stored name and so shows it under a heading of its own. It is reported, and it
+  is never credited.
+- **The signal lookup spans the order's life, not one calendar date.** It reads
+  `db.signals.list_for_period(moscow_date(order.created_at), moscow_date(now))`.
+  Searching only today's Moscow date meant an order that filled at 23:58 MSK and
+  was recovered at 00:05 could never match the signal that produced it — the case
+  where recovery matters most was the one it failed on.
+- The reconstructed signal's `reference_price` is the order's `filled_price`.
+  There is no `Decimal("0")` fallback: this path is reached only for an order
+  that filled, and a zero reference price would be a second invented number on
+  the same few lines as the first.
 - Applies the entry cancel-and-re-read sequence above to any `ENTRY` order the
   broker still reports as `SUBMITTED` with lots filled, and reduces the position
   to its unsold remainder for any terminal `EXIT` order that sold part of it
@@ -2491,6 +2624,7 @@ explicit UTC offset. Booleans are `INTEGER` 0 or 1.
 | `close_order_key` | TEXT NULL | FK → `orders(key)`. Null while open |
 | `exit_trigger` | TEXT NULL | CHECK IN (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`) |
 | `exit_price` | TEXT NULL | |
+| `exit_commission` | TEXT NULL | Decimal string. Set only for an `EXTERNAL` close, where there is no closing order row to carry it |
 | `exit_at` | TEXT NULL | UTC |
 | `realised_pnl` | TEXT NULL | Net of commission, actual not estimated |
 | `stop_protection` | TEXT NOT NULL | CHECK IN (`EXCHANGE`, `LOCAL`). Which side owns the stop trigger |
@@ -2673,6 +2807,11 @@ historical record is the purpose of the project. Backups are retained 30 days.
   constraint. It is a separate migration rather than an edit to `001` because
   `001` has been applied — in tests, and potentially on a developer machine — and
   the forward-only rule holds without exception.
+- `004_position_exit_commission.sql` adds `exit_commission` to `positions`. It
+  exists because an `EXTERNAL` close has no closing order row, so its commission
+  had nowhere to live and was simply lost (#11). Nullable with no default and no
+  backfill: the live database holds zero closed positions, and inventing a
+  historical value would be the same mistake in a new place.
 - `003_position_events.sql` creates `position_events`. Forward-only, as above:
   `001` is already applied in tests and on the deployed database. The live
   database holds zero rows, so adding the table and enabling foreign-key
@@ -2930,6 +3069,14 @@ Applies across all modules. Every external failure mode has exactly one rule.
     remainder leaves cash unspent; an abandoned exit remainder leaves shares held
     against a decision to sell them, which is the state this system must not rest
     in.
+
+35. **A trade whose originating strategy is unknown is recorded as
+    `UNATTRIBUTED`**, and is never credited to a named strategy. This covers
+    crash-recovered entries with no matching signal, and any later path that
+    books a position the bot did not itself decide on. Per-strategy figures are
+    the evidence for enabling and disabling strategies: a default that names a
+    real strategy is not a missing datum, it is a wrong one, and it is wrong in
+    the same direction every time.
 
 ---
 

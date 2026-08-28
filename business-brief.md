@@ -1,7 +1,7 @@
 # Zarabot — Business Brief
 
-**Version:** 1.10
-**Date:** 2026-08-27
+**Version:** 1.11
+**Date:** 2026-08-28
 **Status:** Ready for technical spec
 
 **Companion document.** Implementation contracts are in `technical-spec.md`.
@@ -509,6 +509,21 @@ no listening ports.
   the watchlist holds two names in one sector; today it holds four names in four
   sectors, so the control would bind on nothing and is deliberately deferred
   rather than written and left untested.
+- **A trade is never credited to a strategy that did not produce it.** When the
+  bot recovers a fill after a crash and cannot find the signal behind it, the
+  position is recorded as unattributed and shown under that name. It used to be
+  recorded as the first strategy in the list. Per-strategy results are the whole
+  evidence base for turning a strategy off, and a default that names a real
+  strategy does not leave a gap in that evidence — it puts a wrong number in it,
+  in the same direction every time.
+- **A position sold outside the bot is booked from the broker's record of the
+  sale, or it is not booked at all.** The exit price and time come from the
+  account's operations history, so a sale made by hand on Friday is recorded on
+  Friday at what it fetched, not on Monday at Monday's price. When the sale
+  cannot be found there, the position is left open and the owner is told, rather
+  than closed at a stand-in number. The general principle is the same one behind
+  the daily loss limit: a figure the bot invented is indistinguishable afterwards
+  from one it measured, so it does not invent them.
 - **Halt state survives restarts.** If the bot was halted when it stopped, it
   comes back halted. A crash must never be a way to accidentally resume trading.
 - **Daily counters reset** at the start of each trading session, in Moscow time.

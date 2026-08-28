@@ -34,6 +34,7 @@ Module **26** of 40 in `dependency-order.md`. Everything before it is complete a
 | `close_order_key` | TEXT NULL | FK → `orders(key)`. Null while open |
 | `exit_trigger` | TEXT NULL | CHECK IN (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`, `EXTERNAL`) |
 | `exit_price` | TEXT NULL | |
+| `exit_commission` | TEXT NULL | Decimal string. Set only for an `EXTERNAL` close, where there is no closing order row to carry it |
 | `exit_at` | TEXT NULL | UTC |
 | `realised_pnl` | TEXT NULL | Net of commission, actual not estimated |
 | `stop_protection` | TEXT NOT NULL | CHECK IN (`EXCHANGE`, `LOCAL`). Which side owns the stop trigger |
@@ -263,6 +264,25 @@ recorded is a different kind of thing from a wrong number that looks right.
   writes a permanent, plausible-looking lie into the trade history. A row with
   `intent = 'EXIT'` and no trigger is a data defect — alert and leave the
   position open for the owner to resolve.
+- **A discovered entry fill with no matching signal is attributed to
+  `UNATTRIBUTED`, never to a strategy (v1.35).** It was attributed to
+  `ma_crossover` — a real strategy whose weekly figures decide whether it stays
+  enabled — so every crash-recovered trade biased the evidence for one named
+  strategy, systematically and always in the same direction (#11).
+  `UNATTRIBUTED` is a sentinel in the same family as `ADOPTED`: the `positions`
+  schema already accepts it, `telegram.commands` iterates the *enabled*
+  strategies and so never shows it under one, and `reporter.weekly` groups by the
+  stored name and so shows it under a heading of its own. It is reported, and it
+  is never credited.
+- **The signal lookup spans the order's life, not one calendar date.** It reads
+  `db.signals.list_for_period(moscow_date(order.created_at), moscow_date(now))`.
+  Searching only today's Moscow date meant an order that filled at 23:58 MSK and
+  was recovered at 00:05 could never match the signal that produced it — the case
+  where recovery matters most was the one it failed on.
+- The reconstructed signal's `reference_price` is the order's `filled_price`.
+  There is no `Decimal("0")` fallback: this path is reached only for an order
+  that filled, and a zero reference price would be a second invented number on
+  the same few lines as the first.
 - Applies the entry cancel-and-re-read sequence above to any `ENTRY` order the
   broker still reports as `SUBMITTED` with lots filled, and reduces the position
   to its unsold remainder for any terminal `EXIT` order that sold part of it
@@ -341,6 +361,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   otherwise silently corrupt every exit statistic in the weekly report).
 - A recovered exit fill whose order row carries no trigger alerts and leaves the
   position open (proves a data defect is surfaced rather than guessed past).
+- A recovered entry fill with no matching signal opens the position with strategy
+  `UNATTRIBUTED`, and `ma_crossover`'s weekly figures are unchanged by it (proves
+  the systematic bias is gone — asserted on the report, which is where the harm
+  landed, rather than on the row).
+- An entry order created at 23:58 MSK and recovered at 00:05 MSK finds its signal
+  (proves the lookup follows the order rather than the calendar).
 - A rejected entry records the rejection and opens no position, and is not
   retried (proves entry rejections are terminal).
 - A rejected **exit** is retried on the following cycle and alerts immediately
