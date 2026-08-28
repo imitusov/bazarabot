@@ -60,19 +60,38 @@ def _exchange(bars: list[Candle], **kwargs: object) -> SimulatedExchange:
     return SimulatedExchange(**defaults)  # type: ignore[arg-type]
 
 
-async def test_market_buy_fills_at_the_next_bars_open() -> None:
-    """Decide at a close, fill at the next open. Filling on the bar the decision
-    was made from is look-ahead: that bar's close was not knowable when the
-    order was placed."""
+async def test_market_buy_is_priced_at_the_next_bars_open() -> None:
+    """Decide at a close, take the next open's price. Pricing at the decision
+    bar is look-ahead: that price was not knowable when the order was placed."""
     bars = [_bar(0, "100", "101", "99", "100"), _bar(1, "105", "106", "104", "105")]
     ex = _exchange(bars)
     await ex.advance(bars[0].timestamp)
     order = await ex.post_market_order("k1", FIGI, Side.BUY, 10)
-    assert order.status is OrderStatus.SUBMITTED, "not filled on the decision bar"
-    await ex.advance(bars[1].timestamp)
-    settled = await ex.get_order_state("k1")
-    assert settled.status is OrderStatus.FILLED
-    assert settled.filled_price == Decimal("105"), "the next bar's open"
+    assert order.status is OrderStatus.FILLED
+    assert order.filled_price == Decimal("105"), "the next bar's open"
+
+
+async def test_the_fill_is_returned_on_the_submitting_call() -> None:
+    """A deferred fill sends every entry through open_position's crash-recovery
+    path and trips the outage counter — a live/backtest divergence on the
+    ordinary path, which is what this rebuild exists to remove (#12)."""
+    bars = [_bar(0, "100", "101", "99", "100"), _bar(1, "105", "106", "104", "105")]
+    ex = _exchange(bars)
+    await ex.advance(bars[0].timestamp)
+    order = await ex.post_market_order("k1", FIGI, Side.BUY, 10)
+    assert order.filled_lots == 10
+    assert order.settled_at is not None
+
+
+async def test_an_order_on_the_last_bar_never_fills() -> None:
+    """History ran out. Inventing a price for it would be the look-ahead the
+    next-open rule exists to prevent."""
+    bars = [_bar(0, "100", "101", "99", "100")]
+    ex = _exchange(bars)
+    await ex.advance(bars[0].timestamp)
+    order = await ex.post_market_order("k1", FIGI, Side.BUY, 10)
+    assert order.status is OrderStatus.SUBMITTED
+    assert order.filled_price is None
 
 
 async def test_stop_fires_on_the_bar_low_not_the_close() -> None:
@@ -144,9 +163,7 @@ async def test_commission_is_a_percentage_with_a_minimum() -> None:
         bars, commission=Commission(pct=Decimal("0.05"), minimum=Decimal("20"))
     )
     await ex.advance(bars[0].timestamp)
-    await ex.post_market_order("k1", FIGI, Side.BUY, 10)
-    await ex.advance(bars[1].timestamp)
-    settled = await ex.get_order_state("k1")
+    settled = await ex.post_market_order("k1", FIGI, Side.BUY, 10)
     # Turnover 1000 x 0.05% = 0.50, below the 20 minimum.
     assert settled.commission == Decimal("20")
 
@@ -154,10 +171,9 @@ async def test_commission_is_a_percentage_with_a_minimum() -> None:
         bars, commission=Commission(pct=Decimal("1"), minimum=Decimal("0.01"))
     )
     await ex2.advance(bars[0].timestamp)
-    await ex2.post_market_order("k2", FIGI, Side.BUY, 10)
-    await ex2.advance(bars[1].timestamp)
+    settled2 = await ex2.post_market_order("k2", FIGI, Side.BUY, 10)
     # Turnover 1000 x 1% = 10, above the minimum.
-    assert (await ex2.get_order_state("k2")).commission == Decimal("10")
+    assert settled2.commission == Decimal("10")
 
 
 async def test_it_raises_what_the_real_client_raises() -> None:
@@ -175,7 +191,6 @@ async def test_portfolio_reports_cash_and_holdings() -> None:
     ex = _exchange(bars)
     await ex.advance(bars[0].timestamp)
     await ex.post_market_order("k1", FIGI, Side.BUY, 10)
-    await ex.advance(bars[1].timestamp)
     state = await ex.get_portfolio()
     assert state.cash < Decimal("100000"), "cash spent on the fill"
     assert [p.ticker for p in state.positions] == ["SBER"]
