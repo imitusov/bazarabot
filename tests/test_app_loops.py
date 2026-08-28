@@ -39,6 +39,7 @@ from zarabot.models import (
     StopOrderRecord,
     StopOrderStatus,
     StopProtection,
+    TradingCalendar,
 )
 
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
@@ -53,7 +54,7 @@ PRE_OPEN = datetime(2026, 3, 16, 6, 0, tzinfo=UTC)
 LATE = datetime(2026, 3, 16, 11, 0, tzinfo=UTC)
 
 
-def _config() -> Config:
+def _config(watchlist: tuple[str, ...] = ("SBER",)) -> Config:
     return Config(
         tinvest_token="t",  # noqa: S106
         tinvest_account_id="a",
@@ -68,7 +69,7 @@ def _config() -> Config:
         max_open_positions=10,
         reentry_cooldown_minutes=120,
         daily_loss_limit_pct=Decimal("5"),
-        watchlist=("SBER",),
+        watchlist=watchlist,
         enabled_strategies=("ma_crossover",),
         ml_model_path=None,
         poll_interval_seconds=60,
@@ -79,9 +80,11 @@ def _config() -> Config:
     )
 
 
-def _ctx(strategies: tuple[object, ...] = ()) -> AppContext:
+def _ctx(
+    strategies: tuple[object, ...] = (), watchlist: tuple[str, ...] = ("SBER",)
+) -> AppContext:
     return AppContext(
-        config=_config(),
+        config=_config(watchlist=watchlist),
         strategies=strategies,  # type: ignore[arg-type]
         halt=None,
         reconciliation=ReconciliationReport(ran_at=NOW, adjustments=()),
@@ -199,6 +202,7 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
         return False
 
     async def _schedule(days: int) -> list[SessionInfo]:
+        calls.append("get_trading_schedule")
         return [SESSION]
 
     async def _resolve(moment: datetime) -> list[object]:
@@ -251,6 +255,7 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr(loops, "refresh", _refresh)
     monkeypatch.setattr(loops, "build_application", _IdleTelegram)
     monkeypatch.setattr(loops, "cache_exhausted", lambda moment: False)
+    monkeypatch.setattr(loops, "calendar", lambda: TradingCalendar(sessions=(SESSION,)))
     loops._cache_exhausted_alerted = False
     loops._price_rejected_alerted = False
     loops._refreshed_on = None
@@ -712,6 +717,127 @@ async def test_consecutive_price_rejections_alert_once_until_rearmed(
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
     assert len(alerts) == 2
     assert "2" in alerts[1]
+
+
+async def test_duplicate_ticker_in_one_pass_opens_one_and_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard was doing its job; the caller routed its success through the
+    crash path — a spurious alert and the rest of the pass abandoned (#24)."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    opened: list[str] = []
+    recorded: list[tuple[str, RiskDecision]] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _open(signal: Signal, lots: int, instrument: Instrument) -> Position:
+        opened.append(signal.ticker)
+        return _position(ticker=signal.ticker)
+
+    async def _record(signal: Signal, decision: RiskDecision) -> None:
+        recorded.append((signal.ticker, decision))
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(loops, "open_position", _open)
+    monkeypatch.setattr(loops, "record", _record)
+    monkeypatch.setattr(loops, "alert", _alert)
+
+    ctx = _ctx(strategies=(_BuyStrategy(), _BuyStrategy()))
+    await trading_cycle(ctx)
+
+    assert opened == ["SBER"]
+    assert not [text for text in alerts if "crash" in text.lower()]
+    duplicates = [
+        decision
+        for ticker, decision in recorded
+        if not decision.approved and decision.reason is RejectionReason.DUPLICATE_TICKER
+    ]
+    assert len(duplicates) == 1
+
+
+@pytest.mark.parametrize("failure", ["position_state", "duplicate_order"])
+async def test_a_refused_entry_does_not_abandon_the_rest_of_the_pass(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PositionStateError and DuplicateOrderError are ordinary outcomes beside
+    OrderRejected; only the last had a branch, so a correct refusal reached the
+    supervisor and skipped every remaining ticker (#24)."""
+    from zarabot.app.loops import trading_cycle
+    from zarabot.db.orders import DuplicateOrderError
+    from zarabot.db.positions import PositionStateError
+
+    raised: Exception = (
+        PositionStateError("dup")
+        if failure == "position_state"
+        else DuplicateOrderError("dup")
+    )
+    calls: list[str] = []
+    attempted: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _open(signal: Signal, lots: int, instrument: Instrument) -> Position:
+        attempted.append(signal.ticker)
+        raise raised
+
+    monkeypatch.setattr(loops, "open_position", _open)
+    ctx = _ctx(strategies=(_BuyStrategy(),), watchlist=("SBER", "GAZP"))
+    await trading_cycle(ctx)
+    assert attempted == ["SBER", "GAZP"]
+
+
+async def test_cycle_issues_no_trading_schedule_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fourteen-day schedule was re-fetched once a minute for data
+    market.session already holds and refreshes daily (#19)."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(stop_protection=StopProtection.LOCAL)
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert "get_trading_schedule" not in calls
+
+
+async def test_max_age_uses_the_cached_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The calendar handed to lifecycle.exits comes from market.session."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    seen: list[TradingCalendar] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    marker = TradingCalendar(sessions=(SESSION,))
+    monkeypatch.setattr(loops, "calendar", lambda: marker)
+    position = _position(stop_protection=StopProtection.LOCAL)
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    def _days(start: datetime, end: datetime, cal: TradingCalendar) -> int:
+        seen.append(cal)
+        return 0
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "trading_days_between", _days)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert seen == [marker]
 
 
 async def test_run_one_task_failure_does_not_kill_others(
@@ -1292,9 +1418,7 @@ async def test_two_absences_alone_do_not_close_a_position(
     booked: list[object] = []
     alerts: list[str] = []
     _patch_defaults(monkeypatch, calls)
-    _arrange_stop_detection(
-        monkeypatch, _exchange_position(), [], {}, booked, alerts
-    )
+    _arrange_stop_detection(monkeypatch, _exchange_position(), [], {}, booked, alerts)
 
     await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
 
@@ -1625,9 +1749,7 @@ async def test_unmarkable_equity_writes_no_opening_snapshot(
     async def _do_halt(reason: HaltReason, detail: str, at: datetime) -> None:
         halted.append(reason)
 
-    _patch_pnl(
-        monkeypatch, equity=PriceRejected("unusable"), rows=[], written=written
-    )
+    _patch_pnl(monkeypatch, equity=PriceRejected("unusable"), rows=[], written=written)
     monkeypatch.setattr(loops, "alert", _alert)
     monkeypatch.setattr(loops, "halt", _do_halt)
 
