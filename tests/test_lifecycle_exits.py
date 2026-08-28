@@ -84,6 +84,30 @@ def _position(**overrides: object) -> Position:
     return Position(**fields)  # type: ignore[arg-type]
 
 
+def test_unmeasured_age_suppresses_only_max_age() -> None:
+    """A short count reads as a young position — the silent shape of #45. None
+    cannot be mistaken for a measurement, and leaves stop and target working."""
+    config = _config(max_holding_days=1)
+    stale = _position()
+    closing = _session()
+
+    assert evaluate(stale, Decimal("100"), IN_WINDOW, closing, None, config) is None, (
+        "age cannot fire when it cannot be measured"
+    )
+    assert (
+        evaluate(stale, Decimal("100"), IN_WINDOW, closing, 5, config)
+        is ExitTrigger.MAX_AGE
+    ), "and does fire when it can"
+    assert (
+        evaluate(stale, Decimal("90"), IN_WINDOW, closing, None, config)
+        is ExitTrigger.STOP_LOSS
+    )
+    assert (
+        evaluate(stale, Decimal("120"), IN_WINDOW, closing, None, config)
+        is ExitTrigger.TAKE_PROFIT
+    )
+
+
 def test_price_exactly_at_stop_triggers_stop_loss() -> None:
     assert (
         evaluate(_position(), STOP, IN_WINDOW, _session(), 0, _config())

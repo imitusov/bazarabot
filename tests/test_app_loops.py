@@ -251,6 +251,8 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr(loops, "build_application", _IdleTelegram)
     monkeypatch.setattr(loops, "cache_exhausted", lambda moment: False)
     monkeypatch.setattr(loops, "calendar", lambda: TradingCalendar(sessions=(SESSION,)))
+    monkeypatch.setattr(loops, "covers", lambda day: True)
+    loops._age_unmeasurable_alerted = False
     loops._cache_exhausted_alerted = False
     loops._price_rejected_alerted = False
     loops._refreshed_on = None
@@ -741,6 +743,7 @@ async def test_duplicate_ticker_in_one_pass_opens_one_and_does_not_crash(
     monkeypatch.setattr(loops, "open_position", _open)
     monkeypatch.setattr(loops, "record", _record)
     monkeypatch.setattr(loops, "alert", _alert)
+
     async def _fetch_instrument(ticker: str) -> Instrument:
         return _make_instrument()
 
@@ -790,6 +793,7 @@ async def test_a_refused_entry_does_not_abandon_the_rest_of_the_pass(
         raise raised
 
     monkeypatch.setattr(loops, "open_position", _open)
+
     async def _fetch_instrument(ticker: str) -> Instrument:
         return _make_instrument()
 
@@ -814,6 +818,82 @@ def test_loops_cannot_fetch_a_trading_schedule() -> None:
     assert not hasattr(loops, "get_trading_schedule")
     source = Path(loops.__file__).read_text()
     assert "get_trading_schedule" not in source
+
+
+async def test_uncovered_entry_suppresses_max_age_and_alerts_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An age the recorded calendar cannot reach must not be passed as a short
+    number — that reads as a young position, which is what #45 was."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    seen: list[int | None] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(stop_protection=StopProtection.LOCAL)
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    def _evaluate(
+        pos: Position,
+        price: Decimal,
+        moment: datetime,
+        session: SessionInfo,
+        days: int | None,
+        config: Config,
+    ) -> ExitTrigger | None:
+        seen.append(days)
+        return None
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "covers", lambda day: False)
+    monkeypatch.setattr(loops, "evaluate", _evaluate)
+    monkeypatch.setattr(loops, "alert", _alert)
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert seen == [None]
+    assert len(alerts) == 1
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1, "latched, like every other alert in this module"
+
+
+async def test_covered_entry_passes_the_measured_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    seen: list[int | None] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(stop_protection=StopProtection.LOCAL)
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    def _evaluate(
+        pos: Position,
+        price: Decimal,
+        moment: datetime,
+        session: SessionInfo,
+        days: int | None,
+        config: Config,
+    ) -> ExitTrigger | None:
+        seen.append(days)
+        return None
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "evaluate", _evaluate)
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert seen == [0]
 
 
 async def test_max_age_uses_the_cached_calendar(
