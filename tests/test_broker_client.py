@@ -204,6 +204,9 @@ class _Capture:
         self.order_message = ""
         self.last_price = Decimal("123.45")
         self.last_price_time: datetime | None = NOW
+        # When true the quote object carries no `time` attribute at all, which
+        # is what a renamed SDK field would look like (#33).
+        self.last_price_omit_time = False
         self.schedule_override: list[SimpleNamespace] | None = None
         self.portfolio_positions: list[SimpleNamespace] = _default_portfolio_positions()
         self.portfolio_total_currencies = PORTFOLIO_TOTAL_CURRENCIES
@@ -268,14 +271,10 @@ class _Services:
 
     async def get_last_prices(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_last_prices", kwargs)
-        return SimpleNamespace(
-            last_prices=[
-                SimpleNamespace(
-                    price=decimal_to_quotation(self._capture.last_price),
-                    time=self._capture.last_price_time,
-                )
-            ]
-        )
+        quote = SimpleNamespace(price=decimal_to_quotation(self._capture.last_price))
+        if not self._capture.last_price_omit_time:
+            quote.time = self._capture.last_price_time
+        return SimpleNamespace(last_prices=[quote])
 
     async def get_portfolio(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_portfolio", kwargs)
@@ -1171,6 +1170,22 @@ async def test_stale_quote_raises_price_rejected_at_age_boundary(
     with pytest.raises(PriceRejected) as exc:
         await get_last_price("FIGI-AGE-STALE")
     assert not isinstance(exc.value, BrokerUnavailable)
+
+
+async def test_missing_time_attribute_raises_rather_than_rejecting(
+    capture: _Capture,
+) -> None:
+    """A renamed SDK field must surface as the integration break it is.
+
+    Measured against the live account: LastPrice carries figi, price, time,
+    instrument_uid and last_price_type — there is no `timestamp` to fall back
+    to. Probing for one could only ever turn a rename into every quote in every
+    cycle looking like bad broker data, in which state no LOCAL position's
+    stop-loss can fire (#33).
+    """
+    capture.last_price_omit_time = True
+    with pytest.raises(AttributeError, match="time"):
+        await get_last_price("FIGI-RENAMED")
 
 
 async def test_quote_without_timestamp_is_rejected(capture: _Capture) -> None:
