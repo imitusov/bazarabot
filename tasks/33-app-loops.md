@@ -152,8 +152,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     generalises #4, #5, #8 and #11, which are four instances of the same
     mistake.
 
----
-
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.

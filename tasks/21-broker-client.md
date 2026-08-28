@@ -79,9 +79,11 @@ what has filled so far. `FILLED` means `filled_lots == lots` and nothing further
 is coming. Collapsing partial into filled erased the distinction at the boundary,
 so no caller could act on it: the bot opened a position for the filled portion
 while the remainder stayed live, and the account then held more shares than the
-position row recorded (#10). What the *callers* do about a partial fill —
-aggregating multi-slice exits into a quantity-weighted price, capping the exit
-loop — belongs to `execution.orders` and is not settled here.
+position row recorded (#10). What the *callers* do about a partial fill belongs
+to `execution.orders`, and v1.34 settles it there — as neither of the two
+remedies this paragraph once anticipated. There is no multi-slice exit loop to
+cap and no quantity-weighted price to compute, because a partial no longer
+settles as a fill and so never starts a second slice.
 
 **`async get_instrument(ticker: str) → Instrument`**
 - Raises `InstrumentNotFound` when the ticker does not resolve, `BrokerUnavailable`
@@ -174,6 +176,22 @@ consecutive-failure alert and is retried as though waiting would help.
 **`async cancel_stop_order(stop_order_id: str) → None`**
 - Idempotent. An already-cancelled or already-executed stop order is not an
   error, because the executor calls this while racing the exchange.
+
+**`async cancel_order(key: str) → None`**
+- Cancels a live ordinary order by its idempotency key, with
+  `order_id_type=ORDER_ID_TYPE_REQUEST` — the same lookup `get_order_state`
+  uses, because after a crash the exchange identifier is precisely what was
+  lost.
+- Idempotent in the same sense as `cancel_stop_order`: an order already filled,
+  already cancelled, or unknown to the broker is **not** an error. The caller is
+  racing the exchange by definition, and the authoritative answer comes from the
+  `get_order_state` that follows it, never from this call's own outcome.
+- Raises `BrokerUnavailable` or `BrokerRateLimited` on transport failure, and
+  nothing else.
+- Added in v1.34 so `execution.orders` can abandon the unfilled remainder of a
+  partially filled **entry** (#10). It must never be used on an exit: a
+  half-exited position is the one state the system must not rest in, and the
+  remainder there is retried, never dropped.
 
 **`async list_stop_orders() → list[StopOrderRecord]`**
 - Every standing stop order on the account. Consumed by reconciliation.
@@ -303,8 +321,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     nothing downstream can tell the invented one from a real one. This rule
     generalises #4, #5, #8 and #11, which are four instances of the same
     mistake.
-
----
 
 ## Test cases
 

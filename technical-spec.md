@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.33
+**Version:** 1.34
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.10
 
@@ -731,11 +731,34 @@ Additionally, `strategies.ml_model`:
   and starts the cooldown (proves the exchange-initiated close path).
 
 **partial fills**
-- An entry filling 2 of 3 lots opens a position of 2 with stop and target from
-  the achieved price, and places a stop for 2 (proves sizing follows the fill).
-- The unfilled remainder produces no follow-up order (proves it is abandoned).
-- An exit filling partially retries the remainder until flat (proves the system
-  never rests half-exited).
+- A `post_market_order` returning `SUBMITTED` with 2 of 3 lots filled cancels the
+  order and re-reads it with `get_order_state`; the position is opened from the
+  **re-read**, not from the response that came back alongside the cancel (proves
+  the number written down is the broker's settled one, per rule 33).
+- The re-read showing 2 filled opens a position of 2 with stop and target from
+  the achieved price, and places a stop for 2 (proves sizing follows the fill,
+  and that the stop quantity matches what is actually held — the mismatch #10
+  named).
+- No follow-up buy is submitted for the abandoned remainder (proves it is
+  cancelled, not chased).
+- A partial entry alerts (proves the liquidity signal reaches the owner).
+- `cancel_order` raising `BrokerUnavailable` leaves the order unresolved, opens
+  no position and writes nothing (proves an unconfirmed outcome is never written
+  down, and that the recovery path — not a guess — is what resolves it).
+- A `SUBMITTED` entry with **zero** lots filled is not cancelled (proves a merely
+  pending market order is not converted into a missed entry).
+- `close_position` submits exactly one sell order and, when the broker reports a
+  partial, raises `ExitFailed` having submitted nothing further (proves the
+  slicing loop is gone, and with it the unbounded submission it allowed).
+- `resolve_unfinished` settling an `EXIT` order `CANCELLED` with 2 of 5 lots
+  filled calls `update_lots(3)`, leaves the position **open**, and alerts (proves
+  the book and the account agree on quantity, and that a half-exited position is
+  never closed at a price for lots it still holds).
+- That same case writes a `LOTS_ADJUSTED` event and no `CLOSED` event (proves the
+  unbooked slice is recorded rather than silent).
+- `resolve_unfinished` settling an `EXIT` order whose `filled_lots` reaches the
+  position's count closes it (proves a cancel landing after a full fill still
+  books the exit).
 
 Additionally, on exits booked from an exchange stop:
 - `close_executed_stop` records the **broker's** executed price, not the price
@@ -1442,9 +1465,11 @@ what has filled so far. `FILLED` means `filled_lots == lots` and nothing further
 is coming. Collapsing partial into filled erased the distinction at the boundary,
 so no caller could act on it: the bot opened a position for the filled portion
 while the remainder stayed live, and the account then held more shares than the
-position row recorded (#10). What the *callers* do about a partial fill —
-aggregating multi-slice exits into a quantity-weighted price, capping the exit
-loop — belongs to `execution.orders` and is not settled here.
+position row recorded (#10). What the *callers* do about a partial fill belongs
+to `execution.orders`, and v1.34 settles it there — as neither of the two
+remedies this paragraph once anticipated. There is no multi-slice exit loop to
+cap and no quantity-weighted price to compute, because a partial no longer
+settles as a fill and so never starts a second slice.
 
 **`async get_instrument(ticker: str) → Instrument`**
 - Raises `InstrumentNotFound` when the ticker does not resolve, `BrokerUnavailable`
@@ -1537,6 +1562,22 @@ consecutive-failure alert and is retried as though waiting would help.
 **`async cancel_stop_order(stop_order_id: str) → None`**
 - Idempotent. An already-cancelled or already-executed stop order is not an
   error, because the executor calls this while racing the exchange.
+
+**`async cancel_order(key: str) → None`**
+- Cancels a live ordinary order by its idempotency key, with
+  `order_id_type=ORDER_ID_TYPE_REQUEST` — the same lookup `get_order_state`
+  uses, because after a crash the exchange identifier is precisely what was
+  lost.
+- Idempotent in the same sense as `cancel_stop_order`: an order already filled,
+  already cancelled, or unknown to the broker is **not** an error. The caller is
+  racing the exchange by definition, and the authoritative answer comes from the
+  `get_order_state` that follows it, never from this call's own outcome.
+- Raises `BrokerUnavailable` or `BrokerRateLimited` on transport failure, and
+  nothing else.
+- Added in v1.34 so `execution.orders` can abandon the unfilled remainder of a
+  partially filled **entry** (#10). It must never be used on an exit: a
+  half-exited position is the one state the system must not rest in, and the
+  remainder there is retried, never dropped.
 
 **`async list_stop_orders() → list[StopOrderRecord]`**
 - Every standing stop order on the account. Consumed by reconciliation.
@@ -1921,6 +1962,12 @@ Owns order submission, the submission locks, and crash recovery.
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
   cancel; submits the market sell directly.
+- Submits exactly **one** sell order, for the position's whole lot count. Until
+  v1.34 it looped until the position was flat, one order per slice, and then
+  booked the close from the *last* slice alone — every earlier slice's price and
+  commission dropped out of realised P&L, and nothing capped how many orders the
+  loop could submit (#10). Both defects go with the loop, which is unreachable
+  now that a partial settles as `SUBMITTED` rather than `FILLED`.
 - Records `trigger` on the order row via `record_submitting`, so that an exit
   interrupted by a crash can be attributed correctly on recovery.
 - Raises `ValueError` for `STOP_LOSS` **only when the position is `EXCHANGE`**.
@@ -1954,15 +2001,67 @@ realised P&L was wrong, and the weekly report's gapped-exit section measured a
 difference the bot had manufactured rather than slippage the market caused
 (#4).
 
-**Partial fills.** An entry that fills partially opens a position for the lots
-actually filled, sizes stop and target from the achieved average price, and
-places the stop for that quantity. The unfilled remainder is abandoned, never
-chased with a follow-up order — the strategy's entry price is stale by then, and
-topping up would breach the one-open-position-per-ticker invariant. A partial
-fill is alerted, because on a liquid watchlist it indicates the instrument is
-thinner than the watchlist assumes. A partial fill on an **exit** is retried for
-the remainder until the position is flat; a half-exited position is the one state
-the system must never rest in.
+**Partial fills (v1.34).** Since v1.27 the broker layer reports a partial as
+`SUBMITTED`, not `FILLED`, so a partial never reaches the code that books a
+close. That one change removed both of the defects #10 named in this module — the
+exit loop that sliced, and the aggregation it would have needed — and exposed a
+third that had been hiding behind them: nothing decided what to *do* with the
+partial. This is that decision.
+
+**On entry.** A `post_market_order` returning `SUBMITTED` with `filled_lots > 0`
+is a live order holding shares the bot has no position row for and no stop
+against. The remainder is abandoned — the strategy's entry price is stale by then
+and topping up would breach the one-open-position-per-ticker invariant — but
+abandoning it means *cancelling* it, not ignoring it:
+
+1. `broker.client.cancel_order(key)`.
+2. `broker.client.get_order_state(key)` — the settled truth. The lots, price and
+   commission written down come from this read and never from the pre-cancel
+   response, which was already stale when it arrived (rule 33).
+3. Re-read shows `filled_lots > 0` → settle the order `FILLED` for those lots,
+   open the position for them, size stop and target from the achieved price,
+   place the stop for that quantity, and alert. The alert is not optional: on a
+   watchlist chosen for liquidity, a partial says the instrument is thinner than
+   the watchlist assumes.
+4. Re-read shows nothing filled → settle `CANCELLED`; open no position.
+5. Either call fails → **write nothing**. The order stays unresolved and
+   `resolve_unfinished` repeats this sequence on the next cycle. An unresolved
+   order with shares behind it is recoverable; a position row written from a
+   number nothing confirmed is not.
+
+A `SUBMITTED` response with `filled_lots == 0` is **not** cancelled. Nothing is
+held, so nothing is unprotected, and cancelling a market order that is merely
+pending would turn every slow fill into a missed entry. It is left unresolved and
+settled by `resolve_unfinished`, which is where a zero-fill order was already
+settled.
+
+**On exit.** One sell order per `close_position` call, for the position's whole
+lot count. There is no loop: a partial settles nothing, so there is no second
+iteration to reach and no unbounded submission to cap. `close_position` raises
+`ExitFailed` and the caller retries on the next cycle — rule 4's existing
+behaviour, needing no exception of its own.
+
+**A terminal exit that sold only part of a position reduces the position to the
+unsold remainder and leaves it open.** When `resolve_unfinished` settles an
+`EXIT` order as `CANCELLED` or `REJECTED` with `0 < filled_lots < position.lots`,
+it calls `db.positions.update_lots` with the remainder and alerts, naming the
+ticker, the lots sold, the lots left and the price. It does **not** close the
+position. The position is not flat, and closing it would leave shares at the
+broker with no local row — which the next reconciliation reports as a foreign
+holding and `app.startup` then refuses to start on (rule 32). A `filled_lots` at
+or above the position's count does close it: that is the race where a cancel
+lands after a full fill, and the exit really did complete.
+
+The sold slice's profit or loss is therefore **not booked**. That gap is
+deliberate, and the alternative is worse: `db.positions.close` computes realised
+P&L for a whole position against one exit price, and feeding it a blended figure
+would write down a price no order achieved. The remaining lots still mark to
+market against the original entry price, so only the sold slice's contribution is
+missing from `pnl.bot_equity`, bounded above by one position's stop loss —
+`position_size_pct × stop_loss_pct` of allocated capital, comfortably inside the
+daily loss limit's own margin. It is visible in the alert and permanently in
+`position_events` as a `LOTS_ADJUSTED` row. A gap that is bounded, alerted and
+recorded is a different kind of thing from a wrong number that looks right.
 
 **`async resolve_unfinished(now: datetime) → list[OrderRecord]`**
 - For every unresolved order, queries `broker.client.get_order_state` by key and
@@ -1973,6 +2072,12 @@ the system must never rest in.
   writes a permanent, plausible-looking lie into the trade history. A row with
   `intent = 'EXIT'` and no trigger is a data defect — alert and leave the
   position open for the owner to resolve.
+- Applies the entry cancel-and-re-read sequence above to any `ENTRY` order the
+  broker still reports as `SUBMITTED` with lots filled, and reduces the position
+  to its unsold remainder for any terminal `EXIT` order that sold part of it
+  (v1.34). Both are the same principle as the rest of this function: an order
+  whose outcome is uncertain is resolved by asking the broker, and only what the
+  broker answers is written down.
 - Ordering constraint: completes before any new order is submitted in the
   process's lifetime.
 - Must never resubmit an order.
@@ -2814,6 +2919,17 @@ Applies across all modules. Every external failure mode has exactly one rule.
     nothing downstream can tell the invented one from a real one. This rule
     generalises #4, #5, #8 and #11, which are four instances of the same
     mistake.
+
+34. **An order the bot submitted is partially filled** → the filled part is real
+    and the remainder is not, and which of the two is left exposed depends on the
+    direction. On an **entry**, cancel the remainder, re-read the order, and
+    write the position from that read; if either call fails, write nothing and
+    let recovery repeat it. On an **exit**, never abandon the remainder: the
+    position stays open, reduced to the lots still held, and the exit is retried
+    under rule 4. A partial fill is alerted either way. An abandoned entry
+    remainder leaves cash unspent; an abandoned exit remainder leaves shares held
+    against a decision to sell them, which is the state this system must not rest
+    in.
 
 ---
 
