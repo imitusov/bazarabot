@@ -611,6 +611,13 @@ broker — with `filled_lots` below `lots` and `settled_at` null; `FILLED` means
 GTC market stop-loss, `confirm_margin_trade=False`.
 **`async cancel_stop_order(stop_order_id: str) → None`**
 Idempotent; already-cancelled/executed is not an error.
+**`async cancel_order(key: str) → None`**
+Cancels a live ordinary order by our own idempotency key
+(`ORDER_ID_TYPE_REQUEST`). Idempotent: already filled, already cancelled, or
+unknown is not an error, because the authoritative answer comes from the
+`get_order_state` that follows. `BrokerUnavailable` / `BrokerRateLimited` on
+transport failure only. Used to abandon a partial **entry** remainder, never an
+exit remainder (#10).
 **`async list_stop_orders() → list[StopOrderRecord]`**
 **`async get_executed_stop_fills(since: datetime, until: datetime) → dict[str, OrderRecord]`**
 The broker's own record of every stop order that fired in the window, keyed by

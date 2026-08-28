@@ -670,6 +670,29 @@ async def cancel_stop_order(stop_order_id: str) -> None:
         _translate(exc, conn.config.tinvest_token, not_found=None)
 
 
+async def cancel_order(key: str) -> None:
+    """Cancel a live ordinary order by our own idempotency key.
+
+    Idempotent in the same sense as `cancel_stop_order`: the caller is racing
+    the exchange by definition, so an order already filled, already cancelled
+    or unknown here is not an error. The authoritative answer comes from the
+    `get_order_state` that follows, never from this call's outcome (#10).
+    """
+    conn = await _connect()
+    try:
+        await conn.services.orders.cancel_order(
+            account_id=conn.config.tinvest_account_id,
+            # By the client key: after a crash the exchange identifier is
+            # precisely what was lost.
+            order_id=key,
+            order_id_type=OrderIdType.ORDER_ID_TYPE_REQUEST,
+        )
+    except AioRequestError as exc:
+        if exc.code is StatusCode.NOT_FOUND:
+            return
+        _translate(exc, conn.config.tinvest_token, not_found=None)
+
+
 def _stop_status(raw: object) -> StopOrderStatus:
     name = getattr(raw, "name", str(raw))
     if "EXECUTED" in name:
