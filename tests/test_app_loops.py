@@ -1407,8 +1407,12 @@ async def test_stop_entries_suppresses_entries_but_not_exits(
         closed.append(pos.id)
         return pos
 
+    async def _price(figi: str) -> Decimal:
+        return Decimal("120")  # above the target, so an exit is due
+
     monkeypatch.setattr(loops, "list_open", _open)
     monkeypatch.setattr(loops, "close_position", _close)
+    monkeypatch.setattr(loops, "get_last_price", _price)
 
     stop_entries()
     await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))

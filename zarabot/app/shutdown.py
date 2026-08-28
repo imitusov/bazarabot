@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from zarabot.app.loops import stop_entries
 from zarabot.app.startup import AppContext
 from zarabot.broker import client as broker_client
 from zarabot.clock import now
@@ -20,7 +21,7 @@ _POLL_SECONDS = 1.0
 
 
 async def shutdown(ctx: AppContext, signal: int) -> None:
-    """Settle in-flight orders, close the database and the broker channel.
+    """Stop entries, settle in-flight orders, close the database and channel.
 
     Never sells a position and never cancels a stop: a restart must have no
     financial consequence. Orders still unresolved at the timeout stay
@@ -28,6 +29,11 @@ async def shutdown(ctx: AppContext, signal: int) -> None:
     """
     del ctx
     _LOG.info("shutdown requested signal=%s", signal)
+    # First, before anything else. This ran concurrently with `run`, and the
+    # runner was cancelled only after the drain returned — so for the whole
+    # window below the trading loop kept cycling and could open a position the
+    # drain had already looked past (#21).
+    stop_entries()
     waited = 0
     while waited < _WAIT_SECONDS:
         pending = await list_unresolved()

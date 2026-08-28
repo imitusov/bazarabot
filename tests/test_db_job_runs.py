@@ -8,9 +8,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from zarabot.db.job_runs import has_run, last_run, mark_run
 
 from zarabot.db.connection import connect, disconnect
+from zarabot.db.job_runs import has_run, last_run, mark_run
 from zarabot.db.migrations import apply
 
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)

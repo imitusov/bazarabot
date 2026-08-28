@@ -23,6 +23,7 @@ from zarabot.broker.client import (
 )
 from zarabot.clock import moscow_date, now, to_moscow, trading_days_between
 from zarabot.db.cooldowns import is_active
+from zarabot.db.job_runs import has_run, mark_run
 from zarabot.db.orders import DuplicateOrderError
 from zarabot.db.positions import PositionStateError, list_open
 from zarabot.db.signals import record
@@ -69,6 +70,7 @@ _SCHEDULE_DAYS = 14
 _BACKUP_RETENTION_DAYS = 30
 _BACKFILL_LOOKBACK = timedelta(days=7)
 _MAX_BACKOFF = 3600
+_WEEKLY_HOUR_MSK = 12
 
 _market_failures = 0
 _market_alerted = False
@@ -77,13 +79,16 @@ _stop_discrepancy_alerted = False
 _loss_unmeasurable_alerted = False
 _age_unmeasurable_alerted = False
 _started_at: datetime | None = None
+# Deliberately process-local: it means "was THIS process running when the
+# session opened", which is what decides whether the day's opening snapshot may
+# be written. Persisting it would let a restarted process claim an origin it
+# did not have (#27).
 _first_cycle_at: datetime | None = None
 _snapshot_on: date | None = None
-_rolled_on: date | None = None
-_backed_up_on: date | None = None
-_heartbeat_on: date | None = None
-_weekly_on: date | None = None
-_refreshed_on: date | None = None
+# Shutdown has been requested. Process-local by design: a restarted process
+# must accept entries again, so this is the one piece of loop state that would
+# be wrong to keep in `db.job_runs` (#21).
+_entries_stopped = False
 _cache_exhausted_alerted = False
 
 
@@ -412,6 +417,18 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
             portfolio = await get_portfolio()
 
 
+def stop_entries() -> None:
+    """Refuse new entries from the next cycle. Exits are unaffected.
+
+    `app.shutdown` calls this before it drains. Without it the drain ran
+    concurrently with the trading loop and the runner was cancelled only after
+    the drain returned, so for the whole window the loop could open a position
+    the drain had already looked past (#21).
+    """
+    global _entries_stopped
+    _entries_stopped = True
+
+
 async def trading_cycle(ctx: AppContext) -> None:
     """One iteration: session guard, exits, daily-loss halt, then entries."""
     global _cache_exhausted_alerted, _first_cycle_at
@@ -440,6 +457,12 @@ async def trading_cycle(ctx: AppContext) -> None:
         await _submit_exits(positions, prices, executed, moment, ctx)
         if not await _measure_daily_loss(ctx, moment, len(positions)):
             return
+        if _entries_stopped:
+            # Same shape as the halt check below: a process on its way down must
+            # not open what nobody will be watching, and must not be stopped
+            # from closing what is already open (#21).
+            _note_data_success()
+            return
         if await is_halted():
             _note_data_success()
             return
@@ -460,53 +483,59 @@ async def _trading_loop(ctx: AppContext) -> None:
 
 
 async def _rollover_loop(ctx: AppContext) -> None:
-    global _rolled_on
     while True:
         moment = now()
         day = moscow_date(moment)
-        if is_open(moment) and _rolled_on != day:
+        if is_open(moment) and not await has_run("rollover", day.isoformat()):
             # No daily_loss_pct here. It used to be called to force the lazy
             # snapshot write; it now only reads the row, which at rollover does
             # not exist yet, so the call would fire `pnl`'s reconstruction alert
             # and nothing else. The row is written by trading_cycle step 4.
             await backfill(moment - _BACKFILL_LOOKBACK, moment)
-            _rolled_on = day
+            await mark_run("rollover", day.isoformat(), moment)
         await asyncio.sleep(_poll_seconds(ctx))
 
 
 async def _backup_loop(ctx: AppContext) -> None:
-    global _backed_up_on
     while True:
         moment = now()
         day = moscow_date(moment)
-        if not is_open(moment) and _backed_up_on != day:
+        if not is_open(moment) and not await has_run("backup", day.isoformat()):
             await backup_run(ctx.config.db_path, ctx.config.backup_dir)
             await prune(ctx.config.backup_dir, _BACKUP_RETENTION_DAYS)
-            _backed_up_on = day
+            await mark_run("backup", day.isoformat(), moment)
         await asyncio.sleep(_poll_seconds(ctx))
 
 
 async def _weekly_loop(ctx: AppContext) -> None:
-    global _weekly_on
+    """Due from Sunday noon MSK onward, not only during that one hour.
+
+    The old condition required the loop to observe an instant inside
+    12:00-12:59. A process down, restarting, or backing off through that hour
+    skipped the week entirely — no report, no alert, no record, against
+    acceptance criterion 9. A report delivered at 14:00 after a restart is
+    strictly better than none (#27).
+    """
     while True:
         moment = now()
         local = to_moscow(moment)
         week_start = local.date() - timedelta(days=local.weekday())
-        if local.weekday() == 6 and local.hour == 12 and _weekly_on != week_start:
+        due = local.weekday() == 6 and local.hour >= _WEEKLY_HOUR_MSK
+        if due and not await has_run("weekly_report", week_start.isoformat()):
             await backfill(moment - _BACKFILL_LOOKBACK, moment)
             await send_report(moment)
-            _weekly_on = week_start
+            await mark_run("weekly_report", week_start.isoformat(), moment)
         await asyncio.sleep(_poll_seconds(ctx))
 
 
 async def _schedule_refresh_loop(ctx: AppContext) -> None:
-    global _refreshed_on, _cache_exhausted_alerted
+    global _cache_exhausted_alerted
     while True:
         moment = now()
         day = moscow_date(moment)
-        if _refreshed_on != day:
+        if not await has_run("schedule_refresh", day.isoformat()):
             await refresh(_SCHEDULE_DAYS)
-            _refreshed_on = day
+            await mark_run("schedule_refresh", day.isoformat(), moment)
             _cache_exhausted_alerted = False
         await asyncio.sleep(_poll_seconds(ctx))
 
@@ -528,11 +557,10 @@ async def _telegram_loop() -> None:
 
 
 async def _heartbeat_loop(ctx: AppContext) -> None:
-    global _heartbeat_on
     while True:
         moment = now()
         day = moscow_date(moment)
-        if _heartbeat_on != day:
+        if not await has_run("heartbeat", day.isoformat()):
             opened = await list_open()
             halted = await is_halted()
             origin = _started_at if _started_at is not None else moment
@@ -547,7 +575,7 @@ async def _heartbeat_loop(ctx: AppContext) -> None:
                 f"zarabot heartbeat uptime={uptime}s "
                 f"positions={len(opened)} halted={halted}"
             )
-            _heartbeat_on = day
+            await mark_run("heartbeat", day.isoformat(), moment)
         await asyncio.sleep(_poll_seconds(ctx))
 
 
@@ -569,8 +597,12 @@ async def _supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
 
 async def run(ctx: AppContext) -> None:
     """Sole owner of composition: start every long-running task, nowhere else."""
-    global _started_at
+    global _started_at, _entries_stopped
     _started_at = now()
+    # A new run accepts entries. The flag is process-local by design (#21), and
+    # clearing it here is what makes that true for a process that is starting
+    # rather than stopping.
+    _entries_stopped = False
     await asyncio.gather(
         _supervise("trading", lambda: _trading_loop(ctx)),
         _supervise("rollover", lambda: _rollover_loop(ctx)),

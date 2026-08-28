@@ -1077,6 +1077,8 @@ Graceful shutdown. Restarts have no financial consequence: in-flight orders are
 settled or left `SUBMITTING`; positions are neither cancelled nor liquidated.
 
 **`async shutdown(ctx: AppContext, signal: int) → None`**
+Calls `app.loops.stop_entries()` **first**, then drains — a drain that runs
+first has already looked past the position the next cycle opens (#21).
 Waits up to 30 seconds for unresolved orders to reach a known state via
 `resolve_unfinished`. Remaining `SUBMITTING` rows are left for the next startup.
 Never cancels a stop or submits a sell. Alerts, then calls
