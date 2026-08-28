@@ -201,10 +201,6 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     async def _halted() -> bool:
         return False
 
-    async def _schedule(days: int) -> list[SessionInfo]:
-        calls.append("get_trading_schedule")
-        return [SESSION]
-
     async def _resolve(moment: datetime) -> list[object]:
         calls.append("resolve")
         return []
@@ -241,7 +237,6 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr(loops, "candles_for_watchlist", _candles)
     monkeypatch.setattr(loops, "daily_loss_pct", _loss)
     monkeypatch.setattr(loops, "is_halted", _halted)
-    monkeypatch.setattr(loops, "get_trading_schedule", _schedule)
     monkeypatch.setattr(loops, "resolve_unfinished", _resolve)
     monkeypatch.setattr(loops, "list_open", _empty)
     monkeypatch.setattr(loops, "is_active", _cooldown)
@@ -746,6 +741,15 @@ async def test_duplicate_ticker_in_one_pass_opens_one_and_does_not_crash(
     monkeypatch.setattr(loops, "open_position", _open)
     monkeypatch.setattr(loops, "record", _record)
     monkeypatch.setattr(loops, "alert", _alert)
+    async def _fetch_instrument(ticker: str) -> Instrument:
+        return _make_instrument()
+
+    monkeypatch.setattr(loops, "get_instrument", _fetch_instrument)
+    monkeypatch.setattr(
+        loops,
+        "check",
+        lambda *a, **k: RiskDecision(approved=True, lots=3, reason=None),
+    )
 
     ctx = _ctx(strategies=(_BuyStrategy(), _BuyStrategy()))
     await trading_cycle(ctx)
@@ -786,30 +790,30 @@ async def test_a_refused_entry_does_not_abandon_the_rest_of_the_pass(
         raise raised
 
     monkeypatch.setattr(loops, "open_position", _open)
+    async def _fetch_instrument(ticker: str) -> Instrument:
+        return _make_instrument()
+
+    monkeypatch.setattr(loops, "get_instrument", _fetch_instrument)
+    monkeypatch.setattr(
+        loops,
+        "check",
+        lambda *a, **k: RiskDecision(approved=True, lots=3, reason=None),
+    )
+
     ctx = _ctx(strategies=(_BuyStrategy(),), watchlist=("SBER", "GAZP"))
     await trading_cycle(ctx)
     assert attempted == ["SBER", "GAZP"]
 
 
-async def test_cycle_issues_no_trading_schedule_call(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_loops_cannot_fetch_a_trading_schedule() -> None:
     """A fourteen-day schedule was re-fetched once a minute for data
-    market.session already holds and refreshes daily (#19)."""
-    from zarabot.app.loops import trading_cycle
-
-    calls: list[str] = []
-    _patch_defaults(monkeypatch, calls)
+    market.session already holds and refreshes daily (#19). The strongest form
+    of "zero calls per cycle" is that the module cannot make one at all."""
     import zarabot.app.loops as loops
 
-    position = _position(stop_protection=StopProtection.LOCAL)
-
-    async def _open() -> list[Position]:
-        return [position]
-
-    monkeypatch.setattr(loops, "list_open", _open)
-    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
-    assert "get_trading_schedule" not in calls
+    assert not hasattr(loops, "get_trading_schedule")
+    source = Path(loops.__file__).read_text()
+    assert "get_trading_schedule" not in source
 
 
 async def test_max_age_uses_the_cached_calendar(

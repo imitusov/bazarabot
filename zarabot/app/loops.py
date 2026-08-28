@@ -19,12 +19,12 @@ from zarabot.broker.client import (
     get_instrument,
     get_last_price,
     get_portfolio,
-    get_trading_schedule,
     list_stop_orders,
 )
 from zarabot.clock import moscow_date, now, to_moscow, trading_days_between
 from zarabot.db.cooldowns import is_active
-from zarabot.db.positions import list_open
+from zarabot.db.orders import DuplicateOrderError
+from zarabot.db.positions import PositionStateError, list_open
 from zarabot.db.signals import record
 from zarabot.db.snapshots import DailySnapshot, list_for_period, write_daily
 from zarabot.db.stop_orders import active_for_position
@@ -37,13 +37,20 @@ from zarabot.execution.orders import (
 )
 from zarabot.lifecycle.exits import evaluate
 from zarabot.market.data import candles_for_watchlist
-from zarabot.market.session import cache_exhausted, current_session, is_open, refresh
+from zarabot.market.session import (
+    cache_exhausted,
+    calendar,
+    current_session,
+    is_open,
+    refresh,
+)
 from zarabot.models import (
     HaltReason,
     PortfolioState,
     Position,
+    RejectionReason,
+    RiskDecision,
     StopProtection,
-    TradingCalendar,
 )
 from zarabot.ops.backup import prune
 from zarabot.ops.backup import run as backup_run
@@ -197,14 +204,6 @@ async def _close_executed(positions: list[Position]) -> set[int]:
     return closed
 
 
-async def _calendar() -> TradingCalendar:
-    try:
-        sessions = await get_trading_schedule(_SCHEDULE_DAYS)
-    except (BrokerUnavailable, BrokerRateLimited):
-        return TradingCalendar(sessions=())
-    return TradingCalendar(sessions=tuple(sessions))
-
-
 async def _submit_exits(
     positions: list[Position],
     prices: dict[str, Decimal],
@@ -215,14 +214,19 @@ async def _submit_exits(
     session = current_session(moment)
     if session is None:
         return
-    calendar = await _calendar()
+    # From the cache market.session already refreshes daily, not a fetch of our
+    # own. This re-fetched a fourteen-day schedule every cycle — once a minute,
+    # for data that changes at most daily — and on a broker error returned an
+    # EMPTY calendar, which made trading_days_between count zero and disabled
+    # MAX_AGE exits with nothing raised (#19).
+    calendar_now = calendar()
     for position in positions:
         if position.id in skip:
             continue
         price = prices.get(position.ticker)
         if price is None:
             continue
-        days = trading_days_between(position.entry_at, moment, calendar)
+        days = trading_days_between(position.entry_at, moment, calendar_now)
         trigger = evaluate(position, price, moment, session, days, ctx.config)
         if trigger is None:
             continue
@@ -318,6 +322,12 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
     portfolio: PortfolioState = await get_portfolio()
     halted = await is_halted()
     session_open = True
+    # Tickers opened earlier in THIS pass. Strategies are looped outer and
+    # tickers inner, so two strategies can signal one ticker in a single pass,
+    # and the gate's duplicate check reads a broker portfolio that lags a
+    # market order which has only just filled. The local record is immediately
+    # consistent; it lives here because `risk.gate` stays pure (#24).
+    opened_this_pass: set[str] = set()
     for strategy in ctx.strategies:
         for ticker in ctx.config.watchlist:
             series = candles.get(ticker)
@@ -325,6 +335,16 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
                 continue
             signal = strategy.evaluate(ticker, series, moment)
             if signal is None:
+                continue
+            if ticker in opened_this_pass:
+                await record(
+                    signal,
+                    RiskDecision(
+                        approved=False,
+                        lots=None,
+                        reason=RejectionReason.DUPLICATE_TICKER,
+                    ),
+                )
                 continue
             try:
                 instrument = await get_instrument(ticker)
@@ -352,6 +372,17 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
             except OrderRejected as exc:
                 await alert(f"entry rejected for {ticker}: {exc.reason}")
                 continue
+            except (PositionStateError, DuplicateOrderError):
+                # A refusal, not a fault. Both guards are correct to fire; only
+                # OrderRejected had a branch, so a correct refusal reached the
+                # supervisor, alerted "Background task trading crashed" and
+                # abandoned every remaining ticker in the pass (#24).
+                _LOG.info("entry refused as duplicate for %s", ticker)
+                continue
+            opened_this_pass.add(ticker)
+            # Still re-read from the broker: this is what keeps MAX_POSITIONS,
+            # PORTFOLIO_EXPOSURE and cash correct within a pass. Dropping it to
+            # save a call would trade a spurious alert for a breached limit.
             portfolio = await get_portfolio()
 
 

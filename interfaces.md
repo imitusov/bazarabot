@@ -1001,6 +1001,11 @@ continues; it does not abort the cycle and does not increment the consecutive
 market-data outage counter. Rejections latch like the other alerts in this
 module: one alert when a cycle first rejects anything, naming the count, and
 none until a cycle rejects nothing and re-arms it.
+The calendar for max-age comes from `market.session.calendar()`; this module
+never fetches a trading schedule (#19). A ticker already opened earlier in the
+same pass is skipped before the gate and recorded `DUPLICATE_TICKER`, and
+`OrderRejected`, `PositionStateError` and `DuplicateOrderError` from
+`open_position` are all ordinary outcomes that continue the pass (#24).
 
 **`async run(ctx: AppContext) → None`**
 Sole owner of composition. Starts the trading cycle, daily rollover, trading-
