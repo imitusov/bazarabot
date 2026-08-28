@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.36
+**Version:** 1.37
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -892,6 +892,9 @@ Additionally, on exits booked from an exchange stop:
   remedy gate does not skip a report that carries no other stop adjustment).
 - An adjustment type the executor does not recognise alerts rather than being
   ignored (proves a report it cannot act on is loud).
+- An `EXIT_UNRESOLVED` adjustment does **not** raise that alert and does not stop
+  startup (proves the observed-not-remedied set includes it, so the loud path
+  stays reserved for a report the executor genuinely does not understand).
 - A `FOREIGN_HOLDING` adjustment raises `StartupError` naming the ticker, and no
   entry is attempted (proves the account-exclusivity policy is enforced rather
   than documented).
@@ -2381,6 +2384,23 @@ Fixed ordering; each step completes before the next begins:
    one more adjustment (#35). An unrecognised adjustment type must alert rather
    than pass, so a report the executor does not understand is loud.
 
+7a. **`EXIT_UNRESOLVED` is observed, not remedied, and does not stop startup
+   (v1.37).** It is a position the broker no longer holds whose sale could not
+   be found in the operations feed, so there is nothing for `execution.orders`
+   to do about it — the shares are already gone. It belongs with
+   `CLOSED_EXTERNALLY`, `ADOPTED`, `LOTS_ADJUSTED` and `FOREIGN_HOLDING` in the
+   set of types this step recognises without acting on, precisely so it does not
+   trip the "adjustment types this build cannot act on" alert, which is reserved
+   for a report the executor genuinely does not understand.
+
+   Its consequence is named here rather than left to be discovered: the position
+   stays open, so if it was `EXCHANGE` the same report will carry `STOP_MISSING`
+   for it and this step will try to place a stop against shares the account does
+   not hold. The broker refuses, the position stays `LOCAL`, and the owner is
+   alerted — the degrade path rule 23 already defines. That is noisy and correct;
+   the alternative was a fabricated exit price written permanently into the trade
+   history.
+
 7b. **Refuse to start on a `FOREIGN_HOLDING` adjustment**, unless
    `config.allow_foreign_holdings` is true. Raise `StartupError` naming every
    ticker reported, after alerting. The account is the bot's alone (brief v1.8),
@@ -2791,7 +2811,8 @@ the exchange sold the position; the corresponding position must be closed with
 **Content structure** of `adjustments` — one object per adjustment:
 
 ```
-- closed externally: {"type": "CLOSED_EXTERNALLY", "ticker": "...", "position_id": 12, "last_price": "123.45"}
+- closed externally: {"type": "CLOSED_EXTERNALLY", "ticker": "...", "position_id": 12, "exit_price": "123.45", "exit_at": "...", "exit_commission": "1.25"}
+- exit unresolved:   {"type": "EXIT_UNRESOLVED", "ticker": "...", "position_id": 12, "reason": "..."}
 - adopted:           {"type": "ADOPTED", "ticker": "...", "lots": 3, "average_price": "123.45"}
 - lot mismatch:      {"type": "LOTS_ADJUSTED", "ticker": "...", "position_id": 12, "from": 3, "to": 2}
 ```

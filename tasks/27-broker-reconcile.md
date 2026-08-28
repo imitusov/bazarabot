@@ -82,7 +82,8 @@ the exchange sold the position; the corresponding position must be closed with
 **Content structure** of `adjustments` — one object per adjustment:
 
 ```
-- closed externally: {"type": "CLOSED_EXTERNALLY", "ticker": "...", "position_id": 12, "last_price": "123.45"}
+- closed externally: {"type": "CLOSED_EXTERNALLY", "ticker": "...", "position_id": 12, "exit_price": "123.45", "exit_at": "...", "exit_commission": "1.25"}
+- exit unresolved:   {"type": "EXIT_UNRESOLVED", "ticker": "...", "position_id": 12, "reason": "..."}
 - adopted:           {"type": "ADOPTED", "ticker": "...", "lots": 3, "average_price": "123.45"}
 - lot mismatch:      {"type": "LOTS_ADJUSTED", "ticker": "...", "position_id": 12, "from": 3, "to": 2}
 ```
