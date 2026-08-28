@@ -116,8 +116,7 @@ was one of the eight sites opening its own connection.
   The resolution: `broker.client.get_operations(position.entry_at, now)`,
   filtered to the position's `figi` and to the sale operation types
   (`OPERATION_TYPE_SELL` and its `DELIVERY_SELL` and `SELL_MARGIN` variants).
-  Taking those sales oldest-first until their quantities cover the position's
-  units —
+  Over **every** such sale in the window —
     - `exit_price` is their **quantity-weighted average**;
     - `closed_at` is the **latest** of their timestamps, which is when the
       position left the account rather than when the bot noticed;
@@ -125,10 +124,17 @@ was one of the eight sites opening its own connection.
       `parent_operation_id` is one of those sales, passed through to
       `db.positions.close`.
   The window starts at `entry_at`, so a sale that happened at all is inside it,
-  however long the bot was down. This is the one place a weighted price is
-  legitimate, and it is legitimate because every input is a number the broker
-  reported about a trade that occurred — not, as in #10, a blend across orders
-  invented to fit a signature.
+  however long the bot was down — and since at most one position per ticker is
+  open at a time, every sale of that instrument inside it belongs to this
+  position. Deliberately **no** "take sales until their quantities cover the
+  position" cutoff: whether the broker reports an operation's `quantity` in lots
+  or in instrument units is an assumption this project has not tested against a
+  live account, and it is the same class of assumption that produced #39 and
+  #43. A weighted average is correct under either reading, because the units
+  cancel; a cutoff is not. This is the one place a weighted price is legitimate,
+  and it is legitimate because every input is a number the broker reported about
+  a trade that occurred — not, as in #10, a blend across orders invented to fit
+  a signature.
 
   The close still passes `order = None`. This module records **no** order row: it
   did not submit one, and inventing one would contradict its own prohibition on
@@ -248,10 +254,11 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   the moment of detection, and dates `exit_at` to the sale rather than to `now`
   (proves the exit is booked at what was traded and when — #11's own verification
   case).
-- Two sales of 3 and 2 lots at 100 and 90 covering a 5-lot position record a
-  quantity-weighted 96.00 and an `exit_commission` summing both fee operations
-  (proves aggregation over the feed, and that the fee is no longer lost for want
-  of a closing order row).
+- Two sales of quantity 3 and 2 at 100 and 90 record a quantity-weighted 96.00
+  and an `exit_commission` summing both fee operations (proves aggregation over
+  the feed, and that the fee is no longer lost for want of a closing order row).
+  The weights are the broker's `quantity` values whatever unit they are in, so
+  the case does not encode an untested assumption about that unit.
 - The broker being unavailable leaves the position **open**, reports
   `EXIT_UNRESOLVED` and alerts — and in particular records no exit at
   `entry_price` (proves the zero-P&L fabrication is gone).
