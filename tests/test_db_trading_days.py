@@ -8,10 +8,10 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-from zarabot.db.trading_days import earliest, list_since, record_many
 
 from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
+from zarabot.db.trading_days import earliest, list_since, record_many
 from zarabot.models import SessionInfo
 
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)

@@ -309,6 +309,27 @@ the row is absent, already closed, or `lots` is not positive.
 **`async list_events(position_id: int) → list[PositionEvent]`**
 That position's events, oldest first, or `[]`. Never `None`.
 
+## `zarabot.db.trading_days`
+
+Sole owner of `trading_days`. All SQL runs on `db.connection.shared()` inside
+`transaction()`. The one table here that is **not** append-only: a day is
+overwritten by a newer observation, because it records what is true about a
+date rather than what happened. Exists because the broker serves no schedule
+before today (§2.1), so the past must be remembered rather than fetched (#45).
+
+**`async record_many(sessions: list[SessionInfo]) → int`**
+Upserts one row per day on the Moscow date, newer observation winning, in one
+transaction. Returns how many were written. A session with no `start` — a
+non-trading day, which carries no timestamps — is skipped, not stored under a
+null key.
+
+**`async list_since(start: date) → list[SessionInfo]`**
+Recorded days from `start` onwards, oldest first. `[]` when none, never `None`.
+
+**`async earliest() → date | None`**
+The oldest recorded date, or `None` when nothing has been recorded. Coverage is
+defined against this.
+
 ## `zarabot.db.orders`
 
 Sole owner of `orders` rows and status transitions. All SQL runs on
