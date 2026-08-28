@@ -70,6 +70,8 @@ Module **26** of 40 in `dependency-order.md`. Everything before it is complete a
 | `broker_reason` | TEXT NULL | Broker's rejection text, verbatim |
 | `created_at` | TEXT NOT NULL | Written **before** submission |
 | `settled_at` | TEXT NULL | |
+| `broker_order_id` | TEXT NULL | The broker's own identifier, where the bot knows it. Set for a row describing an execution the exchange performed on the bot's behalf, whose `key` the broker has never seen |
+| `commission_alerted_at` | TEXT NULL | UTC. Set once, when the owner is first told this row's commission is still unknown |
 
 **Invariants.** `FILLED`, `REJECTED` and `CANCELLED` are terminal — no row leaves
 them. A row in `SUBMITTING` means the outcome is unknown and must be resolved by
@@ -184,6 +186,18 @@ Owns order submission, the submission locks, and crash recovery.
 - Raises `ValueError` when `fill.filled_price` is `None`. There is no fallback
   price: a stop exit with no confirmed fill is not bookable, and the caller
   leaves the position open and retries.
+- **Records `fill.key` as the order row's `broker_order_id` (v1.39).**
+  `get_executed_stop_fills` returns records keyed by the broker's
+  `exchange_order_id`, so the identifier is already in hand; the local row's own
+  `key` is a UUID this module invented and the broker has never seen. Writing it
+  down is what makes a late commission on this row recoverable at all (#8).
+- A `fill.commission` of `None` does **not** block the close. Unlike the price,
+  the commission is a correction rather than the substance of the exit, and
+  refusing to book would leave a position the broker has already closed open
+  locally until reconciliation found it and recorded it as `EXTERNAL` — a
+  stop-out filed under the wrong trigger, which corrupts the exit-trigger
+  distribution permanently. It is booked with the commission unknown, netted as
+  zero, and corrected by `ops.commissions` when it lands.
 
 Until v1.28 this function took a `Decimal` fill price, and `app.loops` passed it
 the value from `get_last_price` at the top of the cycle — the market price at the

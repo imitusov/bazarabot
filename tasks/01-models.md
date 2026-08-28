@@ -47,6 +47,19 @@ and only separate reasons make the rejection log diagnostic.
 `SessionInfo`, `RiskDecision`, `HaltState`, `ReconciliationReport`,
 `TradingCalendar`, `BacktestResult`.
 
+`OrderRecord` carries `broker_order_id` and `commission_alerted_at` (v1.39).
+`key` is the bot's own idempotency key, and for a row describing an execution the
+**exchange** performed — a stop the broker fired on the bot's behalf — the broker
+has never seen that key, so nothing could ever re-query the row. Its commission
+was therefore unrecoverable if it landed late, and the "commission still unknown"
+alert repeated on every backfill run, forever, once per stop-loss exit ever taken
+(#8). `broker_order_id` is the broker's own identifier for the order where the
+bot knows it; `commission_alerted_at` records that the owner has been told once.
+Both are `None` where they do not apply. `commission_alerted_at` is
+notification bookkeeping rather than a trading fact, and it lives on the row
+anyway because an alert that repeats forever is equivalent to no alert, and
+"have I already said this" is a fact about the row that must survive a restart.
+
 `OperationRecord` carries `operation_type` and `state` as well as the broker's
 actual commission (v1.35). It used to carry neither, so the only way to tell a
 sale from a purchase was the sign of `payment`, and the only way to find a fee

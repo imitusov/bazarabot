@@ -214,6 +214,21 @@ consecutive-failure alert and is retried as though waiting would help.
   minute late is recoverable; a position closed at an invented price is not.
 - Raises `ValueError` on naive datetimes.
 
+**`async get_order_state_by_broker_id(broker_order_id: str) → OrderRecord`**
+- The same lookup as `get_order_state` but with
+  `order_id_type=ORDER_ID_TYPE_EXCHANGE`, for a row whose `key` the broker has
+  never seen (v1.39). Raises `OrderNotFound` when it does not resolve.
+- Exists because a stop the exchange fired is recorded locally under an
+  idempotency key the bot invented, so `get_order_state` by that key can only
+  ever return `OrderNotFound` — which made the commission on every stop exit
+  permanently unrecoverable (#8). It is a separate function rather than a
+  parameter on `get_order_state` because the two answer different questions:
+  one asks "what happened to the order I sent", the other "what happened to the
+  order the exchange placed for me", and only the first is a recovery path.
+- The returned record's `key` is the `broker_order_id` it was asked about, as
+  `get_executed_stop_fills` already does. This module does not know the local
+  row's key and must not guess at one.
+
 **`async get_max_lots(figi: str) → int`**
 - The maximum lots the broker will accept for a buy on this account. A pre-submit
   sanity check against `risk.sizing`, which models cash but not settlement or

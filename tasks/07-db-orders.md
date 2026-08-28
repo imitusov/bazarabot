@@ -32,6 +32,8 @@ Module **7** of 40 in `dependency-order.md`. Everything before it is complete an
 | `broker_reason` | TEXT NULL | Broker's rejection text, verbatim |
 | `created_at` | TEXT NOT NULL | Written **before** submission |
 | `settled_at` | TEXT NULL | |
+| `broker_order_id` | TEXT NULL | The broker's own identifier, where the bot knows it. Set for a row describing an execution the exchange performed on the bot's behalf, whose `key` the broker has never seen |
+| `commission_alerted_at` | TEXT NULL | UTC. Set once, when the owner is first told this row's commission is still unknown |
 
 **Invariants.** `FILLED`, `REJECTED` and `CANCELLED` are terminal — no row leaves
 them. A row in `SUBMITTING` means the outcome is unknown and must be resolved by
@@ -68,7 +70,7 @@ its own (rule 31).
   with the same key. This ordering is what makes a crash mid-submission
   recoverable, and reversing it is a critical defect.
 
-**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None) → OrderRecord`**
+**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, broker_order_id: str | None = None) → OrderRecord`**
 - Records a terminal outcome, including the commission the broker reported on the
   order. `None` means not yet known, which is distinct from zero.
 - Raises `OrderStateError` on a transition out of a terminal status.
@@ -81,6 +83,19 @@ its own (rule 31).
 **`async list_missing_commission(since: datetime, until: datetime) → list[OrderRecord]`**
 - `FILLED` orders in the period whose commission is still unknown. Drives the
   daily backfill. Empty list when none.
+- Rows already alerted are **still returned**: the point of the terminal state is
+  to stop repeating the alert, not to stop trying to resolve the number. A
+  re-query is cheap and a commission that finally lands is still worth writing.
+
+**`async mark_commission_alerted(key: str, at: datetime) → OrderRecord`**
+- Records that the owner has been told once about this row's unknown commission
+  (v1.39). Idempotent: a row already marked keeps its original timestamp, since
+  the moment the owner was first told is the fact worth keeping.
+- Raises `OrderStateError` when the row is absent. Raises `ValueError` on a naive
+  `at`.
+- The 24-hour staleness policy stays in `ops.commissions`, which owns it. This
+  function records only the fact, so the policy is not split across two
+  modules — the mistake that keeps recurring as failure class 2.
 
 **`async get(key: str) → OrderRecord | None`**
 - Returns the order or `None` when absent. `None` remains a legitimate answer
@@ -121,6 +136,13 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
+- `settle` with a `broker_order_id` reads it back on the row, and without one
+  leaves it `None` (proves the identifier survives, which is the whole
+  mechanism by which a late commission becomes recoverable).
+- `mark_commission_alerted` twice keeps the first timestamp (proves the fact
+  recorded is *when the owner was first told*, not when it was last considered).
+- A row already alerted is still returned by `list_missing_commission` (proves
+  the terminal state stops the telling, not the trying).
 - An order recorded as `SUBMITTING` then confirmed as `FILLED` reports the
   terminal state (happy path).
 - Orders left in `SUBMITTING` are returned by the unresolved-orders query

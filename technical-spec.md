@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.38
+**Version:** 1.39
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -446,6 +446,13 @@ it proves.
   durable).
 
 **`db.orders`**
+- `settle` with a `broker_order_id` reads it back on the row, and without one
+  leaves it `None` (proves the identifier survives, which is the whole
+  mechanism by which a late commission becomes recoverable).
+- `mark_commission_alerted` twice keeps the first timestamp (proves the fact
+  recorded is *when the owner was first told*, not when it was last considered).
+- A row already alerted is still returned by `list_missing_commission` (proves
+  the terminal state stops the telling, not the trying).
 - An order recorded as `SUBMITTING` then confirmed as `FILLED` reports the
   terminal state (happy path).
 - Orders left in `SUBMITTING` are returned by the unresolved-orders query
@@ -816,8 +823,29 @@ Additionally, on exits booked from an exchange stop:
   #4's own verification case).
 - `close_executed_stop` with a `fill` whose `filled_price` is `None` raises
   rather than substituting any other number.
+- `close_executed_stop` records `fill.key` as the order row's `broker_order_id`
+  (proves the row the exchange's execution is filed under can be re-queried —
+  without it, `get_order_state` on the bot's invented UUID can only ever return
+  `OrderNotFound`).
+- `close_executed_stop` with a `fill` whose `commission` is `None` still closes
+  the position (proves the commission is a correction, not the substance: a stop
+  exit left open would be found by reconciliation and filed as `EXTERNAL`, which
+  is the wrong trigger recorded permanently).
 - The exit commission on the closed position is the broker's
   `executed_commission`, never zero and never estimated.
+
+**`ops.commissions`**
+- A stop-exit row carrying a `broker_order_id` is re-queried through
+  `get_order_state_by_broker_id`, and the commission that comes back is written
+  and the closed position's `realised_pnl` recomputed (proves the money half of
+  #8: the fee on an exchange-fired stop is recoverable at all).
+- A row with no `broker_order_id` is still re-queried by `key` (proves the
+  ordinary path is unchanged).
+- A row whose commission stays unknown past 24 hours alerts on the first run and
+  **not** on the second (proves the alert terminates — it fired on every backfill
+  run, daily and before every weekly report, once per stop-loss exit ever taken).
+- That same row is still re-queried on the second run (proves the terminal state
+  is on the telling, not the trying).
 
 **`state.halt`**
 - Halting then reading state reports halted with its reason (happy path).
@@ -1022,6 +1050,19 @@ and only separate reasons make the rejection log diagnostic.
 `OrderRecord`, `StopOrderRecord`, `OperationRecord`, `PortfolioState`,
 `SessionInfo`, `RiskDecision`, `HaltState`, `ReconciliationReport`,
 `TradingCalendar`, `BacktestResult`.
+
+`OrderRecord` carries `broker_order_id` and `commission_alerted_at` (v1.39).
+`key` is the bot's own idempotency key, and for a row describing an execution the
+**exchange** performed — a stop the broker fired on the bot's behalf — the broker
+has never seen that key, so nothing could ever re-query the row. Its commission
+was therefore unrecoverable if it landed late, and the "commission still unknown"
+alert repeated on every backfill run, forever, once per stop-loss exit ever taken
+(#8). `broker_order_id` is the broker's own identifier for the order where the
+bot knows it; `commission_alerted_at` records that the owner has been told once.
+Both are `None` where they do not apply. `commission_alerted_at` is
+notification bookkeeping rather than a trading fact, and it lives on the row
+anyway because an alert that repeats forever is equivalent to no alert, and
+"have I already said this" is a fact about the row that must survive a restart.
 
 `OperationRecord` carries `operation_type` and `state` as well as the broker's
 actual commission (v1.35). It used to carry neither, so the only way to tell a
@@ -1429,7 +1470,7 @@ its own (rule 31).
   with the same key. This ordering is what makes a crash mid-submission
   recoverable, and reversing it is a critical defect.
 
-**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None) → OrderRecord`**
+**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, broker_order_id: str | None = None) → OrderRecord`**
 - Records a terminal outcome, including the commission the broker reported on the
   order. `None` means not yet known, which is distinct from zero.
 - Raises `OrderStateError` on a transition out of a terminal status.
@@ -1442,6 +1483,19 @@ its own (rule 31).
 **`async list_missing_commission(since: datetime, until: datetime) → list[OrderRecord]`**
 - `FILLED` orders in the period whose commission is still unknown. Drives the
   daily backfill. Empty list when none.
+- Rows already alerted are **still returned**: the point of the terminal state is
+  to stop repeating the alert, not to stop trying to resolve the number. A
+  re-query is cheap and a commission that finally lands is still worth writing.
+
+**`async mark_commission_alerted(key: str, at: datetime) → OrderRecord`**
+- Records that the owner has been told once about this row's unknown commission
+  (v1.39). Idempotent: a row already marked keeps its original timestamp, since
+  the moment the owner was first told is the fact worth keeping.
+- Raises `OrderStateError` when the row is absent. Raises `ValueError` on a naive
+  `at`.
+- The 24-hour staleness policy stays in `ops.commissions`, which owns it. This
+  function records only the fact, so the policy is not split across two
+  modules — the mistake that keeps recurring as failure class 2.
 
 **`async get(key: str) → OrderRecord | None`**
 - Returns the order or `None` when absent. `None` remains a legitimate answer
@@ -1714,6 +1768,21 @@ consecutive-failure alert and is retried as though waiting would help.
   at.** The caller leaves the position open and retries. A position closed a
   minute late is recoverable; a position closed at an invented price is not.
 - Raises `ValueError` on naive datetimes.
+
+**`async get_order_state_by_broker_id(broker_order_id: str) → OrderRecord`**
+- The same lookup as `get_order_state` but with
+  `order_id_type=ORDER_ID_TYPE_EXCHANGE`, for a row whose `key` the broker has
+  never seen (v1.39). Raises `OrderNotFound` when it does not resolve.
+- Exists because a stop the exchange fired is recorded locally under an
+  idempotency key the bot invented, so `get_order_state` by that key can only
+  ever return `OrderNotFound` — which made the commission on every stop exit
+  permanently unrecoverable (#8). It is a separate function rather than a
+  parameter on `get_order_state` because the two answer different questions:
+  one asks "what happened to the order I sent", the other "what happened to the
+  order the exchange placed for me", and only the first is a recovery path.
+- The returned record's `key` is the `broker_order_id` it was asked about, as
+  `get_executed_stop_fills` already does. This module does not know the local
+  row's key and must not guess at one.
 
 **`async get_max_lots(figi: str) → int`**
 - The maximum lots the broker will accept for a buy on this account. A pre-submit
@@ -2172,6 +2241,18 @@ Owns order submission, the submission locks, and crash recovery.
 - Raises `ValueError` when `fill.filled_price` is `None`. There is no fallback
   price: a stop exit with no confirmed fill is not bookable, and the caller
   leaves the position open and retries.
+- **Records `fill.key` as the order row's `broker_order_id` (v1.39).**
+  `get_executed_stop_fills` returns records keyed by the broker's
+  `exchange_order_id`, so the identifier is already in hand; the local row's own
+  `key` is a UUID this module invented and the broker has never seen. Writing it
+  down is what makes a late commission on this row recoverable at all (#8).
+- A `fill.commission` of `None` does **not** block the close. Unlike the price,
+  the commission is a correction rather than the substance of the exit, and
+  refusing to book would leave a position the broker has already closed open
+  locally until reconciliation found it and recorded it as `EXTERNAL` — a
+  stop-out filed under the wrong trigger, which corrupts the exit-trigger
+  distribution permanently. It is booked with the commission unknown, netted as
+  zero, and corrected by `ops.commissions` when it lands.
 
 Until v1.28 this function took a `Decimal` fill price, and `app.loops` passed it
 the value from `get_last_price` at the top of the cycle — the market price at the
@@ -2606,13 +2687,27 @@ Fills in commissions the broker reported after the fill, and corrects the P&L
 that depended on them.
 
 **`async backfill(since: datetime, until: datetime) → int`**
-- For every order from `db.orders.list_missing_commission`, re-queries
-  `broker.client.get_order_state(key)` — by our own key, so there is no matching
-  step — and records any commission now present.
+- For every order from `db.orders.list_missing_commission`, re-queries the
+  broker and records any commission now present. **By `broker_order_id` through
+  `get_order_state_by_broker_id` when the row has one, and by our own `key`
+  through `get_order_state` otherwise** (v1.39) — either way by an identifier,
+  never by matching on instrument, time and quantity, which is ambiguous exactly
+  when two similar orders are close together.
 - Recomputes `realised_pnl` via `db.positions.recompute_realised` for every
   closed position whose orders changed, and returns the number of orders updated.
 - Alerts only when an order's commission is still unknown more than 24 hours
   after its fill: that is a broker or integration problem, not ordinary lag.
+- **Alerts once per order, not once per run** (v1.39). Before alerting it checks
+  `commission_alerted_at`, and after alerting it calls
+  `db.orders.mark_commission_alerted`. `backfill` runs daily from the rollover
+  loop and again before every weekly report, so the same row alerted on every
+  run — indefinitely, once per stop-loss exit ever taken — into a channel whose
+  whole design premise is that silence means healthy (#8). An alert that repeats
+  forever is equivalent to no alert.
+- It keeps **re-querying** an alerted row. The terminal state is on the telling,
+  not on the trying: the number is still worth having if it arrives.
+- The 24-hour threshold lives here. `db.orders` records only whether the owner
+  has been told.
 - Must never place, cancel or modify an order.
 
 ### `zarabot/ops/backup.py`
@@ -2765,6 +2860,8 @@ written in the same transaction as the row change it describes.
 | `broker_reason` | TEXT NULL | Broker's rejection text, verbatim |
 | `created_at` | TEXT NOT NULL | Written **before** submission |
 | `settled_at` | TEXT NULL | |
+| `broker_order_id` | TEXT NULL | The broker's own identifier, where the bot knows it. Set for a row describing an execution the exchange performed on the bot's behalf, whose `key` the broker has never seen |
+| `commission_alerted_at` | TEXT NULL | UTC. Set once, when the owner is first told this row's commission is still unknown |
 
 **Invariants.** `FILLED`, `REJECTED` and `CANCELLED` are terminal — no row leaves
 them. A row in `SUBMITTING` means the outcome is unknown and must be resolved by
@@ -2891,6 +2988,9 @@ historical record is the purpose of the project. Backups are retained 30 days.
   constraint. It is a separate migration rather than an edit to `001` because
   `001` has been applied — in tests, and potentially on a developer machine — and
   the forward-only rule holds without exception.
+- `005_order_broker_id.sql` adds `broker_order_id` and `commission_alerted_at`
+  to `orders`. Both nullable, no default, no backfill: the live database holds
+  zero orders, and there is nothing historical to reconstruct.
 - `004_position_exit_commission.sql` adds `exit_commission` to `positions`. It
   exists because an `EXTERNAL` close has no closing order row, so its commission
   had nowhere to live and was simply lost (#11). Nullable with no default and no

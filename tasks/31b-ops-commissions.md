@@ -60,13 +60,27 @@ Fills in commissions the broker reported after the fill, and corrects the P&L
 that depended on them.
 
 **`async backfill(since: datetime, until: datetime) → int`**
-- For every order from `db.orders.list_missing_commission`, re-queries
-  `broker.client.get_order_state(key)` — by our own key, so there is no matching
-  step — and records any commission now present.
+- For every order from `db.orders.list_missing_commission`, re-queries the
+  broker and records any commission now present. **By `broker_order_id` through
+  `get_order_state_by_broker_id` when the row has one, and by our own `key`
+  through `get_order_state` otherwise** (v1.39) — either way by an identifier,
+  never by matching on instrument, time and quantity, which is ambiguous exactly
+  when two similar orders are close together.
 - Recomputes `realised_pnl` via `db.positions.recompute_realised` for every
   closed position whose orders changed, and returns the number of orders updated.
 - Alerts only when an order's commission is still unknown more than 24 hours
   after its fill: that is a broker or integration problem, not ordinary lag.
+- **Alerts once per order, not once per run** (v1.39). Before alerting it checks
+  `commission_alerted_at`, and after alerting it calls
+  `db.orders.mark_commission_alerted`. `backfill` runs daily from the rollover
+  loop and again before every weekly report, so the same row alerted on every
+  run — indefinitely, once per stop-loss exit ever taken — into a channel whose
+  whole design premise is that silence means healthy (#8). An alert that repeats
+  forever is equivalent to no alert.
+- It keeps **re-querying** an alerted row. The terminal state is on the telling,
+  not on the trying: the number is still worth having if it arrives.
+- The 24-hour threshold lives here. `db.orders` records only whether the owner
+  has been told.
 - Must never place, cancel or modify an order.
 
 ## Relevant error handling rules
