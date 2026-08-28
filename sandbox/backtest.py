@@ -1,225 +1,285 @@
-"""Replay candles through live strategies, sizing, and exits."""
+"""Replay history by running the live trading cycle against a simulated broker.
+
+The old module imported `strategies`, `risk.sizing` and `lifecycle.exits` but
+**not** `risk.gate` — obeying "never reimplement" while omitting the gate
+entirely, so cooldowns, `max_open_positions`, duplicate-ticker rejection, halt
+and session state played no part in any result. An omission reads as
+compliance, which is why it survived (#12).
+
+Nothing is reimplemented here now, because nothing needs to be: the simulation
+runs `app.loops.trading_cycle` itself. Live and backtest cannot diverge, since
+they are the same code.
+
+Never imported by `zarabot/`.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import tempfile
+from collections.abc import Iterator, Sequence
+from contextlib import ExitStack, contextmanager
+from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
+from typing import Any
 
-from zarabot.clock import trading_days_between
+import aiosqlite
+
+from sandbox.exchange import Commission, SimulatedExchange
 from zarabot.config import Config
-from zarabot.lifecycle.exits import evaluate as evaluate_exit
 from zarabot.models import (
     BacktestResult,
     Candle,
     ExitTrigger,
     Instrument,
     Position,
-    SessionInfo,
-    StopProtection,
-    TradingCalendar,
+    ReconciliationReport,
 )
-from zarabot.risk.sizing import size_position
 
-_HUNDRED = Decimal("100")
-_TICKER = "SBER"
-_ONE = Decimal("1")
+_ZERO = Decimal("0")
 
 
-def _instrument(now: datetime) -> Instrument:
-    return Instrument(
-        figi="BACKTEST",
-        ticker=_TICKER,
-        lot=1,
-        min_price_increment=Decimal("0.01"),
-        currency="RUB",
-        trading_status="NORMAL_TRADING",
-        refreshed_at=now,
-    )
+def _seams(
+    exchange: SimulatedExchange, clock: _Clock, config: Config
+) -> list[tuple[str, str, Any]]:
+    """Every place a live module reached the broker or the clock.
+
+    Written as an explicit table rather than discovered dynamically, so it can
+    be read and audited. `test_no_real_broker_call_escapes` is what proves it
+    complete: a missed seam reaches the network, which is how #39, #43 and the
+    reverted #45 attempt survived their tests.
+    """
+    return [
+        # broker.client, module by module, as each imported it by name
+        (
+            "zarabot.app.loops",
+            "get_executed_stop_fills",
+            exchange.get_executed_stop_fills,
+        ),
+        ("zarabot.app.loops", "get_instrument", exchange.get_instrument),
+        ("zarabot.app.loops", "get_last_price", exchange.get_last_price),
+        ("zarabot.app.loops", "get_portfolio", exchange.get_portfolio),
+        ("zarabot.app.loops", "list_stop_orders", exchange.list_stop_orders),
+        ("zarabot.execution.orders", "cancel_order", exchange.cancel_order),
+        ("zarabot.execution.orders", "cancel_stop_order", exchange.cancel_stop_order),
+        ("zarabot.execution.orders", "get_instrument", exchange.get_instrument),
+        ("zarabot.execution.orders", "get_max_lots", exchange.get_max_lots),
+        ("zarabot.execution.orders", "get_order_state", exchange.get_order_state),
+        ("zarabot.execution.orders", "post_market_order", exchange.post_market_order),
+        ("zarabot.execution.orders", "post_stop_loss", exchange.post_stop_loss),
+        ("zarabot.market.data", "get_candles", exchange.get_candles),
+        ("zarabot.market.data", "get_instrument", exchange.get_instrument),
+        (
+            "zarabot.market.session",
+            "get_trading_schedule",
+            exchange.get_trading_schedule,
+        ),
+        ("zarabot.pnl", "get_candles", exchange.get_candles),
+        ("zarabot.pnl", "get_instrument", exchange.get_instrument),
+        ("zarabot.pnl", "get_last_price", exchange.get_last_price),
+        # the clock, wherever a module bound it at import
+        ("zarabot.app.loops", "now", clock.now),
+        ("zarabot.db.orders", "now", clock.now),
+        ("zarabot.db.positions", "now", clock.now),
+        ("zarabot.db.stop_orders", "now", clock.now),
+        ("zarabot.db.trading_days", "clock_now", clock.now),
+        ("zarabot.execution.orders", "clock_now", clock.now),
+        # configuration, wherever a module reaches for it rather than being
+        # handed it. The backtest's Config is the one the whole run must see.
+        ("zarabot.db.positions", "load", lambda: config),
+        ("zarabot.execution.orders", "load", lambda: config),
+        ("zarabot.pnl", "config", _ConfigModule(config)),
+        # alerts go nowhere
+        ("zarabot.app.loops", "alert", _silent),
+        ("zarabot.execution.orders", "alert", _silent),
+        ("zarabot.market.session", "alert", _silent),
+        ("zarabot.pnl", "alert", _silent),
+    ]
 
 
-def _calendar(candles: list[Candle]) -> TradingCalendar:
-    return TradingCalendar(
-        sessions=tuple(
-            SessionInfo(
-                start=candle.timestamp,
-                end=candle.timestamp + timedelta(minutes=1),
-                is_trading_day=True,
-            )
-            for candle in candles
-        )
-    )
+async def _silent(*_args: object, **_kwargs: object) -> None:
+    return None
 
 
-def _session(now: datetime) -> SessionInfo:
-    return SessionInfo(start=now, end=now + timedelta(minutes=1), is_trading_day=True)
+class _ConfigModule:
+    """Stands in for the `config` module where one is imported wholesale."""
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+
+    def get(self) -> Config:
+        return self._config
+
+    def load(self) -> Config:
+        return self._config
 
 
-def _fill(price: Decimal, slippage: Decimal, side: str) -> Decimal:
-    if side == "BUY":
-        return price * (_ONE + slippage)
-    return price * (_ONE - slippage)
+class _Clock:
+    """Simulated time. `now()` answers with whichever bar is being replayed."""
+
+    def __init__(self, moment: datetime) -> None:
+        self._moment = moment
+
+    def set(self, moment: datetime) -> None:
+        self._moment = moment
+
+    def now(self) -> datetime:
+        return self._moment
 
 
-def _levels(fill: Decimal, config: Config) -> tuple[Decimal, Decimal]:
-    stop = fill * (_HUNDRED - config.stop_loss_pct) / _HUNDRED
-    target = fill * (_HUNDRED + config.take_profit_pct) / _HUNDRED
-    return stop, target
+@contextmanager
+def _patched(seams: list[tuple[str, str, Any]]) -> Iterator[None]:
+    import importlib
+
+    saved: list[tuple[Any, str, Any]] = []
+    try:
+        for module_name, attr, replacement in seams:
+            module = importlib.import_module(module_name)
+            saved.append((module, attr, getattr(module, attr)))
+            setattr(module, attr, replacement)
+        yield
+    finally:
+        for module, attr, original in reversed(saved):
+            setattr(module, attr, original)
 
 
-def _realised(position: Position, exit_price: Decimal, commission: Decimal) -> Decimal:
-    units = Decimal(position.lots * position.lot_size)
-    return (exit_price - position.entry_price) * units - commission - commission
+def _reset_loop_state() -> None:
+    """Clear the module-level latches a fresh run must not inherit."""
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    loops._price_rejected_alerted = False
+    loops._stop_discrepancy_alerted = False
+    loops._loss_unmeasurable_alerted = False
+    loops._age_unmeasurable_alerted = False
+    loops._cache_exhausted_alerted = False
+    loops._entries_stopped = False
+    loops._started_at = None
+    loops._first_cycle_at = None
+    loops._snapshot_on = None
 
 
-def _drawdown(peaks: list[Decimal]) -> Decimal:
-    if not peaks:
-        return Decimal("0")
-    peak = peaks[0]
-    worst = Decimal("0")
-    for equity in peaks:
-        if equity > peak:
-            peak = equity
-        if peak == 0:
-            continue
-        drop = (peak - equity) / peak
-        if drop > worst:
-            worst = drop
+def _reset_session_state() -> None:
+    import zarabot.market.session as session
+
+    session._cache = None
+    session._history = None
+    session._earliest = None
+    session._alerted = False
+
+
+def _drawdown(equity: Sequence[Decimal]) -> Decimal:
+    peak = _ZERO
+    worst = _ZERO
+    for value in equity:
+        peak = max(peak, value)
+        if peak > 0:
+            fall = (peak - value) / peak * Decimal("100")
+            worst = max(worst, fall)
     return worst
 
 
-def run(
-    strategy: object,
-    candles: list[Candle],
+def _benchmark(bars: dict[str, list[Candle]]) -> Decimal | None:
+    series = [candles for candles in bars.values() if len(candles) >= 2]
+    if not series:
+        return None
+    returns = [
+        (candles[-1].close - candles[0].close) / candles[0].close
+        for candles in series
+        if candles[0].close != 0
+    ]
+    if not returns:
+        return None
+    return sum(returns, _ZERO) / Decimal(len(returns))
+
+
+async def run(
+    bars: dict[str, list[Candle]],
+    instruments: dict[str, Instrument],
     config: Config,
-    commission: Decimal,
+    strategies: Sequence[object],
+    commission: Commission,
     slippage: Decimal,
 ) -> BacktestResult:
-    """Replay `candles` through the live strategy, sizing, and exit modules."""
-    ordered = sorted(candles, key=lambda candle: candle.timestamp)
-    if not ordered:
+    """Replay `bars` through the live trading cycle. Returns what it did."""
+    from zarabot.app.loops import trading_cycle
+    from zarabot.app.startup import AppContext
+    from zarabot.db.connection import connect, disconnect
+    from zarabot.db.migrations import apply
+    from zarabot.db.positions import list_closed, list_open
+    from zarabot.market.session import refresh
+    from zarabot.pnl import bot_equity
+
+    timeline = sorted({bar.timestamp for candles in bars.values() for bar in candles})
+    if not timeline:
         return BacktestResult(
             trades=(),
-            pnl=Decimal("0"),
-            win_rate=Decimal("0"),
-            max_drawdown=Decimal("0"),
+            pnl=_ZERO,
+            win_rate=_ZERO,
+            max_drawdown=_ZERO,
             exit_trigger_distribution=(),
             benchmark_return=None,
         )
-    calendar = _calendar(ordered)
-    instrument = _instrument(ordered[0].timestamp)
-    cash = config.allocated_capital
-    position: Position | None = None
+
+    clock = _Clock(timeline[0])
+    exchange = SimulatedExchange(
+        bars=bars,
+        instruments=instruments,
+        cash=config.allocated_capital,
+        slippage=slippage,
+        commission=commission,
+    )
+    ctx = AppContext(
+        config=config,
+        strategies=tuple(strategies),  # type: ignore[arg-type]
+        halt=None,
+        reconciliation=ReconciliationReport(ran_at=timeline[0], adjustments=()),
+    )
+
+    equity: list[Decimal] = []
     closed: list[Position] = []
-    equity: list[Decimal] = [cash]
-    next_id = 1
-    evaluate = strategy.evaluate
-    name = str(getattr(strategy, "name", "strategy"))
+    still_open: list[Position] = []
 
-    for candle in ordered:
-        now = candle.timestamp
-        visible = [item for item in ordered if item.timestamp < now]
-        if position is not None:
-            days = trading_days_between(position.entry_at, now, calendar)
-            trigger = evaluate_exit(
-                position, candle.close, now, _session(now), days, config
-            )
-            if trigger is not None:
-                exit_price = _fill(candle.close, slippage, "SELL")
-                cash += Decimal(position.lots * position.lot_size) * exit_price
-                cash -= commission
-                pnl = _realised(position, exit_price, commission)
-                closed.append(
-                    Position(
-                        id=position.id,
-                        ticker=position.ticker,
-                        figi=position.figi,
-                        strategy=position.strategy,
-                        lots=position.lots,
-                        lot_size=position.lot_size,
-                        entry_price=position.entry_price,
-                        entry_at=position.entry_at,
-                        stop_price=position.stop_price,
-                        target_price=position.target_price,
-                        status="CLOSED",
-                        adopted=False,
-                        open_order_key=position.open_order_key,
-                        close_order_key=f"BT-CLOSE-{position.id}",
-                        exit_trigger=trigger,
-                        exit_price=exit_price,
-                        exit_at=now,
-                        realised_pnl=pnl,
-                        stop_protection=StopProtection.LOCAL,
-                        stop_order_key=None,
-                    )
-                )
-                position = None
-                equity.append(cash)
-                continue
-        if position is None:
-            signal = evaluate(_TICKER, visible, now)
-            if signal is None:
-                continue
-            fill = _fill(candle.close, slippage, "BUY")
-            lots = size_position(
-                fill,
-                instrument,
-                config.allocated_capital,
-                cash,
-                config.position_size_pct,
-                # No position is open on this branch, so nothing is committed
-                # to the portfolio yet and the headroom is the whole allocation.
-                Decimal(0),
-                config.cash_reserve_pct,
-            )
-            if lots <= 0:
-                continue
-            cost = Decimal(lots * instrument.lot) * fill + commission
-            if cost > cash:
-                continue
-            cash -= cost
-            stop, target = _levels(fill, config)
-            position = Position(
-                id=next_id,
-                ticker=_TICKER,
-                figi=instrument.figi,
-                strategy=name,
-                lots=lots,
-                lot_size=instrument.lot,
-                entry_price=fill,
-                entry_at=now,
-                stop_price=stop,
-                target_price=target,
-                status="OPEN",
-                adopted=False,
-                open_order_key=f"BT-OPEN-{next_id}",
-                close_order_key=None,
-                exit_trigger=None,
-                exit_price=None,
-                exit_at=None,
-                realised_pnl=None,
-                stop_protection=StopProtection.LOCAL,
-                stop_order_key=None,
-            )
-            next_id += 1
-            equity.append(cash)
+    with ExitStack() as stack:
+        tmp = stack.enter_context(tempfile.TemporaryDirectory())
+        stack.enter_context(_patched(_seams(exchange, clock, config)))
+        _reset_loop_state()
+        _reset_session_state()
 
-    trades = tuple(closed + ([position] if position is not None else []))
-    pnl = sum((trade.realised_pnl or Decimal("0") for trade in closed), Decimal("0"))
-    wins = sum(1 for trade in closed if (trade.realised_pnl or Decimal("0")) > 0)
-    win_rate = Decimal(wins) / Decimal(len(closed)) if closed else Decimal("0")
+        path = str(Path(tmp) / "backtest.db")
+        conn: aiosqlite.Connection = await connect(path)
+        try:
+            await apply(conn)
+            await exchange.advance(timeline[0])
+            await refresh(len(timeline))
+            for moment in timeline:
+                clock.set(moment)
+                await exchange.advance(moment)
+                await trading_cycle(ctx)
+                # Marked to market on EVERY bar. The old module appended the
+                # cash balance on trade events only, and cash falls when you
+                # buy, so its drawdown was roughly the position size (#12).
+                equity.append(await bot_equity())
+            closed = await list_closed()
+            still_open = await list_open()
+        finally:
+            await disconnect()
+
+    realised = sum((row.realised_pnl or _ZERO for row in closed), _ZERO)
+    wins = sum(1 for row in closed if (row.realised_pnl or _ZERO) > 0)
+    win_rate = Decimal(wins) / Decimal(len(closed)) if closed else _ZERO
     counts: dict[ExitTrigger, int] = {}
-    for trade in closed:
-        if trade.exit_trigger is not None:
-            counts[trade.exit_trigger] = counts.get(trade.exit_trigger, 0) + 1
-    distribution = tuple(sorted(counts.items(), key=lambda item: item[0].value))
-    benchmark = None
-    if len(ordered) >= 2 and ordered[0].close != 0:
-        benchmark = (ordered[-1].close - ordered[0].close) / ordered[0].close
+    for row in closed:
+        if row.exit_trigger is not None:
+            counts[row.exit_trigger] = counts.get(row.exit_trigger, 0) + 1
     return BacktestResult(
-        trades=trades,
-        pnl=pnl,
+        trades=tuple(closed + still_open),
+        pnl=realised,
         win_rate=win_rate,
         max_drawdown=_drawdown(equity),
-        exit_trigger_distribution=distribution,
-        benchmark_return=benchmark,
+        exit_trigger_distribution=tuple(
+            sorted(counts.items(), key=lambda item: item[0].value)
+        ),
+        benchmark_return=_benchmark(bars),
     )

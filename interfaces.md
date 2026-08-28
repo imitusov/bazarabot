@@ -1106,15 +1106,37 @@ Oldest-first. Empty list when the range holds none. Naive `start`/`end` raise
 `ValueError`. A cache miss fetches via `broker.client`; a cached range that does
 not cover the request is extended by fetching only the missing span.
 
+## `sandbox.exchange`
+
+A simulated broker backed by historical bars. Never imported by `zarabot/`.
+Every function matches its `broker.client` counterpart's signature and raises
+the same exception for the same condition. Also answers `get_trading_schedule`,
+so `market.session` runs on top rather than being stubbed.
+
+**`Commission(pct: Decimal, minimum: Decimal)`** — the broker's tariff.
+`on(turnover)` is the fee for one fill.
+
+**`SimulatedExchange(bars, instruments, cash, slippage, commission)`**
+`await advance(moment)` moves the cursor and fires any stop the newly-visible
+bar triggers. `hold(figi, lots, average_price)` seeds a holding;
+`touched(figi, level, trigger)` reports whether the current bar reached a level.
+
+Fill model: a market order is priced at the **next** bar's open and returned on
+the submitting call; stops read the bar **low** and take-profits the **high**; a
+bar gapping through a stop fills at its open; a bar touching both books the
+stop; an order on the last bar never fills (#12).
+
 ## `sandbox.backtest`
 
-Imports live `strategies`, `risk.sizing` and `lifecycle.exits` unchanged.
-Reimplementing any of them is a defect.
+Runs `app.loops.trading_cycle` itself against a `SimulatedExchange` and a
+temporary database. Nothing is reimplemented, because nothing needs to be —
+live and backtest are the same code.
 
-**`run(strategy, candles: list[Candle], config: Config, commission: Decimal, slippage: Decimal) → BacktestResult`**
-Replays candles oldest-first. The strategy never receives a candle at or after
-the decision instant. Commission (per fill) and slippage (fraction of price)
-apply to every simulated fill.
+**`async run(bars: dict[str, list[Candle]], instruments: dict[str, Instrument], config: Config, strategies: Sequence[Strategy], commission: Commission, slippage: Decimal) → BacktestResult`**
+Replays every bar oldest-first across the whole watchlist with concurrent
+positions on one shared cash balance. Equity is marked to market on every bar,
+so `max_drawdown` means something. The seam table it patches is explicit and is
+proved complete by a test that fails if any real broker call escapes.
 
 ## `sandbox.train`
 
