@@ -161,18 +161,6 @@ async def env(
             """,
             (NOW.isoformat(), NOW.isoformat()),
         )
-        await conn.execute(
-            """
-            INSERT INTO orders (
-                key, ticker, figi, side, intent, lots, status,
-                filled_lots, filled_price, created_at, settled_at
-            ) VALUES (
-                'ADOPTED-BBG000000001', 'SBER', 'BBG000000001', 'BUY', 'ENTRY', 3,
-                'FILLED', 3, '123.45', ?, ?
-            )
-            """,
-            (NOW.isoformat(), NOW.isoformat()),
-        )
         await conn.commit()
     await connect(str(path))
     broker = _Broker()
@@ -225,6 +213,7 @@ async def _submit_unresolved_entry(
     key: str = "order-2",
     ticker: str = "SBER",
     figi: str = "BBG000000001",
+    created_at: datetime = NOW,
 ) -> None:
     """An entry the bot submitted and never finished resolving.
 
@@ -240,7 +229,7 @@ async def _submit_unresolved_entry(
                 filled_lots, filled_price, created_at, settled_at
             ) VALUES (?, ?, ?, 'BUY', 'ENTRY', 3, 'SUBMITTED', NULL, NULL, ?, NULL)
             """,
-            (key, ticker, figi, NOW.isoformat()),
+            (key, ticker, figi, created_at.isoformat()),
         )
 
 
@@ -510,6 +499,33 @@ async def test_recognised_holding_with_missing_row_is_adopted(env: _Broker) -> N
     assert len(opened) == 1
     assert opened[0].adopted is True
     assert opened[0].strategy == "ADOPTED"
+
+
+async def test_adopted_position_points_at_the_recognising_order(
+    env: _Broker,
+) -> None:
+    """The adopted row must point at the order the bot actually submitted —
+    the whole reason the foreign key exists (#42)."""
+    await _submit_unresolved_entry(key="order-2")
+    env.holdings = (_broker_position(lots=3, price=Decimal("123.45")),)
+    await reconcile(NOW)
+    opened = await list_open()
+    assert opened[0].open_order_key == "order-2"
+
+
+async def test_adoption_uses_the_oldest_unresolved_entry(env: _Broker) -> None:
+    """The submission lock should make two impossible; the tie-break is stated
+    so the behaviour is not whichever row the query happened to return first."""
+    await _submit_unresolved_entry(
+        key="order-late", created_at=NOW + timedelta(hours=1)
+    )
+    await _submit_unresolved_entry(
+        key="order-early", created_at=NOW - timedelta(hours=1)
+    )
+    env.holdings = (_broker_position(lots=3, price=Decimal("123.45")),)
+    await reconcile(NOW)
+    opened = await list_open()
+    assert opened[0].open_order_key == "order-early"
     assert opened[0].entry_price == Decimal("123.45")
     assert env.alerts
 

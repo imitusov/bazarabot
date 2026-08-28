@@ -14,6 +14,7 @@ import pytest
 
 from zarabot.db.connection import connect, disconnect, shared
 from zarabot.db.migrations import apply
+from zarabot.db.orders import get as get_order
 from zarabot.db.orders import record_commission
 from zarabot.db.positions import (
     PositionEvent,
@@ -45,7 +46,7 @@ STOP = Decimal("95.00")
 TARGET = Decimal("110.00")
 KEY = "11111111-1111-4111-8111-111111111111"
 EXIT_KEY = "22222222-2222-4222-8222-222222222222"
-ADOPTED_KEY = "ADOPTED-BBG000000001"
+ADOPT_ENTRY_KEY = "33333333-3333-4333-8333-333333333333"
 
 REQUIRED_ENV = {
     "TINVEST_TOKEN": "token",
@@ -137,7 +138,7 @@ async def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     conn = await connect(str(path))
     await apply(conn)
     await _insert_order(_order())
-    await _insert_order(_order(key=ADOPTED_KEY, commission=None))
+    await _insert_order(_order(key=ADOPT_ENTRY_KEY, commission=None))
     try:
         yield path
     finally:
@@ -287,7 +288,7 @@ async def test_mutations_write_one_event_each(db: Path) -> None:
     assert all(isinstance(item, PositionEvent) for item in events)
     assert all(item.position_id == position.id for item in events)
 
-    adopted = await adopt(_instrument(), 3, PRICE, AWARE)
+    adopted = await adopt(_instrument(), 3, PRICE, AWARE, ADOPT_ENTRY_KEY)
     adopted_events = await list_events(adopted.id)
     assert len(adopted_events) == 1
     assert adopted_events[0].event == "ADOPTED"
@@ -384,8 +385,54 @@ async def test_set_stop_protection_pairing(db: Path) -> None:
     assert demoted.stop_order_key is None
 
 
+async def test_adopt_points_at_the_order_the_bot_submitted(db: Path) -> None:
+    """The synthetic ADOPTED-{figi} key had no order row behind it, while the
+    schema has required one since 001 (#42)."""
+    position = await adopt(_instrument(), 3, PRICE, AWARE, ADOPT_ENTRY_KEY)
+    assert position.open_order_key == ADOPT_ENTRY_KEY
+    order = await get_order(ADOPT_ENTRY_KEY)
+    assert order is not None
+    assert order.key == ADOPT_ENTRY_KEY
+
+
+async def test_adopt_on_a_database_seeded_with_only_its_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No fixtures beyond the migrations and the one order adopt must point at.
+
+    Every existing fixture happened to pre-insert an `ADOPTED-{figi}` row, so
+    the foreign key was satisfiable by accident and the defect was invisible.
+    """
+    path = tmp_path / "fresh.db"
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DB_PATH", str(path))
+    monkeypatch.setattr("zarabot.clock.now", lambda: AWARE)
+    monkeypatch.setattr("zarabot.db.positions.now", lambda: AWARE, raising=False)
+    conn = await connect(str(path))
+    await apply(conn)
+    try:
+        await _insert_order(_order(key=ADOPT_ENTRY_KEY, commission=None))
+        position = await adopt(_instrument(), 3, PRICE, AWARE, ADOPT_ENTRY_KEY)
+        assert position.adopted is True
+        assert position.open_order_key == ADOPT_ENTRY_KEY
+    finally:
+        await disconnect()
+
+
+async def test_adopt_with_no_order_row_does_not_claim_a_duplicate(
+    db: Path,
+) -> None:
+    """The broad IntegrityError translation turned a foreign-key violation into
+    a plausible lie naming a position that does not exist (failure class 5)."""
+    with pytest.raises(aiosqlite.IntegrityError) as caught:
+        await adopt(_instrument(), 3, PRICE, AWARE, "no-such-order-key")
+    assert "FOREIGN KEY" in str(caught.value).upper()
+    assert await list_open() == []
+
+
 async def test_adopt_creates_local_adopted_position(db: Path) -> None:
-    position = await adopt(_instrument(), 3, PRICE, AWARE)
+    position = await adopt(_instrument(), 3, PRICE, AWARE, ADOPT_ENTRY_KEY)
     assert position.adopted is True
     assert position.strategy == "ADOPTED"
     assert position.stop_protection is StopProtection.LOCAL
@@ -556,7 +603,7 @@ async def test_adopt_uses_configured_stop_and_target(
 ) -> None:
     monkeypatch.setenv("STOP_LOSS_PCT", "3")
     monkeypatch.setenv("TAKE_PROFIT_PCT", "12")
-    position = await adopt(_instrument(), 3, PRICE, AWARE)
+    position = await adopt(_instrument(), 3, PRICE, AWARE, ADOPT_ENTRY_KEY)
     assert position.stop_price == Decimal("97.00")
     assert position.target_price == Decimal("112.00")
 
