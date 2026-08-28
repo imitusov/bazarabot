@@ -269,6 +269,12 @@ class OperationRecord:
     payment: Decimal
     price: Decimal | None
     quantity: int | None
+    # The broker's own names. Without them a sale was identifiable only by the
+    # sign of `payment` and a fee only by a substring of a name this record did
+    # not carry — neither is a thing to build a money figure on (#11).
+    operation_type: str = ""
+    state: str = ""
+    parent_operation_id: str | None = None
 
     def __post_init__(self) -> None:
         _validate_common(self)

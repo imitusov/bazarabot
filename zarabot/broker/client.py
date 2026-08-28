@@ -77,6 +77,26 @@ _TRANSPORT_STATUSES = frozenset({StatusCode.UNAVAILABLE, StatusCode.DEADLINE_EXC
 
 _NANO = Decimal("1000000000")
 
+# Only an executed operation is a fact. The rest are intentions or history.
+_OPERATION_EXECUTED = "OPERATION_STATE_EXECUTED"
+
+# Every fee the broker can charge, named rather than matched on the substring
+# "FEE" in an attribute the domain record did not carry (#11).
+_FEE_TYPES = frozenset(
+    {
+        "OPERATION_TYPE_ADVICE_FEE",
+        "OPERATION_TYPE_BROKER_FEE",
+        "OPERATION_TYPE_CASH_FEE",
+        "OPERATION_TYPE_MARGIN_FEE",
+        "OPERATION_TYPE_OTHER_FEE",
+        "OPERATION_TYPE_OUT_FEE",
+        "OPERATION_TYPE_SERVICE_FEE",
+        "OPERATION_TYPE_SUCCESS_FEE",
+        "OPERATION_TYPE_TRACK_MFEE",
+        "OPERATION_TYPE_TRACK_PFEE",
+    }
+)
+
 # Cash reaches the portfolio as a currency position. Roubles are RUB000UTSTOM,
 # and roubles are the only buying power: the schema constrains instruments to
 # RUB (migrations/001_initial.sql).
@@ -226,6 +246,13 @@ def _translate(
         name = getattr(exc.code, "name", str(exc.code))
         raise BrokerUnavailable(_redact(f"broker unavailable: {name}", token)) from exc
     raise exc
+
+
+def _enum_name(raw: object) -> str:
+    """The broker's own name for an enum member, whatever shape it arrives in."""
+    if raw is None:
+        return ""
+    return str(getattr(raw, "name", raw))
 
 
 def _reject_naive(moment: datetime) -> None:
@@ -819,9 +846,14 @@ async def get_operations(since: datetime, until: datetime) -> list[OperationReco
         _translate(exc, conn.config.tinvest_token, not_found=None)
     records: list[OperationRecord] = []
     for raw in response.operations:
+        state = _enum_name(getattr(raw, "state", None))
+        if state != _OPERATION_EXECUTED:
+            # A cancelled or still-progressing operation is not something that
+            # happened; counting one as a cost or as a sale is the same error.
+            continue
         payment = _decimal_money(raw.payment)
-        name = getattr(getattr(raw, "operation_type", None), "name", "")
-        commission = abs(payment) if "FEE" in name else Decimal(0)
+        operation_type = _enum_name(getattr(raw, "operation_type", None))
+        commission = abs(payment) if operation_type in _FEE_TYPES else Decimal(0)
         price_raw = getattr(raw, "price", None)
         price = _decimal_money(price_raw) if price_raw is not None else None
         quantity = getattr(raw, "quantity", None)
@@ -835,6 +867,9 @@ async def get_operations(since: datetime, until: datetime) -> list[OperationReco
                 payment=payment,
                 price=price,
                 quantity=quantity,
+                operation_type=operation_type,
+                state=state,
+                parent_operation_id=getattr(raw, "parent_operation_id", "") or None,
             )
         )
     return records

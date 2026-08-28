@@ -53,8 +53,11 @@ exactly when `intent` is `EXIT` (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`).
 **`StopOrderRecord(key: str, stop_order_id: str | None, position_id: int, ticker: str, lots: int, stop_price: Decimal, status: StopOrderStatus, created_at: datetime, settled_at: datetime | None)`**
 Standing stop-loss tracked locally.
 
-**`OperationRecord(id: str, figi: str, ticker: str, occurred_at: datetime, commission: Decimal, payment: Decimal, price: Decimal | None, quantity: int | None)`**
-Broker operation including actual commission. `payment` may be negative (a debit).
+**`OperationRecord(id: str, figi: str, ticker: str, occurred_at: datetime, commission: Decimal, payment: Decimal, price: Decimal | None, quantity: int | None, operation_type: str = "", state: str = "", parent_operation_id: str | None = None)`**
+Broker operation including actual commission. `payment` may be negative (a
+debit). `operation_type` and `state` are the broker's own enum names
+(`OPERATION_TYPE_SELL`, `OPERATION_STATE_EXECUTED`, …); `parent_operation_id`
+ties a fee to the trade that incurred it (#11).
 
 **`PortfolioState(cash: Decimal, positions: tuple[Position, ...])`**
 Broker-authoritative cash and holdings.
@@ -633,8 +636,11 @@ naive datetimes.
 **`async get_max_lots(figi: str) → int`**
 Buy-side market max lots.
 **`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**
-Period cost reconciliation only. Not the per-order commission source —
-`OperationRecord` has no order id.
+Period cost reconciliation, and the resolution of a sale the bot did not
+submit (#11). Not the per-order commission source — `OperationRecord` has no
+order id. Carries `operation_type`, `state` and `parent_operation_id` verbatim;
+`commission` is set for fee operations identified by type, never by a substring
+of a name. Returns only `OPERATION_STATE_EXECUTED` operations.
 **`async get_order_state(key: str) → OrderRecord`**
 Lookup by `order_id_type=ORDER_ID_TYPE_REQUEST`. Raises `OrderNotFound`.
 `commission` is `executed_commission` via `money_to_decimal`, or `None` until filled.
