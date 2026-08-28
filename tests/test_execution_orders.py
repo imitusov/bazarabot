@@ -236,6 +236,10 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
     monkeypatch.setattr(f"{module}.cancel_stop_order", broker.cancel_stop_order)
     monkeypatch.setattr(f"{module}.cancel_order", broker.cancel_order)
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
+    # db.orders binds `now` at import, so order rows would otherwise carry the
+    # wall clock — which the test conventions forbid, and which makes any
+    # assertion about an order's creation date meaningless.
+    monkeypatch.setattr("zarabot.db.orders.now", lambda: NOW)
     counter = {"n": 0}
 
     def _uuid() -> UUID:

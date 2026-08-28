@@ -765,7 +765,10 @@ cooldown, or risk limits.
 **`async resolve_unfinished(now: datetime) → list[OrderRecord]`**
 Queries `get_order_state` by key; never resubmits. `OrderNotFound` settles as
 `REJECTED` / never-placed. A discovered entry fill opens via `get_instrument`
-and today's `db.signals` row (else strategy `ma_crossover`). A discovered exit
+and the `db.signals` row for the span between the order's `created_at` and
+`now` in Moscow dates; with no match the strategy is `UNATTRIBUTED`, never a
+real one, and the reconstructed `reference_price` is the order's `filled_price`
+(#11, rule 35). A discovered exit
 fill closes with the order row's `exit_trigger`. A missing trigger is a data
 defect: alert and leave the position open. An `ENTRY` still `SUBMITTED` with
 lots filled runs the cancel-and-re-read above. A terminal `EXIT` that sold part

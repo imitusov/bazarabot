@@ -65,6 +65,12 @@ _LOG = logging.getLogger(__name__)
 _HUNDRED = Decimal("100")
 _STOP_ATTEMPTS = 3
 
+# A trade the bot did not decide on is named, not credited. In the same family
+# as `ADOPTED`: the schema accepts it, `telegram.commands` iterates the enabled
+# strategies and so never shows it under one, and `reporter.weekly` groups by
+# the stored name and so gives it a heading of its own (rule 35).
+_UNATTRIBUTED = "UNATTRIBUTED"
+
 _global_lock = asyncio.Lock()
 _ticker_locks: dict[str, asyncio.Lock] = {}
 _registry_lock = asyncio.Lock()
@@ -121,18 +127,31 @@ async def _write[T](awaitable: Awaitable[T]) -> T:
 
 
 async def _signal_for_recovered_entry(order: OrderRecord, moment: datetime) -> Signal:
-    day = moscow_date(moment)
-    pairs = await list_for_period(day, day)
+    """Recover the signal behind a discovered fill, or say plainly there is none.
+
+    The lookup spans the order's life rather than one Moscow date: an order
+    that filled at 23:58 MSK and is recovered at 00:05 is the case where
+    recovery matters most, and a single-date search failed exactly there.
+
+    With no match, the strategy is `UNATTRIBUTED`, never a real one. This used
+    to name `ma_crossover` — a strategy whose weekly figures decide whether it
+    stays enabled — so every recovered trade biased that evidence, in the same
+    direction every time (#11, rule 35).
+    """
+    created = moscow_date(order.created_at)
+    seen = moscow_date(moment)
+    pairs = await list_for_period(min(created, seen), max(created, seen))
     for signal, _decision in reversed(pairs):
         if signal.ticker == order.ticker:
             return signal
-    price = order.filled_price if order.filled_price is not None else Decimal("0")
+    if order.filled_price is None:
+        raise PositionStateError(f"recovered fill for {order.ticker} has no price")
     return Signal(
         ticker=order.ticker,
-        strategy="ma_crossover",
+        strategy=_UNATTRIBUTED,
         side=Side.BUY,
         generated_at=moment,
-        reference_price=price,
+        reference_price=order.filled_price,
     )
 
 
