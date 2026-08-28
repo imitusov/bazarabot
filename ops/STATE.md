@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-26 · spec v1.27 · brief v1.8 · 25 open issues
+Updated: 2026-08-28 · spec v1.37 · brief v1.11 · 21 open issues
 
 ## What this is
 
@@ -187,6 +187,51 @@ check` → implement (Cursor, one module per chat, test-first, two commits) →
 and then satisfies it has removed the only independent check. Every finding so
 far came from a contract someone else wrote.
 
+## #10 and #11 closed — the last two defects writing wrong numbers into P&L
+
+Both were instances of the same habit, and both turned out smaller in the place
+the audit pointed and larger somewhere adjacent.
+
+**#10.** The multi-slice exit loop and the quantity-weighted aggregation it
+needed were both already dead: v1.27 had stopped settling a partial as a fill,
+so the loop could not reach a second iteration. What v1.27 left behind was that
+nothing *decided* what to do with a partial. Entry now cancels the remainder
+(`broker.client.cancel_order`, new) and writes the position from a fresh
+`get_order_state`, never from the pre-cancel response. A zero-fill `SUBMITTED`
+order is deliberately left alone — cancelling a merely pending market order
+would turn every slow fill into a missed entry. A terminal exit that sold part
+of a position reduces it to the unsold remainder and leaves it open; the sold
+slice's P&L is knowingly unbooked, bounded by one position's stop loss, alerted,
+and recorded as `LOTS_ADJUSTED`.
+
+`db.positions.close` needed **no** signature change for #10. The parameter the
+audit anticipated would have added a way to write a price no order achieved.
+
+**#11.** External closes are now resolved from the operations feed — weighted
+price, the sale's own timestamp, and the fee summed from the operations parented
+to those sales. `get_last_price` is gone from `broker.reconcile` entirely. When
+the sale cannot be found the position stays **open** and the report carries
+`EXIT_UNRESOLVED`, per rule 33. Recovered entries with no matching signal are
+`UNATTRIBUTED` rather than `ma_crossover`, and the signal lookup spans the
+order's life rather than one Moscow date.
+
+**Failure class 2 struck again, and I caught it in review rather than in code.**
+v1.35 said `EXIT_UNRESOLVED` "does not stop the bot" and stopped there — but the
+set of adjustment types startup recognises without remedying lives in
+`app.startup`, and anything outside it fires the urgent *"cannot act on"* alert.
+Every unresolved exit would have tripped the alarm reserved for a report the
+executor genuinely cannot read. v1.37 fixes it and names the follow-on cost too.
+That is the sixth finding from this class.
+
+**What is now load-bearing and untested: `get_operations` (#44).** Every external
+close's price, time and commission comes from it, and it has never been called
+against a live account — written from the wheel, exactly like
+`get_trading_schedule` was before #39 and #43. Four of its five assumptions fail
+*quietly*: an empty `parent_operation_id` silently restores the zero-commission
+defect #11 set out to fix. The account has never traded, so the feed is empty
+and the check is not possible yet. It is a gate on trusting the first external
+close.
+
 ## Failure classes that keep recurring
 
 Recorded because they will happen again, and three of them were mine.
@@ -215,9 +260,13 @@ Of the eight issues opened while doing this work — #30, #31, #32, #33, #34, #3
 critic pass, none from tests**. All the code involved passed its tests and
 matched its contract.
 
-Failure class 2 has now produced three findings on its own (#26's alert half,
-#35, #36). It is the only class in the list above that no automated check
-catches, and it is the one that keeps recurring.
+Failure class 2 has now produced six findings on its own (#26's alert half,
+#35, #36, and three more since — most recently `EXIT_UNRESOLVED` in v1.35, which
+named a behaviour in `broker.reconcile`'s section that only `app.startup` could
+deliver). It is the only class in the list above that no automated check
+catches, and it is the one that keeps recurring. The habit that catches it is
+re-reading each amendment asking *which module's code changes because of this
+sentence*, not *which module is this sentence about*.
 
 ## Not yet done
 
@@ -225,3 +274,5 @@ catches, and it is the one that keeps recurring.
 - CI workflows exist but **have never executed on GitHub**
 - The VPS deploy path (`scripts/deploy/`) is written and untested
 - `#30`: `broker.client` 74.9% and `pnl` 69.6%, on ratchet floors
+- `#44`: no verification check exercises `get_operations`, which now carries
+  every external close's price, time and commission
