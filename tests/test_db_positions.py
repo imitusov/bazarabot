@@ -486,6 +486,63 @@ async def test_external_close_requires_no_order(db: Path) -> None:
     assert closed.status == "CLOSED"
 
 
+async def test_external_close_nets_and_stores_its_commission(db: Path) -> None:
+    """An EXTERNAL close has no closing order row, so its fee had nowhere to
+    live and every such position overstated its result by it (#11)."""
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    closed = await close(
+        position.id,
+        ExitTrigger.EXTERNAL,
+        Decimal("110.00"),
+        AWARE,
+        None,
+        Decimal("2.50"),
+    )
+    # Gross 100 minus entry 1.50 minus the resolved exit fee 2.50.
+    assert closed.realised_pnl == Decimal("96.00")
+    async with aiosqlite.connect(db) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT exit_commission FROM positions WHERE id = ?", (position.id,)
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert Decimal(str(row["exit_commission"])) == Decimal("2.50")
+
+
+async def test_exit_commission_is_refused_where_an_order_carries_it(
+    db: Path,
+) -> None:
+    """A second source for a number the order row already holds is a way for
+    the two to disagree."""
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    exit_order = _order(key=EXIT_KEY, side=Side.SELL, intent="EXIT")
+    with pytest.raises(ValueError):
+        await close(
+            position.id,
+            ExitTrigger.TAKE_PROFIT,
+            Decimal("110.00"),
+            AWARE,
+            exit_order,
+            Decimal("2.50"),
+        )
+
+
+async def test_recompute_preserves_an_external_exit_commission(db: Path) -> None:
+    """The backfill must not undo a fee the operations feed already resolved."""
+    position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
+    closed = await close(
+        position.id,
+        ExitTrigger.EXTERNAL,
+        Decimal("110.00"),
+        AWARE,
+        None,
+        Decimal("2.50"),
+    )
+    recomputed = await recompute_realised(position.id)
+    assert recomputed.realised_pnl == closed.realised_pnl
+
+
 async def test_non_external_close_requires_an_order(db: Path) -> None:
     position = await open(_signal(), _order(), _instrument(), STOP, TARGET, AWARE)
     with pytest.raises(ValueError):
