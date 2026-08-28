@@ -814,8 +814,15 @@ Never calls `aiosqlite.connect` and never closes the connection. Access before
 `connect` or after `disconnect` raises `DatabaseNotOpenError` (rule 30).
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
-Compares `get_portfolio()` to `list_open()`. Local-only → close `EXTERNAL` at
-last price with `order=None` and **no** `orders` row. Broker-only and
+Compares `get_portfolio()` to `list_open()`. Local-only → the sale is resolved
+from `get_operations(position.entry_at, now)`, filtered to the position's `figi`
+and the sale operation types: `exit_price` is the quantity-weighted average,
+`exit_at` the latest sale timestamp, `exit_commission` the sum of the fee
+operations parented to those sales, closed with `order=None` and **no** `orders`
+row. With no covering sale, or the feed unavailable, the position **stays open**
+and the report carries `{"type": "EXIT_UNRESOLVED", "ticker", "position_id",
+"reason"}` with an alert; no exit is ever recorded at a quote or at
+`entry_price` (#11, rule 33). Broker-only and
 unrecognised → `{"type": "FOREIGN_HOLDING", "ticker", "lots", "average_price"}`
 and **no position row is written**; `app.startup` refuses to start on it (rule
 32). Broker-only but recognised — the bot has an unresolved `ENTRY` order of its

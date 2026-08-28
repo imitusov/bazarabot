@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
 from zarabot.broker.client import (
+    BrokerRateLimited,
     BrokerUnavailable,
     get_instrument,
-    get_last_price,
+    get_operations,
     get_portfolio,
     list_stop_orders,
 )
@@ -20,6 +22,7 @@ from zarabot.db.orders import list_unresolved
 from zarabot.db.positions import adopt, close, list_open, update_lots
 from zarabot.models import (
     ExitTrigger,
+    OperationRecord,
     Position,
     ReconciliationReport,
     StopOrderRecord,
@@ -28,6 +31,16 @@ from zarabot.models import (
 from zarabot.telegram.notifier import alert
 
 _LOG = logging.getLogger(__name__)
+
+# Every way the broker names a sale. A sale is identified by what the broker
+# called it, never by the sign of a payment (#11).
+_SALE_TYPES = frozenset(
+    {
+        "OPERATION_TYPE_SELL",
+        "OPERATION_TYPE_DELIVERY_SELL",
+        "OPERATION_TYPE_SELL_MARGIN",
+    }
+)
 
 
 def _reject_naive(moment: datetime) -> None:
@@ -43,25 +56,127 @@ def _by_ticker(positions: list[Position] | tuple[Position, ...]) -> dict[str, Po
     return found
 
 
-async def _last_price(position: Position) -> Decimal:
-    try:
-        return await get_last_price(position.figi)
-    except BrokerUnavailable:
-        return position.entry_price
+@dataclass(frozen=True)
+class _ResolvedSale:
+    """What the broker says happened, and nothing this module worked out."""
+
+    price: Decimal
+    occurred_at: datetime
+    commission: Decimal
+
+
+def _resolve_sale(
+    position: Position, operations: list[OperationRecord]
+) -> _ResolvedSale | None:
+    """The real sale of this position, from the account's own operations feed.
+
+    Every executed sale of the instrument inside the window belongs to this
+    position, because at most one position per ticker is open at a time. The
+    price is their quantity-weighted average — the one weighting in the system
+    that is legitimate, because every input is a number the broker reported
+    about a trade that occurred.
+
+    Deliberately no "take sales until they cover the position" cutoff: whether
+    the broker reports `quantity` in lots or in instrument units has never been
+    checked against a live account, and that is the class of assumption that
+    produced #39 and #43. A weighted average is right under either reading
+    because the units cancel; a cutoff is not.
+    """
+    sales = [
+        item
+        for item in operations
+        if item.figi == position.figi
+        and item.operation_type in _SALE_TYPES
+        and item.price is not None
+        and item.quantity
+    ]
+    if not sales:
+        return None
+    units = sum(abs(item.quantity or 0) for item in sales)
+    if units <= 0:
+        return None
+    gross = sum(
+        ((item.price or Decimal("0")) * abs(item.quantity or 0) for item in sales),
+        Decimal("0"),
+    )
+    sale_ids = {item.id for item in sales}
+    commission = sum(
+        (
+            item.commission
+            for item in operations
+            if item.parent_operation_id in sale_ids
+        ),
+        Decimal("0"),
+    )
+    return _ResolvedSale(
+        price=gross / units,
+        occurred_at=max(item.occurred_at for item in sales),
+        commission=commission,
+    )
 
 
 async def _close_externally(position: Position, moment: datetime) -> dict[str, object]:
-    price = await _last_price(position)
-    await close(position.id, ExitTrigger.EXTERNAL, price, moment, None)
-    await start_cooldown(position.ticker, moment)
+    """Book the sale the broker recorded, or report that it could not be found.
+
+    This used to book the exit at `get_last_price` as of the moment of
+    detection — hours or days after the sale, and on a different day entirely
+    if the bot was down — and fell back to the position's own `entry_price`
+    when the broker was unreachable, recording an exit of exactly zero P&L.
+    Both were numbers this module made up (#11, rule 33).
+    """
+    try:
+        operations = await get_operations(position.entry_at, moment)
+    except (BrokerUnavailable, BrokerRateLimited) as exc:
+        return await _report_unresolved_exit(position, f"operations feed: {exc}")
+    sale = _resolve_sale(position, operations)
+    if sale is None:
+        return await _report_unresolved_exit(
+            position, "no executed sale for this instrument in the window"
+        )
+    await close(
+        position.id,
+        ExitTrigger.EXTERNAL,
+        sale.price,
+        sale.occurred_at,
+        None,
+        sale.commission,
+    )
+    await start_cooldown(position.ticker, sale.occurred_at)
     await alert(
-        f"position {position.ticker} closed externally at {price} (id={position.id})"
+        f"position {position.ticker} closed externally at {sale.price} "
+        f"on {sale.occurred_at.isoformat()} (id={position.id})"
     )
     return {
         "type": "CLOSED_EXTERNALLY",
         "ticker": position.ticker,
         "position_id": position.id,
-        "last_price": str(price),
+        "exit_price": str(sale.price),
+        "exit_at": sale.occurred_at.isoformat(),
+        "exit_commission": str(sale.commission),
+    }
+
+
+async def _report_unresolved_exit(position: Position, reason: str) -> dict[str, object]:
+    """Leave the position open rather than close it at a substituted number.
+
+    A position closed a cycle late is recoverable; one closed at a number this
+    module invented is not, because nothing downstream can tell the invented
+    one from a real one (rule 33). The shares having left the account by some
+    route that was not a trade is the owner's to explain.
+
+    Unlike rule 32's foreign holding this does not stop the bot: that refusal
+    exists for shares the bot might trade, and this row describes shares the
+    account no longer has.
+    """
+    await alert(
+        f"position {position.ticker} is absent at the broker and its sale "
+        f"could not be resolved ({reason}); left open (id={position.id})"
+    )
+    return {
+        "type": "EXIT_UNRESOLVED",
+        "ticker": position.ticker,
+        "position_id": position.id,
+        "reason": reason,
     }
 
 

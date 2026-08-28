@@ -307,6 +307,17 @@ def _operation(
     )
 
 
+def _sold_at(price: Decimal, occurred_at: datetime = NOW) -> OperationRecord:
+    """One executed sale of the whole position, as the broker records it."""
+    return _operation(
+        "op-sale",
+        "OPERATION_TYPE_SELL",
+        price=price,
+        quantity=20,
+        occurred_at=occurred_at,
+    )
+
+
 async def test_local_open_absent_at_broker_is_closed_at_the_sale_price(
     env: _Broker,
 ) -> None:
@@ -525,7 +536,7 @@ async def test_lot_mismatch_writes_broker_count(env: _Broker) -> None:
 async def test_reconcile_is_idempotent(env: _Broker) -> None:
     await _open_local()
     env.holdings = ()
-    env.last_price = Decimal("123.45")
+    env.operations = [_sold_at(Decimal("123.45"))]
     first = await reconcile(NOW)
     assert first.adjustments
     second = await reconcile(NOW)
@@ -588,6 +599,7 @@ async def test_mispriced_and_orphan_and_adoptable_stops(env: _Broker) -> None:
 async def test_external_close_writes_no_order_row(env: _Broker) -> None:
     await _open_local()
     env.holdings = ()
+    env.operations = [_sold_at(Decimal("110.00"))]
     count_before = await _count("orders")
     report = await reconcile(NOW)
     assert any(item["type"] == "CLOSED_EXTERNALLY" for item in report.adjustments)
