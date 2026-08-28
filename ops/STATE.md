@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-28 · spec v1.44 · brief v1.11 · 15 open issues
+Updated: 2026-08-28 · spec v1.45 · brief v1.11 · 13 open issues
 
 ## What this is
 
@@ -344,6 +344,31 @@ reads as a young position; `None` cannot be mistaken for a measurement.
 Also worth keeping: `market.session`'s tests now run against a **real**
 `db.trading_days` on a temp file database, not a stub. Stubbing that seam is how
 the original defect survived, and failure class 6 says so.
+
+## Restart safety — #27 and #21
+
+Both were about the same window and both were justified by tonight rather than
+by theory: **six container restarts in one evening.** Restarting is the ordinary
+operating mode of this system, not an edge case, and two things were wrong in it.
+
+**#27.** Every periodic job matched an exact instant and remembered its last run
+in a module global. A restart re-armed all of them; a restart through the Sunday
+12:00-12:59 MSK hour lost that week's report with no report, no alert and no
+record. Jobs now schedule on "due and not yet done" against `db.job_runs`.
+
+Two latches deliberately stayed process-local, and the reasoning is the useful
+part: `_first_cycle_at` means "was *this* process running when the session
+opened", which is what licenses writing the day's opening snapshot — the
+baseline the daily loss limit measures against. Persisting it would let a
+restarted process claim an origin it did not have, which is #9 through the back
+door. Not all state that looks like schedule state is.
+
+**#21.** `shutdown`'s contract and docstring both said it stops accepting new
+signals; nothing implemented that half. It ran concurrently with `run`, and the
+runner was cancelled only after the drain returned. **Failure class 4 again — a
+contract satisfied vacuously** — and the second instance this month. Worth
+asking of any contract line that reads like a guarantee: what would fail if this
+were simply absent? If the answer is "nothing", it is absent.
 
 ## Failure classes that keep recurring
 
