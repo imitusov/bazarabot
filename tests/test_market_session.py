@@ -9,13 +9,14 @@ import pytest
 import zarabot.market.session as session_mod
 from zarabot.market.session import (
     cache_exhausted,
+    calendar,
     current_session,
     in_closing_window,
     is_open,
     next_open,
     refresh,
 )
-from zarabot.models import SessionInfo
+from zarabot.models import SessionInfo, TradingCalendar
 
 OPEN = datetime(2026, 3, 16, 6, 50, tzinfo=UTC)
 CLOSE = datetime(2026, 3, 16, 15, 50, tzinfo=UTC)
@@ -175,3 +176,45 @@ async def test_empty_schedule_alerts_once(
     await refresh(7)
     await refresh(7)
     assert len(_reset_cache) == 1
+
+
+async def test_a_second_outage_alerts_again(
+    _reset_cache: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule 10's "alert once" is per incident, not per process. The latch was
+    set on the first failure and never cleared, so every outage after the first
+    was silent from this module for the life of the process (#32)."""
+    from zarabot.broker.client import BrokerUnavailable
+
+    sessions = [_weekday()]
+    failing = True
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        if failing:
+            raise BrokerUnavailable("broker unavailable")
+        return sessions
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    await refresh(7)
+    assert len(_reset_cache) == 1
+    failing = False
+    await refresh(7)
+    assert len(_reset_cache) == 1
+    failing = True
+    await refresh(7)
+    assert len(_reset_cache) == 2
+
+
+async def test_calendar_returns_the_cached_sessions(schedule: None) -> None:
+    """The caller counts trading days from this instead of fetching a
+    fourteen-day schedule once a minute (#19)."""
+    result = calendar()
+    assert isinstance(result, TradingCalendar)
+    assert result.sessions == (_holiday(), _saturday(), _weekday())
+
+
+async def test_calendar_is_empty_not_none_before_any_refresh() -> None:
+    result = calendar()
+    assert isinstance(result, TradingCalendar)
+    assert result.sessions == ()
