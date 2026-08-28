@@ -26,6 +26,7 @@ from zarabot.db.positions import open as open_position
 from zarabot.models import (
     ExitTrigger,
     Instrument,
+    OperationRecord,
     OrderRecord,
     OrderStatus,
     PortfolioState,
@@ -96,6 +97,8 @@ class _Broker:
         self.holdings: tuple[Position, ...] = ()
         self.stops: list[StopOrderRecord] = []
         self.last_price = PRICE
+        self.operations: list[OperationRecord] = []
+        self.operations_fail = False
         self.calls: list[str] = []
         self.alerts: list[str] = []
 
@@ -110,6 +113,14 @@ class _Broker:
     async def get_instrument(self, ticker: str) -> Instrument:
         self.calls.append("get_instrument")
         return _instrument(ticker=ticker)
+
+    async def get_operations(
+        self, since: datetime, until: datetime
+    ) -> list[OperationRecord]:
+        self.calls.append("get_operations")
+        if self.operations_fail:
+            raise BrokerUnavailable("operations down")
+        return list(self.operations)
 
     async def list_stop_orders(self) -> list[StopOrderRecord]:
         self.calls.append("list_stop_orders")
@@ -167,7 +178,7 @@ async def env(
     broker = _Broker()
     module = "zarabot.broker.reconcile"
     monkeypatch.setattr(f"{module}.get_portfolio", broker.get_portfolio)
-    monkeypatch.setattr(f"{module}.get_last_price", broker.get_last_price)
+    monkeypatch.setattr(f"{module}.get_operations", broker.get_operations)
     monkeypatch.setattr(f"{module}.get_instrument", broker.get_instrument)
     monkeypatch.setattr(f"{module}.list_stop_orders", broker.list_stop_orders)
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
@@ -269,26 +280,167 @@ async def test_agreement_produces_no_adjustments_and_no_alert(env: _Broker) -> N
     assert "cancel_stop_order" not in env.calls
 
 
-async def test_local_open_absent_at_broker_is_closed_externally(env: _Broker) -> None:
+def _operation(
+    op_id: str,
+    operation_type: str,
+    *,
+    price: Decimal | None = None,
+    quantity: int | None = None,
+    payment: Decimal = Decimal("0"),
+    commission: Decimal = Decimal("0"),
+    occurred_at: datetime = NOW,
+    parent: str | None = None,
+    figi: str = "BBG000000001",
+) -> OperationRecord:
+    return OperationRecord(
+        id=op_id,
+        figi=figi,
+        ticker="",
+        occurred_at=occurred_at,
+        commission=commission,
+        payment=payment,
+        price=price,
+        quantity=quantity,
+        operation_type=operation_type,
+        state="OPERATION_STATE_EXECUTED",
+        parent_operation_id=parent,
+    )
+
+
+async def test_local_open_absent_at_broker_is_closed_at_the_sale_price(
+    env: _Broker,
+) -> None:
+    """The exit is booked at what was traded, not at the quote at the moment of
+    detection — which can be days later and on another day entirely (#11)."""
     position = await _open_local()
     env.holdings = ()
-    env.last_price = Decimal("123.45")
+    env.last_price = Decimal("92.00")
+    sold_at = NOW - timedelta(days=2)
+    env.operations = [
+        _operation(
+            "op-sale",
+            "OPERATION_TYPE_SELL",
+            price=Decimal("110.00"),
+            quantity=20,
+            occurred_at=sold_at,
+        )
+    ]
     report = await reconcile(NOW)
-    types = [item["type"] for item in report.adjustments]
-    assert "CLOSED_EXTERNALLY" in types
     closed = next(
         item for item in report.adjustments if item["type"] == "CLOSED_EXTERNALLY"
     )
     assert closed["ticker"] == "SBER"
     assert closed["position_id"] == position.id
-    assert closed["last_price"] == "123.45"
+    assert closed["exit_price"] == "110.00"
     stored = await get(position.id)
     assert stored is not None
     assert stored.status == "CLOSED"
     assert stored.exit_trigger is ExitTrigger.EXTERNAL
+    assert stored.exit_price == Decimal("110.00")
+    assert stored.exit_at == sold_at
     assert await list_open() == []
     assert env.alerts
     assert "post_market_order" not in env.calls
+    assert "get_last_price" not in env.calls
+
+
+async def test_external_close_weights_the_sales_and_sums_their_fees(
+    env: _Broker,
+) -> None:
+    position = await _open_local()
+    env.holdings = ()
+    later = NOW - timedelta(hours=1)
+    env.operations = [
+        _operation(
+            "op-a",
+            "OPERATION_TYPE_SELL",
+            price=Decimal("100.00"),
+            quantity=3,
+            occurred_at=NOW - timedelta(days=1),
+        ),
+        _operation(
+            "op-b",
+            "OPERATION_TYPE_SELL",
+            price=Decimal("90.00"),
+            quantity=2,
+            occurred_at=later,
+        ),
+        _operation(
+            "fee-a",
+            "OPERATION_TYPE_BROKER_FEE",
+            commission=Decimal("1.50"),
+            parent="op-a",
+        ),
+        _operation(
+            "fee-b",
+            "OPERATION_TYPE_BROKER_FEE",
+            commission=Decimal("0.75"),
+            parent="op-b",
+        ),
+        _operation(
+            "fee-other",
+            "OPERATION_TYPE_BROKER_FEE",
+            commission=Decimal("9.99"),
+            parent="somebody-elses-trade",
+        ),
+    ]
+    report = await reconcile(NOW)
+    closed = next(
+        item for item in report.adjustments if item["type"] == "CLOSED_EXTERNALLY"
+    )
+    assert closed["exit_price"] == "96.00"
+    assert closed["exit_commission"] == "2.25"
+    stored = await get(position.id)
+    assert stored is not None
+    assert stored.exit_at == later
+
+
+async def test_external_close_with_the_feed_unavailable_leaves_it_open(
+    env: _Broker,
+) -> None:
+    """A position closed a cycle late is recoverable; one closed at a
+    substituted number is not (rule 33)."""
+    position = await _open_local()
+    env.holdings = ()
+    env.operations_fail = True
+    report = await reconcile(NOW)
+    types = [item["type"] for item in report.adjustments]
+    assert "EXIT_UNRESOLVED" in types
+    assert "CLOSED_EXTERNALLY" not in types
+    stored = await get(position.id)
+    assert stored is not None
+    assert stored.status == "OPEN"
+    assert stored.exit_price is None
+    assert env.alerts
+
+
+async def test_external_close_with_no_sale_in_the_feed_leaves_it_open(
+    env: _Broker,
+) -> None:
+    """Absence and unavailability are both "unknown", never "zero"."""
+    position = await _open_local()
+    env.holdings = ()
+    env.operations = [
+        _operation(
+            "op-other-figi",
+            "OPERATION_TYPE_SELL",
+            price=Decimal("110.00"),
+            quantity=20,
+            figi="BBG000000009",
+        ),
+        _operation(
+            "op-a-buy",
+            "OPERATION_TYPE_BUY",
+            price=Decimal("100.00"),
+            quantity=20,
+        ),
+    ]
+    report = await reconcile(NOW)
+    types = [item["type"] for item in report.adjustments]
+    assert "EXIT_UNRESOLVED" in types
+    stored = await get(position.id)
+    assert stored is not None
+    assert stored.status == "OPEN"
 
 
 async def test_unknown_holding_is_reported_foreign_and_never_adopted(
@@ -405,23 +557,6 @@ async def test_naive_now_is_rejected(env: _Broker) -> None:
     naive = datetime(2026, 3, 16, 12, 0)  # noqa: DTZ001
     with pytest.raises(ValueError):
         await reconcile(naive)
-
-
-async def test_last_price_unavailable_uses_entry(
-    env: _Broker, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    await _open_local()
-    env.holdings = ()
-
-    async def boom(figi: str) -> Decimal:
-        raise BrokerUnavailable("down")
-
-    monkeypatch.setattr("zarabot.broker.reconcile.get_last_price", boom)
-    report = await reconcile(NOW)
-    closed = next(
-        item for item in report.adjustments if item["type"] == "CLOSED_EXTERNALLY"
-    )
-    assert closed["last_price"] == "100.00"
 
 
 async def test_exchange_position_without_broker_stop_is_reported(env: _Broker) -> None:
