@@ -921,11 +921,15 @@ an order. `app.loops` schedules this at daily rollover and immediately before
 the weekly report.
 
 **`async backfill(since: datetime, until: datetime) → int`**
-Re-queries `get_order_state(key)` for `list_missing_commission`, records any
-commission now present, and `recompute_realised` for affected closed positions.
+Re-queries the broker for `list_missing_commission`, records any commission now
+present, and `recompute_realised` for affected closed positions. The lookup is
+by `get_order_state_by_broker_id(broker_order_id)` when the row carries one —
+a stop the exchange fired is filed under a key the broker never saw — and by
+`get_order_state(key)` otherwise; never by matching on instrument and time (#8).
 Returns how many orders were updated. Alerts only when commission is still
-unknown more than 24 hours after the fill (strictly greater than 24h). Raises
-`ValueError` on naive datetimes.
+unknown more than 24 hours after the fill (strictly greater than 24h), and
+**once per order**, marking it via `db.orders.mark_commission_alerted`; the row
+is still re-queried on later runs. Raises `ValueError` on naive datetimes.
 
 ## `zarabot.app.startup`
 
