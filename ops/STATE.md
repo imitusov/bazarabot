@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-28 · spec v1.37 · brief v1.11 · 21 open issues
+Updated: 2026-08-28 · spec v1.39 · brief v1.11 · 19 open issues
 
 ## What this is
 
@@ -231,6 +231,38 @@ against a live account — written from the wheel, exactly like
 defect #11 set out to fix. The account has never traded, so the feed is empty
 and the check is not possible yet. It is a gate on trusting the first external
 close.
+
+## #42 and #8 closed — and both had a better fix than the one written down
+
+**#42.** The audit offered two fixes: fabricate an `orders` row, or make
+`open_order_key` nullable. Neither was needed. Since v1.25 `adopt` is reached for
+exactly one condition — a holding whose ticker has an unresolved `ENTRY` order of
+the bot's own — so an order row *always* exists and the synthetic
+`ADOPTED-{figi}` was standing in for a key already in hand.
+`_recognised_tickers` became `_recognising_orders` and carries it out. The
+adopted position now points at something real, which also makes its entry
+commission recoverable: `close` reads it through `db.orders.get`, and a synthetic
+key resolved to nothing.
+
+**#8.** v1.28 had already fixed the half the audit spent most of its words on —
+`close_executed_stop` writes the broker's `executed_commission`, not `None`. What
+remained is why the number was *unrecoverable*: the row's key is a UUID the
+broker has never seen. `orders` gains `broker_order_id` (migration 005), which
+`get_executed_stop_fills` already had in hand, and `broker.client` gains a
+lookup by it. The audit's suggested fix — match the operations feed on FIGI and
+time — was declined: the spec's own `get_operations` contract rules that out as a
+per-order commission source, and an identifier the broker issued needs no
+heuristic.
+
+**Both audits were right about the defect and wrong about the remedy**, in the
+same way: they proposed building something new where the correct value was
+already being carried and thrown away. Worth checking for next time before
+adding a column or a call.
+
+Also from #8: the "commission still unknown" alert now fires once per order
+rather than once per backfill run — daily, and again before every weekly report,
+forever. An alert that repeats forever is equivalent to no alert, in a channel
+whose whole premise is that silence means healthy.
 
 ## Failure classes that keep recurring
 
