@@ -95,6 +95,14 @@ its own (rule 31).
   never recorded as protected by something that has not been confirmed to exist;
   the failure direction is a redundant local check, not an unwatched position.
 - Raises `PositionStateError` if an open position already exists for the ticker.
+- **Only the duplicate-open-position violation becomes `PositionStateError`
+  (v1.38).** Both `open` and `adopt` translated *any* `IntegrityError` into
+  "open position already exists", on the assumption that the partial unique index
+  was the only integrity constraint reachable. That assumption was false, and the
+  broad translation turned a foreign-key violation into a plausible-sounding lie
+  naming a position that did not exist — failure class 5 in `ops/STATE.md`, and
+  what made #42 take a reproduction to diagnose rather than a stack trace. Every
+  other integrity failure propagates as itself, cause intact.
 - In the same transaction, writes one `position_events` row with
   `event = 'OPENED'`. `occurred_at` is `clock.now()`.
 
@@ -193,11 +201,35 @@ its own (rule 31).
 - In the same transaction, writes one `position_events` row with
   `event = 'LOTS_ADJUSTED'` and `detail` naming the previous and new lot count.
 
-**`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime) → Position`**
+**`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime, open_order_key: str) → Position`**
 - Creates an open position for a holding discovered at the broker but unknown
   locally, with `adopted = True`, stop and target derived from `average_price`,
   and age counted from `adopted_at`.
 - Called only by `broker.reconcile`.
+- **`open_order_key` is the key of the bot's own unresolved `ENTRY` order for
+  that ticker (v1.38).** It used to synthesise `ADOPTED-{figi}`, a key with no
+  order row behind it, while the schema has required
+  `open_order_key TEXT NOT NULL REFERENCES orders (key)` since `001`. The
+  contract and the schema had disagreed from the beginning and only an unissued
+  `PRAGMA foreign_keys` hid it; once #20 turned enforcement on, `adopt` could not
+  insert a row at all (#42).
+
+  The real key is available and is the correct one. Since v1.25 this function is
+  reached for exactly one condition — a holding whose ticker has an unresolved
+  `ENTRY` order of the bot's own, the crash-recovery case — so an order row for
+  that ticker always exists. Pointing at it is not a workaround for the foreign
+  key: it is the truth the synthetic key was standing in for. It also makes the
+  entry commission recoverable, since `db.positions.close` reads it through
+  `db.orders.get(open_order_key)` and a synthetic key resolved to nothing.
+- Fabricating an `orders` row to satisfy the constraint was the alternative and
+  is rejected: the `orders` table records orders this bot submitted, and here it
+  did submit one. Inventing a second row describing the same fill would put a
+  duplicate of a real order into the bot's own audit trail.
+- The position's `strategy` stays `ADOPTED`. This is a second sentinel beside
+  rule 35's `UNATTRIBUTED` and they mean different things: `UNATTRIBUTED` is a
+  trade whose originating signal could not be found, `ADOPTED` is a row
+  reconciliation created rather than the entry path. Neither is ever credited to
+  a named strategy, which is what rule 35 actually requires.
 - In the same transaction, writes one `position_events` row with
   `event = 'ADOPTED'`.
 
@@ -261,6 +293,18 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - After a sequence of `set_stop_protection` calls, `list_events` reconstructs the
   full stop-ownership history in order (proves post-incident reconstruction needs
   nothing but the database).
+- `adopt` against a database seeded with **nothing but the migrations** and a
+  single order row succeeds (proves the foreign key it must satisfy is satisfied
+  — the case that was never written, because every existing fixture happened to
+  pre-insert an `ADOPTED-{figi}` order row and so tested a database where the
+  constraint was satisfiable by accident).
+- `adopt` with an `open_order_key` naming no order row raises an error whose
+  cause is the **foreign key**, and specifically not `PositionStateError("open
+  position already exists")` (proves the broad translation that named the wrong
+  cause is gone).
+- The adopted position's `open_order_key` reads back as the key passed in, and
+  `db.orders.get` on it returns that order (proves the row points at something
+  real).
 - No function in this module calls `aiosqlite.connect`, and none issues `BEGIN`,
   `commit` or `rollback` (proves it runs on `db.connection.shared()` inside
   `db.connection.transaction()` — the defect that opened a connection per call,

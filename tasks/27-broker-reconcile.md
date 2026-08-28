@@ -167,7 +167,12 @@ was one of the eight sites opening its own connection.
   count and the average price, so `app.startup` can name them in its refusal.
   `db.positions.adopt` remains in the contract and is still called for a holding
   the bot **does** recognise but whose local row is missing — the crash-recovery
-  case it was written for.
+  case it was written for. This module passes it the key of that recognising
+  order (v1.38): the recognition rule already identifies exactly one order, so
+  the key is in hand at the moment the decision is made, and it is what the
+  adopted position must point at. Where more than one unresolved `ENTRY` order
+  exists for a ticker — which the per-ticker submission lock should prevent — the
+  **oldest by `created_at`** is used, the same tie-break as `STOP_DUPLICATE`.
 - **A holding is recognised when the bot has an unresolved `ENTRY` order for that
   ticker** — `SUBMITTING` or `SUBMITTED` in `db.orders.list_unresolved()`. That
   is the residue of exactly one sequence: the bot submitted the buy, the broker
@@ -276,6 +281,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A holding whose ticker has an unresolved `ENTRY` order is adopted rather than
   reported foreign (proves crash recovery still works: the bot bought this, the
   fill landed, and the process died before the row was written).
+- The adopted position's `open_order_key` is that unresolved order's key, not a
+  synthesised one (proves the adopted row points at the order the bot actually
+  submitted — the whole reason the foreign key exists).
+- With two unresolved `ENTRY` orders for one ticker, the **oldest** is used
+  (proves the documented tie-break, in the state the submission lock is supposed
+  to make impossible).
 - A holding whose entry order has already reached a terminal status is reported
   foreign (proves the recognition rule is the narrow one, and cannot be widened
   into adopting what the owner bought).

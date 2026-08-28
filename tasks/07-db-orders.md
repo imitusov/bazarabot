@@ -83,9 +83,10 @@ its own (rule 31).
   daily backfill. Empty list when none.
 
 **`async get(key: str) → OrderRecord | None`**
-- Returns the order or `None` when absent. `None` is expected and not an error:
-  an adopted position's synthetic open key has no order row, because the bot
-  never placed one.
+- Returns the order or `None` when absent. `None` remains a legitimate answer
+  for a key that names no row, but it is no longer *expected* for an adopted
+  position: since v1.38 an adopted position points at the bot's own unresolved
+  entry order, which exists.
 - This is how another repository obtains an order. `db.positions` calls it to
   read the opening commission; it must never query the `orders` table directly.
 
