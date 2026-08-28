@@ -664,6 +664,11 @@ of a name. Returns only `OPERATION_STATE_EXECUTED` operations.
 Lookup by `order_id_type=ORDER_ID_TYPE_REQUEST`. Raises `OrderNotFound`.
 `commission` is `executed_commission` via `money_to_decimal`, or `None` until filled.
 Same partial-fill mapping as `post_market_order`.
+**`async get_order_state_by_broker_id(broker_order_id: str) → OrderRecord`**
+The same lookup with `ORDER_ID_TYPE_EXCHANGE`, for a row whose `key` the broker
+has never seen — a stop the exchange fired on the bot's behalf. The returned
+record is keyed by the `broker_order_id` asked about. Raises `OrderNotFound`
+(#8).
 
 ## `zarabot.market.session`
 
@@ -818,7 +823,9 @@ Cancels the standing stop, then places a replacement at the stored stop price.
 Closes from an exchange-executed stop with `exit_trigger=STOP_LOSS` and starts
 the cooldown. Never submits a sell. `fill` is the broker's own record from
 `get_executed_stop_fills`; a `filled_price` of `None` raises `ValueError` rather
-than substituting a number (#4).
+than substituting a number (#4). `fill.key` — the broker's `exchange_order_id` —
+is written to the row's `broker_order_id`, which is what makes a late commission
+on it recoverable (#8). A `commission` of `None` does not block the close.
 
 ## `zarabot.broker.reconcile`
 

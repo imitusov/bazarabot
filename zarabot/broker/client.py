@@ -887,6 +887,34 @@ async def get_order_state(key: str) -> OrderRecord:
         )
     except AioRequestError as exc:
         _translate(exc, conn.config.tinvest_token, not_found=OrderNotFound)
+    return _state_to_record(key, response)
+
+
+async def get_order_state_by_broker_id(broker_order_id: str) -> OrderRecord:
+    """The same lookup, by the broker's own identifier instead of our key.
+
+    A stop the exchange fired is recorded locally under an idempotency key this
+    bot invented, so `get_order_state` on that key can only ever return
+    `OrderNotFound` — which made the commission on every stop exit permanently
+    unrecoverable (#8). Separate from `get_order_state` because the two answer
+    different questions: "what happened to the order I sent" is a recovery
+    path, "what happened to the order the exchange placed for me" is not.
+    """
+    conn = await _connect()
+    try:
+        response = await conn.services.orders.get_order_state(
+            account_id=conn.config.tinvest_account_id,
+            order_id=broker_order_id,
+            order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE,
+        )
+    except AioRequestError as exc:
+        _translate(exc, conn.config.tinvest_token, not_found=OrderNotFound)
+    # Keyed by what it was asked about: this module does not know the local
+    # row's key and must not invent one.
+    return _state_to_record(broker_order_id, response)
+
+
+def _state_to_record(key: str, response: Any) -> OrderRecord:
     side = _side_from_direction(response.direction)
     status = _order_status(response.execution_report_status)
     filled = response.lots_executed or None

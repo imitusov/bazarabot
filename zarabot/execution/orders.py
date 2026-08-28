@@ -494,6 +494,11 @@ async def close_executed_stop(position: Position, fill: OrderRecord) -> Position
                 fill_price,
                 fill.commission,
                 "stop executed",
+                # `get_executed_stop_fills` keys its records by the broker's
+                # exchange_order_id. `key` above is a UUID we invented and the
+                # broker has never seen, so this is the only identifier that can
+                # ever fetch a commission that lands later (#8).
+                fill.key,
             )
         )
         await alert(f"stop executed for {current.ticker}")
