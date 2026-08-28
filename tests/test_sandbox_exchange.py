@@ -10,8 +10,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sandbox.exchange import Commission, SimulatedExchange
 
+from sandbox.exchange import Commission, SimulatedExchange
 from zarabot.broker.client import InstrumentNotFound, OrderNotFound
 from zarabot.models import Candle, ExitTrigger, Instrument, OrderStatus, Side
 
