@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.43
+**Version:** 1.44
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -609,7 +609,35 @@ it proves.
   on `db.connection.shared()` (proves the shared connection reached the two
   modules outside `db.*` that were opening their own).
 
+**`db.trading_days`**
+- A window recorded then read back returns the same days, oldest first (happy
+  path).
+- Recording a day twice keeps the **later** observation, including a day that
+  changes from trading to not (proves a holiday announced after the fact
+  replaces the earlier answer — the one table here that is not append-only).
+- `earliest()` on an empty table returns `None`, not a date (proves the caller
+  can distinguish "no history" from "history starting today").
+- A window containing a day with no date records the rest and skips it (proves
+  a malformed entry cannot take the whole window down).
+- The module calls `aiosqlite.connect` nowhere and issues no `BEGIN`, `commit`
+  or `rollback` (proves it runs on the shared connection inside `transaction()`).
+
 **`market.session`**
+- `refresh` writes every day of the window it received, not only today (proves
+  the fourteen-day property the design rests on: one run covers the next
+  fortnight, so an outage shorter than that leaves no gap).
+- `calendar()` after two refreshes on different days spans **both**, including
+  the earlier day now in the past (proves the past is remembered, since it
+  cannot be fetched — §2.1).
+- A position entered 7 trading days ago reports 7 from
+  `clock.trading_days_between` against the calendar `refresh` actually builds,
+  not one the test constructed to span the query (proves the seam where #45
+  lived while both sides passed their own tests).
+- `covers()` is `False` for a day before the earliest record and `True` for one
+  after (proves an unmeasurable age is detectable, which is the whole difference
+  between this and a silent undercount).
+- A failed history write leaves the schedule cached and the bot trading (proves
+  degraded age counting does not stop the market session working).
 - A refresh that fails, then succeeds, then fails again alerts **twice** (proves
   the latch is per incident: it was set once and never cleared, so every outage
   after the first was silent from this module for the life of the process).
@@ -778,6 +806,10 @@ Additionally, `strategies.ml_model`:
   alerts (proves the degrade path, not an unwind).
 - `set_stop_protection(EXCHANGE, None)` raises, as does `(LOCAL, key)` (proves
   the pairing invariant that keeps ownership unambiguous).
+- `evaluate` with `trading_days_open = None` never returns `MAX_AGE`, and still
+  returns `STOP_LOSS` and `TAKE_PROFIT` normally (proves an unmeasured age
+  suppresses exactly one trigger, and that a short count can no longer read as a
+  young position — the silent shape of #45).
 - A `LOCAL` position returns `STOP_LOSS` from `lifecycle.exits`; an `EXCHANGE`
   position never does (proves the trigger has exactly one owner — the test that
   prevents selling a position twice).
@@ -1473,6 +1505,31 @@ its own (rule 31).
   brief's requirement — that a post-incident question be answerable from the
   database alone — true rather than aspirational.
 
+### `zarabot/db/trading_days.py`
+
+**Sole owner of the `trading_days` table.** No other module writes it, and no
+SQL for it lives anywhere else.
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; every write runs inside
+`db.connection.transaction()` (rule 31).
+
+**`async record_many(sessions: list[SessionInfo]) → int`**
+- Upserts one row per day on `trade_date`, returning how many were written. A
+  day already recorded is **overwritten** by the newer observation: a holiday
+  can be announced after the fact, and the most recent answer from the broker is
+  the one to keep.
+- Days with no date are skipped rather than stored under a null key.
+- Runs in a single transaction, so a partial window is never recorded.
+
+**`async list_since(start: date) → list[SessionInfo]`**
+- Recorded days from `start` onwards, oldest first. Empty list when none, never
+  `None`.
+
+**`async earliest() → date | None`**
+- The oldest recorded date, or `None` when the table is empty. This is what
+  `market.session.covers` is built on.
+
 ### `zarabot/db/orders.py`
 
 **Sole owner of order rows and of order status transitions.**
@@ -2016,7 +2073,14 @@ was one of the eight sites opening its own connection.
 ### `zarabot/market/session.py`
 
 **`async refresh(days: int) → None`**
-- Caches the schedule. Called at startup and once per trading day.
+- Caches the schedule and **persists every day of it** through
+  `db.trading_days.record_many`, in one transaction (v1.44). Called at startup
+  and once per trading day, so this is one broker call and one write a day.
+- Reloads the recorded history into memory afterwards, so `calendar()` stays a
+  synchronous read of what is already in hand and costs nothing per cycle.
+- A write failure is logged at ERROR and does not propagate: an unavailable
+  history degrades age counting, which `covers` then reports, and must not stop
+  the bot trading. The schedule itself is already cached by that point.
 - **The unavailability latch is cleared on the success path**, next to the cache
   write (v1.40). It was set on the first failure and never cleared, so a schedule
   that went unavailable, recovered, and went unavailable again produced silence
@@ -2072,14 +2136,32 @@ is the failure this cadence exists to prevent.
 - The cached schedule as a `TradingCalendar`, for callers that need to count
   trading days rather than ask whether a moment is inside a session. Empty
   calendar when the cache is empty; never `None`.
-- **It spans forwards only, and that is why `MAX_AGE` still cannot fire (#45).**
-  v1.41 proposed a second, backward fetch; it was implemented, deployed, and
-  aborted startup — the broker rejects *any* `from_` before today's midnight
-  with `INVALID_ARGUMENT` / 30003 (§2.1). It was reverted. The remaining
-  approach is to persist what each forward fetch already tells us: the window
-  fetched on day N covers days N through N+14, so the union of past fetches
-  covers the span any position can be open. That needs somewhere durable to put
-  it, which is a decision not yet taken.
+- **It spans backwards by remembering, not by asking (v1.44).** The broker
+  rejects any `from_` before today's midnight with `INVALID_ARGUMENT` / 30003
+  (§2.1) — v1.41 assumed otherwise, was deployed, and aborted startup. The past
+  cannot be fetched, so it is **recorded**: every `refresh` writes the whole
+  window it received to `db.trading_days`, and `calendar()` returns the union of
+  that history with the live cache, oldest first.
+
+  The property that makes this sufficient is that the window is **fourteen days
+  wide, not one**. A single run records the next fortnight, so a bot that ran at
+  any point in the last fourteen days already has every day since on disk —
+  including days it was switched off for. Coverage fails only after an outage
+  longer than the window, and that case is detectable rather than silent (below).
+- **This design adds no new broker assumption.** That is deliberate and is the
+  difference from v1.41: the only fetch is the one already made and already
+  verified, and everything new is a local table whose behaviour is entirely
+  testable. The assumption v1.41 rested on was the one thing not checked against
+  the account, and it was false.
+
+**`covers(day: date) → bool`**
+- Whether the recorded calendar reaches back to `day`, so a caller can tell a
+  count it can stand behind from one it cannot. `False` when the history is
+  empty.
+- This exists because the failure it guards is silent by nature: an uncovered
+  day simply is not counted, `trading_days_open` comes back short, and `MAX_AGE`
+  does not fire. Nothing raises. #45 lived for the project's whole life on
+  exactly that.
 - Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
   minute** for data that changes at most daily and that this module already
   holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
@@ -2222,7 +2304,7 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 
 ### `zarabot/lifecycle/exits.py`
 
-**`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int, config: Config) → ExitTrigger | None`**
+**`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int | None, config: Config) → ExitTrigger | None`**
 - Pure. Returns the trigger that fires, or `None`.
 - `STOP_LOSS` when `price ≤ position.stop_price` **and only when
   `position.stop_protection == 'LOCAL'`**. When the exchange holds the stop, this
@@ -2232,6 +2314,17 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 - `TAKE_PROFIT` when `price ≥ position.target_price`.
 - `MAX_AGE` when `trading_days_open ≥ MAX_HOLDING_DAYS` **and**
   `session.in_closing_window(now)`.
+- **`trading_days_open` is `None` when the age could not be measured, and then
+  `MAX_AGE` never fires (v1.44).** The recorded calendar may not reach back to a
+  position's entry after an outage longer than the schedule window, and the
+  caller says so rather than passing a number it knows is short. A short number
+  reads as a young position, which is the silent failure #45 was: nothing
+  raises, the exit simply never comes. `None` keeps `STOP_LOSS` and
+  `TAKE_PROFIT` working — they need only a price — and suppresses exactly the
+  one trigger that depends on the count.
+- The type is `int | None` rather than a sentinel like `-1` because an unmeasured
+  age is a different kind of thing from a measured one, and the type is where
+  that belongs.
 - Precedence when more than one applies: `STOP_LOSS`, then `TAKE_PROFIT`, then
   `MAX_AGE`. Fixed, so the recorded reason never depends on evaluation order.
 - Boundaries are inclusive at the stop and the target.
@@ -2724,6 +2817,14 @@ Fixed ordering; each step completes before the next begins:
    spurious alert for a breached risk limit. Opens are rare; the per-cycle cost
    #19 is about is elsewhere.
 
+7b. **A position whose entry the recorded calendar does not reach is evaluated
+   with `trading_days_open = None`, and the owner is alerted, latched (v1.44).**
+   `market.session.covers` answers the question; the alert is latched like every
+   other in this module, because the condition persists for as long as the
+   position does and one message is the difference between a channel the owner
+   reads and one they mute. Stop-loss and take-profit still evaluate normally —
+   only the age trigger is suppressed, and only for that position.
+
 8. The calendar handed to `lifecycle.exits` comes from `market.session.calendar()`
    (v1.40), never from a fetch of this module's own. It fetched a fourteen-day
    schedule **every cycle** — once a minute, for data that changes at most daily
@@ -2925,6 +3026,29 @@ explicit UTC offset. Booleans are `INTEGER` 0 or 1.
   in configuration must never move the stop of an already-open position.
 - Rows are never deleted.
 
+### `trading_days`
+
+What the broker said about each calendar day, recorded when it said it. Owned by
+`db.trading_days`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `trade_date` | TEXT | Primary key. Moscow calendar date, ISO-8601 |
+| `is_trading_day` | INTEGER NOT NULL | 1 or 0 |
+| `session_start` | TEXT NULL | UTC. Null on a non-trading day |
+| `session_end` | TEXT NULL | UTC. Null on a non-trading day |
+| `observed_at` | TEXT NOT NULL | UTC. When the broker was asked |
+
+**Invariants.**
+- A day is overwritten by a newer observation. A holiday can be announced after
+  the fact, and the broker's most recent answer is the one to keep — unlike
+  every other table here, where history is append-only, because this records
+  *what is true about a date* rather than *what happened*.
+- Rows are never deleted. The table grows by one row a day.
+- It exists because the broker serves no schedule before today (§2.1), so the
+  only way to know whether last Tuesday was a trading day is to have been told
+  at the time and to have written it down (#45).
+
 ### `position_events`
 
 Append-only history of every mutation to a position. Owned by `db.positions`,
@@ -3093,6 +3217,10 @@ historical record is the purpose of the project. Backups are retained 30 days.
   constraint. It is a separate migration rather than an edit to `001` because
   `001` has been applied — in tests, and potentially on a developer machine — and
   the forward-only rule holds without exception.
+- `006_trading_days.sql` creates `trading_days`. It holds no history at first,
+  and that is correct rather than a gap to backfill: there is nowhere to backfill
+  *from*, since the broker will not serve a past schedule at all. The table fills
+  from the first `refresh` onwards, fourteen days at a time.
 - `005_order_broker_id.sql` adds `broker_order_id` and `commission_alerted_at`
   to `orders`. Both nullable, no default, no backfill: the live database holds
   zero orders, and there is nothing historical to reconstruct.

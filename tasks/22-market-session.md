@@ -17,7 +17,14 @@ Module **22** of 40 in `dependency-order.md`. Everything before it is complete a
 ### `zarabot/market/session.py`
 
 **`async refresh(days: int) → None`**
-- Caches the schedule. Called at startup and once per trading day.
+- Caches the schedule and **persists every day of it** through
+  `db.trading_days.record_many`, in one transaction (v1.44). Called at startup
+  and once per trading day, so this is one broker call and one write a day.
+- Reloads the recorded history into memory afterwards, so `calendar()` stays a
+  synchronous read of what is already in hand and costs nothing per cycle.
+- A write failure is logged at ERROR and does not propagate: an unavailable
+  history degrades age counting, which `covers` then reports, and must not stop
+  the bot trading. The schedule itself is already cached by that point.
 - **The unavailability latch is cleared on the success path**, next to the cache
   write (v1.40). It was set on the first failure and never cleared, so a schedule
   that went unavailable, recovered, and went unavailable again produced silence
@@ -73,14 +80,32 @@ is the failure this cadence exists to prevent.
 - The cached schedule as a `TradingCalendar`, for callers that need to count
   trading days rather than ask whether a moment is inside a session. Empty
   calendar when the cache is empty; never `None`.
-- **It spans forwards only, and that is why `MAX_AGE` still cannot fire (#45).**
-  v1.41 proposed a second, backward fetch; it was implemented, deployed, and
-  aborted startup — the broker rejects *any* `from_` before today's midnight
-  with `INVALID_ARGUMENT` / 30003 (§2.1). It was reverted. The remaining
-  approach is to persist what each forward fetch already tells us: the window
-  fetched on day N covers days N through N+14, so the union of past fetches
-  covers the span any position can be open. That needs somewhere durable to put
-  it, which is a decision not yet taken.
+- **It spans backwards by remembering, not by asking (v1.44).** The broker
+  rejects any `from_` before today's midnight with `INVALID_ARGUMENT` / 30003
+  (§2.1) — v1.41 assumed otherwise, was deployed, and aborted startup. The past
+  cannot be fetched, so it is **recorded**: every `refresh` writes the whole
+  window it received to `db.trading_days`, and `calendar()` returns the union of
+  that history with the live cache, oldest first.
+
+  The property that makes this sufficient is that the window is **fourteen days
+  wide, not one**. A single run records the next fortnight, so a bot that ran at
+  any point in the last fourteen days already has every day since on disk —
+  including days it was switched off for. Coverage fails only after an outage
+  longer than the window, and that case is detectable rather than silent (below).
+- **This design adds no new broker assumption.** That is deliberate and is the
+  difference from v1.41: the only fetch is the one already made and already
+  verified, and everything new is a local table whose behaviour is entirely
+  testable. The assumption v1.41 rested on was the one thing not checked against
+  the account, and it was false.
+
+**`covers(day: date) → bool`**
+- Whether the recorded calendar reaches back to `day`, so a caller can tell a
+  count it can stand behind from one it cannot. `False` when the history is
+  empty.
+- This exists because the failure it guards is silent by nature: an uncovered
+  day simply is not counted, `trading_days_open` comes back short, and `MAX_AGE`
+  does not fire. Nothing raises. #45 lived for the project's whole life on
+  exactly that.
 - Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
   minute** for data that changes at most daily and that this module already
   holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
@@ -112,6 +137,21 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
+- `refresh` writes every day of the window it received, not only today (proves
+  the fourteen-day property the design rests on: one run covers the next
+  fortnight, so an outage shorter than that leaves no gap).
+- `calendar()` after two refreshes on different days spans **both**, including
+  the earlier day now in the past (proves the past is remembered, since it
+  cannot be fetched — §2.1).
+- A position entered 7 trading days ago reports 7 from
+  `clock.trading_days_between` against the calendar `refresh` actually builds,
+  not one the test constructed to span the query (proves the seam where #45
+  lived while both sides passed their own tests).
+- `covers()` is `False` for a day before the earliest record and `True` for one
+  after (proves an unmeasurable age is detectable, which is the whole difference
+  between this and a silent undercount).
+- A failed history write leaves the schedule cached and the bot trading (proves
+  degraded age counting does not stop the market session working).
 - A refresh that fails, then succeeds, then fails again alerts **twice** (proves
   the latch is per incident: it was set once and never cleared, so every outage
   after the first was silent from this module for the life of the process).

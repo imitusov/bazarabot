@@ -114,6 +114,14 @@ Module **33** of 40 in `dependency-order.md`. Everything before it is complete a
    spurious alert for a breached risk limit. Opens are rare; the per-cycle cost
    #19 is about is elsewhere.
 
+7b. **A position whose entry the recorded calendar does not reach is evaluated
+   with `trading_days_open = None`, and the owner is alerted, latched (v1.44).**
+   `market.session.covers` answers the question; the alert is latched like every
+   other in this module, because the condition persists for as long as the
+   position does and one message is the difference between a channel the owner
+   reads and one they mute. Stop-loss and take-profit still evaluate normally —
+   only the age trigger is suppressed, and only for that position.
+
 8. The calendar handed to `lifecycle.exits` comes from `market.session.calendar()`
    (v1.40), never from a fetch of this module's own. It fetched a fourteen-day
    schedule **every cycle** — once a minute, for data that changes at most daily

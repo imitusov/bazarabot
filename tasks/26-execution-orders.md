@@ -400,6 +400,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   alerts (proves the degrade path, not an unwind).
 - `set_stop_protection(EXCHANGE, None)` raises, as does `(LOCAL, key)` (proves
   the pairing invariant that keeps ownership unambiguous).
+- `evaluate` with `trading_days_open = None` never returns `MAX_AGE`, and still
+  returns `STOP_LOSS` and `TAKE_PROFIT` normally (proves an unmeasured age
+  suppresses exactly one trigger, and that a short count can no longer read as a
+  young position — the silent shape of #45).
 - A `LOCAL` position returns `STOP_LOSS` from `lifecycle.exits`; an `EXCHANGE`
   position never does (proves the trigger has exactly one owner — the test that
   prevents selling a position twice).

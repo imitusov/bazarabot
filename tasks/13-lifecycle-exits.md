@@ -16,7 +16,7 @@ Module **13** of 40 in `dependency-order.md`. Everything before it is complete a
 
 ### `zarabot/lifecycle/exits.py`
 
-**`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int, config: Config) → ExitTrigger | None`**
+**`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int | None, config: Config) → ExitTrigger | None`**
 - Pure. Returns the trigger that fires, or `None`.
 - `STOP_LOSS` when `price ≤ position.stop_price` **and only when
   `position.stop_protection == 'LOCAL'`**. When the exchange holds the stop, this
@@ -26,6 +26,17 @@ Module **13** of 40 in `dependency-order.md`. Everything before it is complete a
 - `TAKE_PROFIT` when `price ≥ position.target_price`.
 - `MAX_AGE` when `trading_days_open ≥ MAX_HOLDING_DAYS` **and**
   `session.in_closing_window(now)`.
+- **`trading_days_open` is `None` when the age could not be measured, and then
+  `MAX_AGE` never fires (v1.44).** The recorded calendar may not reach back to a
+  position's entry after an outage longer than the schedule window, and the
+  caller says so rather than passing a number it knows is short. A short number
+  reads as a young position, which is the silent failure #45 was: nothing
+  raises, the exit simply never comes. `None` keeps `STOP_LOSS` and
+  `TAKE_PROFIT` working — they need only a price — and suppresses exactly the
+  one trigger that depends on the count.
+- The type is `int | None` rather than a sentinel like `-1` because an unmeasured
+  age is a different kind of thing from a measured one, and the type is where
+  that belongs.
 - Precedence when more than one applies: `STOP_LOSS`, then `TAKE_PROFIT`, then
   `MAX_AGE`. Fixed, so the recorded reason never depends on evaluation order.
 - Boundaries are inclusive at the stop and the target.
