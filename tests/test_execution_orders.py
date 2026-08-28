@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +27,7 @@ from zarabot.db.orders import list_unresolved
 from zarabot.db.positions import (
     PositionStateError,
     list_closed,
+    list_events,
     list_open,
     set_stop_protection,
 )
@@ -111,6 +113,10 @@ class _Broker:
         self.empty_stop_id = False
         self.posted_status = OrderStatus.FILLED
         self.partial_fill_lots: int | None = None
+        self.exit_partial_lots: int | None = None
+        self.filled_after_cancel: int | None = None
+        self.cancel_unavailable = False
+        self.cancelled: list[str] = []
         self.state: dict[str, OrderRecord] = {}
         self.alerts: list[str] = []
 
@@ -133,8 +139,18 @@ class _Broker:
             self.reject_exit = False
             raise OrderRejected("exit nope")
         filled = lots
+        status = self.posted_status
+        # Since v1.27 a partial is SUBMITTED, never FILLED: the order is still
+        # live at the broker. FILLED means filled_lots == lots and nothing
+        # further is coming, so the fake must not produce the impossible pair.
         if side is Side.BUY and self.partial_fill_lots is not None:
             filled = self.partial_fill_lots
+            status = OrderStatus.SUBMITTED
+        elif side is Side.SELL and self.exit_partial_lots is not None:
+            filled = self.exit_partial_lots
+            status = OrderStatus.SUBMITTED
+        elif status is not OrderStatus.FILLED:
+            filled = 0
         record = OrderRecord(
             key=key,
             ticker="SBER",
@@ -142,9 +158,9 @@ class _Broker:
             side=side,
             intent="ENTRY" if side is Side.BUY else "EXIT",
             lots=lots,
-            status=self.posted_status,
+            status=status,
             filled_lots=filled,
-            filled_price=Decimal("100"),
+            filled_price=Decimal("100") if filled else None,
             commission=Decimal("1"),
             broker_reason=None,
             created_at=NOW,
@@ -152,6 +168,24 @@ class _Broker:
         )
         self.state[key] = record
         return record
+
+    async def cancel_order(self, key: str) -> None:
+        self.calls.append("cancel_order")
+        self.cancelled.append(key)
+        if self.cancel_unavailable:
+            raise BrokerUnavailable("cancel down")
+        record = self.state[key]
+        filled = self.filled_after_cancel
+        if filled is None:
+            filled = record.filled_lots or 0
+        self.state[key] = replace(
+            record,
+            status=(
+                OrderStatus.FILLED if filled >= record.lots else OrderStatus.CANCELLED
+            ),
+            filled_lots=filled,
+            filled_price=Decimal("100") if filled else None,
+        )
 
     async def get_order_state(self, key: str) -> OrderRecord:
         self.calls.append("get_order_state")
@@ -200,6 +234,7 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Broker:
     monkeypatch.setattr(f"{module}.get_order_state", broker.get_order_state)
     monkeypatch.setattr(f"{module}.post_stop_loss", broker.post_stop_loss)
     monkeypatch.setattr(f"{module}.cancel_stop_order", broker.cancel_stop_order)
+    monkeypatch.setattr(f"{module}.cancel_order", broker.cancel_order)
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
     counter = {"n": 0}
 
@@ -461,12 +496,147 @@ async def test_halt_does_not_block_close(env: _Broker) -> None:
     assert closed.status == "CLOSED"
 
 
+async def test_partial_entry_cancels_the_remainder_then_re_reads(
+    env: _Broker,
+) -> None:
+    """Abandoning the remainder means cancelling it, not ignoring it (#10)."""
+    env.partial_fill_lots = 1
+    await open_position(_signal(), 3, _instrument())
+    assert env.cancelled == [next(iter(env.state))]
+    order = env.calls.index("cancel_order")
+    assert env.calls.index("get_order_state") > order
+
+
+async def test_partial_entry_opens_from_the_re_read_not_the_response(
+    env: _Broker,
+) -> None:
+    """The pre-cancel response was already stale when it arrived (rule 33)."""
+    env.partial_fill_lots = 1
+    env.filled_after_cancel = 2
+    position = await open_position(_signal(), 3, _instrument())
+    assert position.lots == 2
+
+
 async def test_partial_entry_opens_filled_lots_only(env: _Broker) -> None:
     env.partial_fill_lots = 1
     position = await open_position(_signal(), 3, _instrument())
     assert position.lots == 1
     stops = await list_active()
     assert stops[0].lots == 1
+
+
+async def test_partial_entry_submits_no_follow_up_buy(env: _Broker) -> None:
+    env.partial_fill_lots = 1
+    await open_position(_signal(), 3, _instrument())
+    assert env.calls.count("post:BUY") == 1
+
+
+async def test_partial_entry_alerts(env: _Broker) -> None:
+    env.partial_fill_lots = 1
+    await open_position(_signal(), 3, _instrument())
+    assert any("partial entry fill" in text for text in env.alerts)
+
+
+async def test_partial_entry_with_cancel_unavailable_writes_nothing(
+    env: _Broker,
+) -> None:
+    """An unconfirmed outcome is never written down; recovery resolves it."""
+    env.partial_fill_lots = 1
+    env.cancel_unavailable = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 3, _instrument())
+    assert await list_open() == []
+    assert await list_unresolved()
+
+
+async def test_partial_entry_cancelled_with_nothing_filled_opens_nothing(
+    env: _Broker,
+) -> None:
+    env.partial_fill_lots = 1
+    env.filled_after_cancel = 0
+    with pytest.raises(OrderRejected):
+        await open_position(_signal(), 3, _instrument())
+    assert await list_open() == []
+
+
+async def test_partial_exit_submits_one_order_and_raises(env: _Broker) -> None:
+    """No slicing loop: one sell, and a partial settles nothing (#10)."""
+    position = await open_position(_signal(), 2, _instrument())
+    env.exit_partial_lots = 1
+    with pytest.raises(ExitFailed):
+        await close_position(position, ExitTrigger.TAKE_PROFIT)
+    assert env.calls.count("post:SELL") == 1
+
+
+async def _unresolved_exit(lots: int, filled: int, status: OrderStatus) -> str:
+    from zarabot.db.orders import record_submitting
+
+    order = await record_submitting(
+        "exit-partial-key-00000000001",
+        "SBER",
+        Side.SELL,
+        lots,
+        "EXIT",
+        ExitTrigger.TAKE_PROFIT,
+    )
+    return order.key
+
+
+def _broker_exit(key: str, lots: int, filled: int, status: OrderStatus) -> OrderRecord:
+    return OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.SELL,
+        intent="EXIT",
+        lots=lots,
+        status=status,
+        filled_lots=filled,
+        filled_price=Decimal("90"),
+        commission=Decimal("1"),
+        broker_reason="cancelled",
+        created_at=NOW,
+        settled_at=NOW,
+        exit_trigger=ExitTrigger.TAKE_PROFIT,
+    )
+
+
+async def test_terminal_partial_exit_reduces_the_position_and_leaves_it_open(
+    env: _Broker,
+) -> None:
+    """Closing it would leave shares at the broker with no local row (rule 32)."""
+    position = await open_position(_signal(), 5, _instrument())
+    key = await _unresolved_exit(5, 2, OrderStatus.CANCELLED)
+    env.state[key] = _broker_exit(key, 5, 2, OrderStatus.CANCELLED)
+    await resolve_unfinished(NOW)
+    reloaded = await get_position(position.id)
+    assert reloaded is not None
+    assert reloaded.status == "OPEN"
+    assert reloaded.lots == 3
+    assert any("partial exit" in text for text in env.alerts)
+
+
+async def test_terminal_partial_exit_records_the_adjustment_not_a_close(
+    env: _Broker,
+) -> None:
+    position = await open_position(_signal(), 5, _instrument())
+    key = await _unresolved_exit(5, 2, OrderStatus.CANCELLED)
+    env.state[key] = _broker_exit(key, 5, 2, OrderStatus.CANCELLED)
+    await resolve_unfinished(NOW)
+    events = [event.event for event in await list_events(position.id)]
+    assert "LOTS_ADJUSTED" in events
+    assert "CLOSED" not in events
+
+
+async def test_terminal_exit_reaching_the_full_count_closes(env: _Broker) -> None:
+    """The race where a cancel lands after a full fill still books the exit."""
+    position = await open_position(_signal(), 5, _instrument())
+    key = await _unresolved_exit(5, 5, OrderStatus.CANCELLED)
+    env.state[key] = _broker_exit(key, 5, 5, OrderStatus.CANCELLED)
+    await resolve_unfinished(NOW)
+    reloaded = await get_position(position.id)
+    assert reloaded is not None
+    assert reloaded.status == "CLOSED"
 
 
 async def test_max_lots_zero_records_rejection(env: _Broker) -> None:
@@ -602,10 +772,14 @@ async def test_max_lots_clamps_requested_size(env: _Broker) -> None:
 
 
 async def test_unknown_entry_outcome_leaves_unresolved(env: _Broker) -> None:
+    """A SUBMITTED order with nothing filled is not cancelled: nothing is held,
+    and cancelling a merely pending market order turns every slow fill into a
+    missed entry."""
     env.posted_status = OrderStatus.SUBMITTED
     with pytest.raises(BrokerUnavailable):
         await open_position(_signal(), 2, _instrument())
     assert await list_unresolved()
+    assert env.cancelled == []
 
 
 async def test_empty_stop_id_degrades_to_local(env: _Broker) -> None:
