@@ -661,6 +661,32 @@ async def test_known_non_stop_adjustments_do_not_alert_as_unrecognised(
     assert not [text for text in alerts if "does not" in text.lower()], alerts
 
 
+async def test_exit_unresolved_is_observed_and_does_not_stop_startup(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shares are already gone; there is no remedy to apply, and the loud
+    path stays reserved for a report the executor does not understand."""
+    from zarabot.app.startup import start
+
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "EXIT_UNRESOLVED",
+                "ticker": "SBER",
+                "position_id": 1,
+                "reason": "no executed sale for this instrument in the window",
+            }
+        ),
+        env,
+    )
+
+    await start()
+
+    alerts = [item for item in env if item.startswith("alert:")]
+    assert not [text for text in alerts if "cannot act on" in text], alerts
+
+
 async def test_foreign_holding_refuses_to_start_naming_every_ticker(
     env: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
