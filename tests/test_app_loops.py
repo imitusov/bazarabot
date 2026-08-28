@@ -163,7 +163,11 @@ class _BuyStrategy:
         )
 
 
-def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+def _patch_defaults(
+    monkeypatch: pytest.MonkeyPatch, calls: list[str]
+) -> set[tuple[str, str]]:
+    """Patch the module's collaborators. Returns the in-memory `job_runs`
+    record, which tests seed to stand for a job already done this period."""
     import zarabot.app.loops as loops
 
     monkeypatch.setattr(loops, "now", lambda: NOW)
@@ -251,14 +255,26 @@ def _patch_defaults(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr(loops, "build_application", _IdleTelegram)
     monkeypatch.setattr(loops, "cache_exhausted", lambda moment: False)
     monkeypatch.setattr(loops, "calendar", lambda: TradingCalendar(sessions=(SESSION,)))
+
+    runs: set[tuple[str, str]] = set()
+
+    async def _has_run(job: str, period_key: str) -> bool:
+        return (job, period_key) in runs
+
+    async def _mark_run(job: str, period_key: str, ran_at: datetime) -> None:
+        runs.add((job, period_key))
+
+    monkeypatch.setattr(loops, "has_run", _has_run)
+    monkeypatch.setattr(loops, "mark_run", _mark_run)
     monkeypatch.setattr(loops, "covers", lambda day: True)
     loops._age_unmeasurable_alerted = False
     loops._cache_exhausted_alerted = False
     loops._price_rejected_alerted = False
-    loops._refreshed_on = None
     loops._snapshot_on = None
     loops._first_cycle_at = None
     loops._loss_unmeasurable_alerted = False
+    loops._entries_stopped = False
+    return runs
 
 
 def _snapshot(opening: Decimal) -> DailySnapshot:
@@ -959,10 +975,6 @@ async def test_run_one_task_failure_does_not_kill_others(
     monkeypatch.setattr(loops, "alert", _alert)
     monkeypatch.setattr(loops, "is_open", lambda moment: False)
     monkeypatch.setattr(loops, "now", lambda: sunday_noon)
-    loops._backed_up_on = None
-    loops._heartbeat_on = None
-    loops._weekly_on = None
-    loops._rolled_on = None
 
     real_sleep = asyncio.sleep
 
@@ -1191,7 +1203,7 @@ async def test_rollover_backfills_without_reading_the_daily_loss(
 
     calls: list[str] = []
     windows: list[tuple[datetime, datetime]] = []
-    _patch_defaults(monkeypatch, calls)
+    runs = _patch_defaults(monkeypatch, calls)
     import zarabot.app.loops as loops
 
     async def _trade(_ctx: AppContext) -> None:
@@ -1211,10 +1223,10 @@ async def test_rollover_backfills_without_reading_the_daily_loss(
     monkeypatch.setattr(loops, "backfill", _bf)
     monkeypatch.setattr(loops, "is_open", lambda moment: True)
     monkeypatch.setattr(loops, "now", lambda: NOW)
-    loops._rolled_on = None
-    loops._backed_up_on = NOW.date()
-    loops._heartbeat_on = NOW.date()
-    loops._weekly_on = NOW.date()
+    today = moscow_date(NOW).isoformat()
+    runs.update(
+        {("backup", today), ("heartbeat", today), ("weekly_report", "2026-03-16")}
+    )
 
     real_sleep = asyncio.sleep
 
@@ -1240,7 +1252,7 @@ async def test_weekly_backfills_immediately_before_report(
     from zarabot.app.loops import run
 
     calls: list[str] = []
-    _patch_defaults(monkeypatch, calls)
+    runs = _patch_defaults(monkeypatch, calls)
     import zarabot.app.loops as loops
 
     async def _trade(_ctx: AppContext) -> None:
@@ -1259,10 +1271,8 @@ async def test_weekly_backfills_immediately_before_report(
     monkeypatch.setattr(loops, "send_report", _send)
     monkeypatch.setattr(loops, "is_open", lambda moment: False)
     monkeypatch.setattr(loops, "now", lambda: sunday_noon)
-    loops._backed_up_on = sunday_noon.date()
-    loops._heartbeat_on = sunday_noon.date()
-    loops._weekly_on = None
-    loops._rolled_on = sunday_noon.date()
+    day = moscow_date(sunday_noon).isoformat()
+    runs.update({("backup", day), ("heartbeat", day), ("rollover", day)})
 
     real_sleep = asyncio.sleep
 
@@ -1277,6 +1287,134 @@ async def test_weekly_backfills_immediately_before_report(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls.index("backfill") < calls.index("weekly")
+
+
+async def test_restart_after_the_report_hour_still_sends_the_week(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact-hour condition lost the week entirely — no report, no alert,
+    no record — against acceptance criterion 9 (#27)."""
+    from zarabot.app.loops import run
+
+    calls: list[str] = []
+    runs = _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _trade(_ctx: AppContext) -> None:
+        return None
+
+    async def _send(moment: datetime) -> None:
+        calls.append("weekly")
+
+    # Sunday 15:00 MSK: two hours after the window the old condition required.
+    sunday_late = datetime(2026, 3, 22, 12, 0, tzinfo=UTC)
+    day = moscow_date(sunday_late).isoformat()
+    runs.update({("backup", day), ("heartbeat", day), ("rollover", day)})
+
+    monkeypatch.setattr(loops, "trading_cycle", _trade)
+    monkeypatch.setattr(loops, "send_report", _send)
+    monkeypatch.setattr(loops, "is_open", lambda moment: False)
+    monkeypatch.setattr(loops, "now", lambda: sunday_late)
+
+    real_sleep = asyncio.sleep
+
+    async def _yield(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _yield)
+    task = asyncio.create_task(run(_ctx()))
+    for _ in range(50):
+        await real_sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls.count("weekly") == 1
+
+
+async def test_a_job_already_recorded_does_not_run_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three restarts in a day produced three heartbeats, because the guard was
+    a module global that every restart cleared (#27)."""
+    from zarabot.app.loops import run
+
+    calls: list[str] = []
+    runs = _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _trade(_ctx: AppContext) -> None:
+        return None
+
+    async def _send(moment: datetime) -> None:
+        calls.append("weekly")
+
+    async def _backup(*_a: object, **_k: object) -> Path:
+        calls.append("backup")
+        return Path("x")
+
+    sunday_noon = datetime(2026, 3, 22, 9, 0, tzinfo=UTC)
+    day = moscow_date(sunday_noon).isoformat()
+    runs.update(
+        {
+            ("backup", day),
+            ("heartbeat", day),
+            ("rollover", day),
+            ("weekly_report", "2026-03-16"),
+        }
+    )
+
+    monkeypatch.setattr(loops, "trading_cycle", _trade)
+    monkeypatch.setattr(loops, "send_report", _send)
+    monkeypatch.setattr(loops, "backup_run", _backup)
+    monkeypatch.setattr(loops, "is_open", lambda moment: False)
+    monkeypatch.setattr(loops, "now", lambda: sunday_noon)
+
+    real_sleep = asyncio.sleep
+
+    async def _yield(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _yield)
+    task = asyncio.create_task(run(_ctx()))
+    for _ in range(50):
+        await real_sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert "weekly" not in calls
+    assert "backup" not in calls
+    assert not [item for item in calls if item.startswith("heartbeat")]
+
+
+async def test_stop_entries_suppresses_entries_but_not_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """shutdown's contract said it stops accepting new signals and nothing
+    implemented that half; the loop kept cycling for the whole drain (#21)."""
+    from zarabot.app.loops import stop_entries, trading_cycle
+
+    calls: list[str] = []
+    closed: list[int] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(stop_protection=StopProtection.LOCAL)
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _close(pos: Position, trigger: ExitTrigger) -> Position:
+        closed.append(pos.id)
+        return pos
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "close_position", _close)
+
+    stop_entries()
+    await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+
+    assert "candles" not in calls, "no entry evaluation after a stop request"
+    assert closed == [position.id], "exits still run"
 
 
 async def test_run_starts_telegram_listener_and_halt_stops_entries(

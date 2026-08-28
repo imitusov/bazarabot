@@ -148,6 +148,38 @@ async def test_shutdown_waits_for_in_flight_order_to_settle(
     assert calls.index("unresolved") < calls.index("resolve")
 
 
+async def test_shutdown_stops_entries_before_it_drains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drain that runs first has already looked past the position the next
+    cycle opens. The contract said this and nothing implemented it (#21)."""
+    from zarabot.app.shutdown import shutdown
+
+    calls: list[str] = []
+    import zarabot.app.shutdown as shutdown_mod
+
+    def _stop() -> None:
+        calls.append("stop_entries")
+
+    async def _unresolved() -> list[OrderRecord]:
+        calls.append("unresolved")
+        return []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    async def _open() -> list[object]:
+        return []
+
+    monkeypatch.setattr(shutdown_mod, "now", lambda: NOW)
+    monkeypatch.setattr(shutdown_mod, "stop_entries", _stop)
+    monkeypatch.setattr(shutdown_mod, "list_unresolved", _unresolved)
+    monkeypatch.setattr(shutdown_mod, "alert", _alert)
+    monkeypatch.setattr(shutdown_mod, "list_open", _open)
+    await shutdown(_ctx(), signal.SIGTERM)
+    assert calls.index("stop_entries") < calls.index("unresolved")
+
+
 async def test_shutdown_neither_cancels_nor_liquidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
