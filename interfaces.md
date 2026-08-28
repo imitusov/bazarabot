@@ -46,9 +46,13 @@ Entry signal produced by a strategy.
 **`Position(id: int, ticker: str, figi: str, strategy: str, lots: int, lot_size: int, entry_price: Decimal, entry_at: datetime, stop_price: Decimal, target_price: Decimal, status: str, adopted: bool, open_order_key: str, close_order_key: str | None, exit_trigger: ExitTrigger | None, exit_price: Decimal | None, exit_at: datetime | None, realised_pnl: Decimal | None, stop_protection: StopProtection, stop_order_key: str | None)`**
 Open or closed holding. `lots` must be positive. `stop_protection=EXCHANGE` requires `stop_order_key`; `LOCAL` forbids one. Raises `ValueError` on a pairing violation.
 
-**`OrderRecord(key: str, ticker: str, figi: str, side: Side, intent: str, lots: int, status: OrderStatus, filled_lots: int | None, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, created_at: datetime, settled_at: datetime | None, exit_trigger: ExitTrigger | None = None)`**
+**`OrderRecord(key: str, ticker: str, figi: str, side: Side, intent: str, lots: int, status: OrderStatus, filled_lots: int | None, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, created_at: datetime, settled_at: datetime | None, exit_trigger: ExitTrigger | None = None, broker_order_id: str | None = None, commission_alerted_at: datetime | None = None)`**
 Client-keyed order. `intent` is `ENTRY` or `EXIT`. `exit_trigger` is non-null
 exactly when `intent` is `EXIT` (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`).
+`broker_order_id` is the broker's own identifier where the bot knows it — a row
+describing an execution the exchange performed is filed under a key the broker
+has never seen. `commission_alerted_at` is set once, when the owner is first
+told this row's commission is unknown (#8).
 
 **`StopOrderRecord(key: str, stop_order_id: str | None, position_id: int, ticker: str, lots: int, stop_price: Decimal, status: StopOrderStatus, created_at: datetime, settled_at: datetime | None)`**
 Standing stop-loss tracked locally.
@@ -328,7 +332,7 @@ because the contract does not receive a FIGI. `exit_trigger` is required for
 `EXIT` and forbidden for `ENTRY`; either violation raises `ValueError`. Raises
 `DuplicateOrderError` on a repeated key.
 
-**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None) → OrderRecord`**
+**`async settle(key: str, status: OrderStatus, filled_lots: int, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, broker_order_id: str | None = None) → OrderRecord`**
 Records a terminal outcome, `commission`, and `settled_at`. `commission=None`
 means not yet known and reads back distinct from zero. Raises `OrderStateError`
 if the row is missing, already terminal, or `status` is not terminal.
@@ -339,6 +343,12 @@ adopted position, which since #42 points at a real order row.
 
 **`async record_commission(key: str, commission: Decimal) → OrderRecord`**
 The one field settable on a terminal row. Raises `OrderStateError` if absent.
+
+**`async mark_commission_alerted(key: str, at: datetime) → OrderRecord`**
+Records that the owner has been told once about this row's unknown commission.
+Idempotent — a row already marked keeps its original timestamp. Raises
+`OrderStateError` if absent, `ValueError` on a naive `at`. The 24-hour
+staleness policy stays in `ops.commissions`; this records only the fact (#8).
 
 **`async list_missing_commission(since: datetime, until: datetime) → list[OrderRecord]`**
 `FILLED` orders in the period whose commission is still unknown. Empty list when

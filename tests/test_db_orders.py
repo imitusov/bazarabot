@@ -193,8 +193,9 @@ async def test_mark_commission_alerted_rejects_absent_and_naive(db: Path) -> Non
         await mark_commission_alerted("no-such-key", NOW)
     await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
     await settle(KEY, OrderStatus.FILLED, 2, Decimal("100"), None, None)
+    naive = datetime(2026, 3, 16, 10, 0)  # noqa: DTZ001
     with pytest.raises(ValueError):
-        await mark_commission_alerted(KEY, datetime(2026, 3, 16, 10, 0))
+        await mark_commission_alerted(KEY, naive)
 
 
 async def test_alerted_row_is_still_listed_as_missing(db: Path) -> None:

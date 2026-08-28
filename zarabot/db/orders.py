@@ -70,6 +70,8 @@ def _row_to_order(row: aiosqlite.Row) -> OrderRecord:
         created_at=_dt(row["created_at"]),
         settled_at=_dt_opt(row["settled_at"]),
         exit_trigger=ExitTrigger(trigger_raw) if trigger_raw else None,
+        broker_order_id=row["broker_order_id"],
+        commission_alerted_at=_dt_opt(row["commission_alerted_at"]),
     )
 
 
@@ -135,8 +137,14 @@ async def settle(
     filled_price: Decimal | None,
     commission: Decimal | None,
     broker_reason: str | None,
+    broker_order_id: str | None = None,
 ) -> OrderRecord:
-    """Record a terminal outcome. Raises if the row is already terminal."""
+    """Record a terminal outcome. Raises if the row is already terminal.
+
+    `broker_order_id` is the broker's own identifier for the order, where the
+    caller knows it. It is what makes a row filed under an invented key
+    re-queryable at all (#8).
+    """
     if status not in _TERMINAL:
         raise OrderStateError(f"{status} is not a terminal status")
     async with transaction() as conn:
@@ -149,7 +157,8 @@ async def settle(
             """
             UPDATE orders
             SET status = ?, filled_lots = ?, filled_price = ?,
-                commission = ?, broker_reason = ?, settled_at = ?
+                commission = ?, broker_reason = ?, settled_at = ?,
+                broker_order_id = COALESCE(?, broker_order_id)
             WHERE key = ?
             """,
             (
@@ -159,6 +168,7 @@ async def settle(
                 str(commission) if commission is not None else None,
                 broker_reason,
                 now().isoformat(),
+                broker_order_id,
                 key,
             ),
         )
@@ -184,6 +194,33 @@ async def record_commission(key: str, commission: Decimal) -> OrderRecord:
         await conn.execute(
             "UPDATE orders SET commission = ? WHERE key = ?",
             (str(commission), key),
+        )
+        loaded = await _load(conn, key)
+        if loaded is None:
+            raise OrderStateError(f"order {key} is absent")
+        return loaded
+
+
+async def mark_commission_alerted(key: str, at: datetime) -> OrderRecord:
+    """Record that the owner has been told once about an unknown commission.
+
+    Idempotent: a row already marked keeps its original timestamp, because the
+    moment the owner was *first* told is the fact worth keeping. The 24-hour
+    staleness policy lives in `ops.commissions`; this records only the fact
+    (#8).
+    """
+    _reject_naive(at)
+    async with transaction() as conn:
+        current = await _load(conn, key)
+        if current is None:
+            raise OrderStateError(f"order {key} is absent")
+        await conn.execute(
+            """
+            UPDATE orders
+            SET commission_alerted_at = COALESCE(commission_alerted_at, ?)
+            WHERE key = ?
+            """,
+            (at.isoformat(), key),
         )
         loaded = await _load(conn, key)
         if loaded is None:

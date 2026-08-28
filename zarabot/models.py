@@ -236,6 +236,12 @@ class OrderRecord:
     created_at: datetime
     settled_at: datetime | None
     exit_trigger: ExitTrigger | None = None
+    # The broker's own identifier, where the bot knows it. A row describing an
+    # execution the exchange performed is filed under a key the broker has never
+    # seen, so without this it can never be re-queried (#8).
+    broker_order_id: str | None = None
+    # Set once, when the owner is first told this row's commission is unknown.
+    commission_alerted_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _validate_common(self)
