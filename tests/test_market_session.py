@@ -137,7 +137,11 @@ async def test_rollover_refresh_clears_cache_exhausted(
     async def _first(days: int) -> list[SessionInfo]:
         return [_weekday()]
 
+    async def _past(days: int) -> list[SessionInfo]:
+        return [_weekday()]
+
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _first)
+    monkeypatch.setattr("zarabot.market.session.get_past_trading_schedule", _past)
     await refresh(7)
     past_last = CLOSE + timedelta(hours=1)
     assert cache_exhausted(past_last) is True
@@ -201,6 +205,7 @@ async def test_a_second_outage_alerts_again(
         return sessions
 
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    monkeypatch.setattr("zarabot.market.session.get_past_trading_schedule", _fetch)
     await refresh(7)
     assert len(_reset_cache) == 1
     failing = False

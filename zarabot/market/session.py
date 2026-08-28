@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
+    get_past_trading_schedule,
     get_trading_schedule,
 )
 from zarabot.models import SessionInfo, TradingCalendar
@@ -15,6 +16,11 @@ from zarabot.telegram.notifier import alert
 
 _LOG = logging.getLogger(__name__)
 _cache: list[SessionInfo] | None = None
+# The days BEFORE today. `get_trading_schedule` looks forward, which is right
+# for the session questions below and wrong for counting how long a position
+# has been held — every day between an entry and yesterday fell outside it, so
+# `trading_days_open` was capped at 1 and MAX_AGE could never fire (#45).
+_past_cache: list[SessionInfo] | None = None
 _alerted = False
 _UNAVAILABLE = "trading schedule unavailable; treating market as closed"
 
@@ -38,7 +44,8 @@ async def _report_unavailable() -> None:
 
 
 async def refresh(days: int) -> None:
-    global _cache, _alerted
+    """Cache both windows. Two broker calls a day, not two a cycle."""
+    global _cache, _alerted, _past_cache
     try:
         fetched = await get_trading_schedule(days)
     except (BrokerUnavailable, BrokerRateLimited):
@@ -48,22 +55,40 @@ async def refresh(days: int) -> None:
         await _report_unavailable()
         return
     _cache = fetched
+    # A failed backward fetch leaves its cache as it was and alerts, but must
+    # not discard a forward window that did arrive: whether the market is open
+    # is the more urgent of the two questions, and one answer beats none.
+    try:
+        past = await get_past_trading_schedule(days)
+    except (BrokerUnavailable, BrokerRateLimited):
+        await _report_unavailable()
+        return
+    if _has_trading_sessions(past):
+        _past_cache = past
     # Rule 10's "alert once" is per incident, not per process. Without this a
     # schedule that went unavailable, recovered, and went unavailable again was
     # silent from here for the rest of the process lifetime (#32).
     _alerted = False
 
 
+def _sort_key(session: SessionInfo) -> datetime:
+    return (
+        session.start if session.start is not None else datetime.min.replace(tzinfo=UTC)
+    )
+
+
 def calendar() -> TradingCalendar:
-    """The cached schedule, for callers counting trading days rather than
-    asking whether a moment is inside a session.
+    """Both cached windows, oldest first, for callers counting trading days.
 
     `app.loops` fetched a fourteen-day schedule every cycle — once a minute,
     for data that changes at most daily and that this module already holds,
-    refreshed daily by `run`'s schedule task (#19). Empty when the cache is
-    empty; never `None`.
+    refreshed daily by `run`'s schedule task (#19). It spans the past as well,
+    because the question it serves is asked about the past and the forward
+    window contains none of it (#45). Empty when both caches are; never
+    `None`.
     """
-    return TradingCalendar(sessions=tuple(_cache or ()))
+    merged = list(_past_cache or ()) + list(_cache or ())
+    return TradingCalendar(sessions=tuple(sorted(merged, key=_sort_key)))
 
 
 def current_session(now: datetime) -> SessionInfo | None:
