@@ -289,10 +289,14 @@ Closed positions, newest `exit_at` first, or `[]`. Never `None`.
 **`async get(position_id: int) → Position | None`**
 `None` when absent.
 
-**`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime) → Position`**
+**`async adopt(instrument: Instrument, lots: int, average_price: Decimal, adopted_at: datetime, open_order_key: str) → Position`**
 Open LOCAL adopted position, strategy `ADOPTED`, stop/target from average price
-at configured `stop_loss_pct` / `take_profit_pct`. `open_order_key` is
-`ADOPTED-{figi}`.
+at configured `stop_loss_pct` / `take_profit_pct`. `open_order_key` is the key
+of the bot's own unresolved `ENTRY` order for the ticker, supplied by the
+caller — the synthetic `ADOPTED-{figi}` had no order row and could not satisfy
+the schema's foreign key (#42). A key naming no order propagates the
+`IntegrityError`; only a duplicate open position becomes `PositionStateError`,
+for both `open` and `adopt`.
 
 **`async update_lots(position_id: int, lots: int) → Position`**
 Writes the broker's lot count onto an open row. Raises `PositionStateError` if
@@ -330,7 +334,8 @@ means not yet known and reads back distinct from zero. Raises `OrderStateError`
 if the row is missing, already terminal, or `status` is not terminal.
 
 **`async get(key: str) → OrderRecord | None`**
-The order, or `None` when absent (including synthetic adopted keys).
+The order, or `None` when absent. No longer expected to be `None` for an
+adopted position, which since #42 points at a real order row.
 
 **`async record_commission(key: str, commission: Decimal) → OrderRecord`**
 The one field settable on a terminal row. Raises `OrderStateError` if absent.
@@ -826,7 +831,9 @@ and the report carries `{"type": "EXIT_UNRESOLVED", "ticker", "position_id",
 unrecognised → `{"type": "FOREIGN_HOLDING", "ticker", "lots", "average_price"}`
 and **no position row is written**; `app.startup` refuses to start on it (rule
 32). Broker-only but recognised — the bot has an unresolved `ENTRY` order of its
-own for the ticker, the crash-recovery case — → `positions.adopt`. Lot mismatch →
+own for the ticker, the crash-recovery case — → `positions.adopt`, passing that
+order's key as `open_order_key` (oldest by `created_at` if somehow more than
+one). Lot mismatch →
 `positions.update_lots`. Stop discrepancies are reported (`STOP_MISSING`,
 `STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_ADOPTABLE`, `STOP_DUPLICATE`) and not
 acted on. `STOP_DUPLICATE` carries `keep` (the stop matching the position's

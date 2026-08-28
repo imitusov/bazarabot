@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import NoReturn
 
 import aiosqlite
 
@@ -78,6 +79,21 @@ def _dt_opt(value: object) -> datetime | None:
 
 def _detail(payload: dict[str, object]) -> str:
     return json.dumps(payload, default=str)
+
+
+def _reraise_unless_duplicate_position(
+    exc: aiosqlite.IntegrityError, ticker: str
+) -> NoReturn:
+    """Only the partial unique index on open positions is a duplicate.
+
+    Every integrity failure used to become "open position already exists",
+    which turned a foreign-key violation into a plausible-sounding lie naming a
+    position that did not exist, and made #42 take a reproduction to diagnose
+    rather than a stack trace. Anything else propagates as itself.
+    """
+    if "UNIQUE" in str(exc).upper():
+        raise PositionStateError(f"open position already exists for {ticker}") from exc
+    raise exc
 
 
 def _row_to_position(row: aiosqlite.Row) -> Position:
@@ -199,9 +215,7 @@ async def open(
                 ),
             )
         except aiosqlite.IntegrityError as exc:
-            raise PositionStateError(
-                f"open position already exists for {signal.ticker}"
-            ) from exc
+            _reraise_unless_duplicate_position(exc, signal.ticker)
         position_id = cursor.lastrowid
         if position_id is None:
             raise PositionStateError("insert did not assign an id")
@@ -459,15 +473,26 @@ async def adopt(
     lots: int,
     average_price: Decimal,
     adopted_at: datetime,
+    open_order_key: str,
 ) -> Position:
-    """Open a LOCAL position for a broker holding unknown locally."""
+    """Open a LOCAL position for a broker holding whose local row is missing.
+
+    `open_order_key` is the bot's own unresolved ENTRY order for the ticker.
+    This used to synthesise `ADOPTED-{figi}`, a key with no order row, while the
+    schema has required `open_order_key REFERENCES orders (key)` since 001 —
+    so once foreign keys were actually enforced this function could not insert
+    at all (#42). The real key was available the whole time: since v1.25 this is
+    reached only for a holding recognised by such an order, so one always exists,
+    and pointing at it also makes the entry commission recoverable through
+    `db.orders.get`.
+    """
     _reject_naive(adopted_at)
     if lots <= 0:
         raise PositionStateError("lots must be positive")
     cfg = load()
     stop = average_price * (_HUNDRED - cfg.stop_loss_pct) / _HUNDRED
     target = average_price * (_HUNDRED + cfg.take_profit_pct) / _HUNDRED
-    open_key = f"ADOPTED-{instrument.figi}"
+    open_key = open_order_key
     async with transaction() as conn:
         try:
             cursor = await conn.execute(
@@ -493,9 +518,7 @@ async def adopt(
                 ),
             )
         except aiosqlite.IntegrityError as exc:
-            raise PositionStateError(
-                f"open position already exists for {instrument.ticker}"
-            ) from exc
+            _reraise_unless_duplicate_position(exc, instrument.ticker)
         position_id = cursor.lastrowid
         if position_id is None:
             raise PositionStateError("insert did not assign an id")

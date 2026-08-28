@@ -180,9 +180,13 @@ async def _report_unresolved_exit(position: Position, reason: str) -> dict[str, 
     }
 
 
-async def _adopt_holding(holding: Position, moment: datetime) -> dict[str, object]:
+async def _adopt_holding(
+    holding: Position, moment: datetime, open_order_key: str
+) -> dict[str, object]:
     instrument = await get_instrument(holding.ticker)
-    await adopt(instrument, holding.lots, holding.entry_price, moment)
+    await adopt(
+        instrument, holding.lots, holding.entry_price, moment, open_order_key
+    )
     await alert(
         f"adopted {holding.ticker} lots={holding.lots} "
         f"average_price={holding.entry_price}"
@@ -216,18 +220,27 @@ async def _report_foreign(holding: Position) -> dict[str, object]:
     }
 
 
-async def _recognised_tickers() -> set[str]:
-    """Tickers the bot has an unfinished entry of its own for.
+async def _recognising_orders() -> dict[str, str]:
+    """Ticker → the key of the bot's unfinished entry of its own for it.
 
     The one case `db.positions.adopt` survives for: the bot submitted the buy,
     the broker filled it, and the crash landed before the position row was
     written. The order row is the bot's own record of the holding, so the
     holding is recognised and the *local row* is what is missing. Anything else
     at the broker is foreign.
+
+    The key is carried out of here rather than just the ticker, because the
+    adopted position must point at that order — the recognition rule has already
+    identified exactly one, so the answer is in hand at the moment the decision
+    is made (#42). `list_unresolved` is oldest-first, so keeping the first match
+    per ticker is the documented tie-break for the state the per-ticker
+    submission lock is supposed to make impossible.
     """
-    return {
-        order.ticker for order in await list_unresolved() if order.intent == "ENTRY"
-    }
+    found: dict[str, str] = {}
+    for order in await list_unresolved():
+        if order.intent == "ENTRY":
+            found.setdefault(order.ticker, order.key)
+    return found
 
 
 async def _adjust_lots(local: Position, broker_lots: int) -> dict[str, object]:
@@ -365,10 +378,11 @@ async def reconcile(now: datetime) -> ReconciliationReport:
         for ticker, holding in broker_by_ticker.items()
         if ticker not in local_by_ticker
     ]
-    recognised = await _recognised_tickers() if unknown else set()
+    recognised = await _recognising_orders() if unknown else {}
     for holding in unknown:
-        if holding.ticker in recognised:
-            adjustments.append(await _adopt_holding(holding, now))
+        open_order_key = recognised.get(holding.ticker)
+        if open_order_key is not None:
+            adjustments.append(await _adopt_holding(holding, now, open_order_key))
         else:
             adjustments.append(await _report_foreign(holding))
 
