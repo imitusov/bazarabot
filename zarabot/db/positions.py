@@ -271,25 +271,39 @@ async def close(
     exit_price: Decimal,
     closed_at: datetime,
     order: OrderRecord | None,
+    exit_commission: Decimal | None = None,
 ) -> Position:
-    """Atomically close an open position. Never deletes the row."""
+    """Atomically close an open position. Never deletes the row.
+
+    `exit_commission` is the closing leg's fee where there is no closing order
+    to read it from, which is exactly and only the EXTERNAL case (#11). It is
+    stored as well as netted: a realised figure whose inputs are not all
+    recorded cannot be checked afterwards, and this is the only commission in
+    the system with no order row of its own to live on.
+    """
     _reject_naive(closed_at)
     if trigger is ExitTrigger.EXTERNAL:
         if order is not None:
             raise ValueError("EXTERNAL close forbids an order")
-    elif order is None:
-        raise ValueError("non-EXTERNAL close requires an order")
+    else:
+        if order is None:
+            raise ValueError("non-EXTERNAL close requires an order")
+        if exit_commission is not None:
+            raise ValueError("exit_commission belongs to an EXTERNAL close only")
     async with transaction() as conn:
         existing = await _load(conn, position_id)
         if existing is None:
             raise PositionStateError(f"position {position_id} is absent")
         if existing.status != "OPEN":
             raise PositionStateError(f"position {position_id} is already closed")
-        exit_commission = (
-            order.commission
-            if order is not None and order.commission is not None
-            else Decimal("0")
-        )
+        if order is not None:
+            closing_commission = (
+                order.commission if order.commission is not None else Decimal("0")
+            )
+        else:
+            closing_commission = (
+                exit_commission if exit_commission is not None else Decimal("0")
+            )
         entry_commission = await _order_commission(existing.open_order_key)
         realised = _realised(
             existing.entry_price,
@@ -297,7 +311,7 @@ async def close(
             existing.lots,
             existing.lot_size,
             entry_commission,
-            exit_commission,
+            closing_commission,
         )
         close_key = order.key if order is not None else None
         cursor = await conn.execute(
@@ -309,6 +323,7 @@ async def close(
                 exit_at = ?,
                 realised_pnl = ?,
                 close_order_key = ?,
+                exit_commission = ?,
                 stop_protection = 'LOCAL',
                 stop_order_key = NULL
             WHERE id = ? AND status = 'OPEN'
@@ -319,6 +334,7 @@ async def close(
                 closed_at.isoformat(),
                 str(realised),
                 close_key,
+                str(exit_commission) if exit_commission is not None else None,
                 position_id,
             ),
         )
@@ -335,6 +351,9 @@ async def close(
                 "exit_price": str(exit_price),
                 "realised_pnl": str(realised),
                 "close_order_key": close_key,
+                "exit_commission": (
+                    str(exit_commission) if exit_commission is not None else None
+                ),
                 "previous_stop_protection": existing.stop_protection.value,
                 "new_stop_protection": StopProtection.LOCAL.value,
             },
@@ -374,6 +393,18 @@ async def get(position_id: int) -> Position | None:
     return await _load(_conn(), position_id)
 
 
+async def _stored_exit_commission(
+    conn: aiosqlite.Connection, position_id: int
+) -> Decimal:
+    cursor = await conn.execute(
+        "SELECT exit_commission FROM positions WHERE id = ?", (position_id,)
+    )
+    row = await cursor.fetchone()
+    if row is None or row["exit_commission"] is None:
+        return Decimal("0")
+    return _dec(row["exit_commission"])
+
+
 async def recompute_realised(position_id: int) -> Position:
     """Rewrite realised_pnl for a closed position from current order commissions."""
     async with transaction() as conn:
@@ -382,13 +413,21 @@ async def recompute_realised(position_id: int) -> Position:
             raise PositionStateError(f"position {position_id} is absent")
         if existing.status != "CLOSED" or existing.exit_price is None:
             raise PositionStateError(f"position {position_id} is not closed")
+        if existing.exit_trigger is ExitTrigger.EXTERNAL:
+            # No closing order to re-read. Dropping the stored fee to zero would
+            # turn a figure the operations feed resolved back into the
+            # overstated one — a recomputation that makes a number worse is the
+            # failure this function exists to prevent (#11).
+            closing_commission = await _stored_exit_commission(conn, position_id)
+        else:
+            closing_commission = await _order_commission(existing.close_order_key)
         realised = _realised(
             existing.entry_price,
             existing.exit_price,
             existing.lots,
             existing.lot_size,
             await _order_commission(existing.open_order_key),
-            await _order_commission(existing.close_order_key),
+            closing_commission,
         )
         cursor = await conn.execute(
             """

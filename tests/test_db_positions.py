@@ -498,8 +498,8 @@ async def test_external_close_nets_and_stores_its_commission(db: Path) -> None:
         None,
         Decimal("2.50"),
     )
-    # Gross 100 minus entry 1.50 minus the resolved exit fee 2.50.
-    assert closed.realised_pnl == Decimal("96.00")
+    # Gross 200 minus entry 1.50 minus the resolved exit fee 2.50.
+    assert closed.realised_pnl == Decimal("196.00")
     async with aiosqlite.connect(db) as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute(

@@ -262,18 +262,22 @@ Raises `PositionStateError` if an open row for the ticker exists. Raises
 EXCHANGE requires a key; LOCAL forbids one. Raises `PositionStateError` on a
 pairing violation or missing row.
 
-**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None) → Position`**
+**`async close(position_id: int, trigger: ExitTrigger, exit_price: Decimal, closed_at: datetime, order: OrderRecord | None, exit_commission: Decimal | None = None) → Position`**
 Atomic OPEN→CLOSED. Concurrent callers: exactly one succeeds. Realised P&L is
 `(exit-entry)×lots×lot_size` minus commission on both legs. Opening commission
 comes from `db.orders.get(open_order_key)`, never a raw `SELECT` on `orders`
 (0 when the row is missing or commission is unknown). `order` is `None` only for
-`EXTERNAL`; any other pairing raises `ValueError`. Clears `stop_protection` to
+`EXTERNAL`; any other pairing raises `ValueError`. `exit_commission` is the
+closing fee where there is no closing order to carry it — EXTERNAL only, else
+`ValueError` — netted from realised P&L and stored in `positions.exit_commission`
+(#11). Clears `stop_protection` to
 LOCAL and `stop_order_key`. Never deletes. Raises `PositionStateError` if already
 closed or absent. Raises `ValueError` on a naive `closed_at`.
 
 **`async recompute_realised(position_id: int) → Position`**
 Rewrites `realised_pnl` for a closed position from the commissions currently on
-its two orders. Raises `PositionStateError` if absent or still open. The only
+its two orders, or from the stored `exit_commission` for an `EXTERNAL` close,
+which has no closing order to re-read. Raises `PositionStateError` if absent or still open. The only
 mutation permitted on a closed row.
 
 **`async list_open() → list[Position]`**
