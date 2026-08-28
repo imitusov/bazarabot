@@ -71,6 +71,17 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A second consecutive cycle with rejections produces **no** further alert, and a
   cycle with none re-arms it (proves the latch — the difference between a
   monitoring channel the owner reads and one they mute).
+- Two strategies signalling the same ticker in one pass open **one** position,
+  record the second as `DUPLICATE_TICKER`, raise no crash alert, and still
+  evaluate the remaining tickers (proves a correct refusal is an ordinary
+  outcome — it reached the supervisor, alerted "Background task trading
+  crashed", and abandoned the rest of the pass).
+- `open_position` raising `PositionStateError` or `DuplicateOrderError` is
+  caught and the pass continues (proves both siblings of `OrderRejected` are
+  handled, not just the one that had a branch).
+- A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
+  `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
+  is no longer re-fetched once a minute).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every

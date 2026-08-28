@@ -87,6 +87,41 @@ Module **33** of 40 in `dependency-order.md`. Everything before it is complete a
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
 
+   **A ticker already opened earlier in this same pass is skipped before the
+   gate, and recorded as `DUPLICATE_TICKER` (v1.40).** Strategies are looped
+   outer and tickers inner, so two strategies can signal one ticker in a single
+   pass. The gate's duplicate check reads `state.positions` from
+   `get_portfolio()`, and the broker's portfolio lags a market order that has
+   only just filled, so the second signal could pass a gate that was working
+   correctly. `execution.orders.open_position` then refused it — also correctly —
+   with `PositionStateError`, which nothing in this module caught (#24).
+
+   The set of tickers opened in the pass lives here, not in `risk.gate`, which
+   stays pure. It is the local record, which is immediately consistent, deciding
+   a question the broker's eventually-consistent one cannot answer in time.
+
+   **A refused entry is an ordinary outcome, not a fault.** `OrderRejected`,
+   `PositionStateError` and `db.orders.DuplicateOrderError` are all caught here,
+   logged, and the pass continues to the next ticker. Only `OrderRejected` was,
+   so a correct refusal propagated to `run`'s supervisor, which logged
+   `task_crashed`, alerted **"Background task trading crashed"**, slept, restarted
+   the loop — and skipped every remaining ticker in the pass. The guard was
+   doing its job; the caller was routing its success through the crash path.
+
+   The portfolio is still re-read from the broker after each successful open.
+   That read is what keeps `MAX_POSITIONS`, `PORTFOLIO_EXPOSURE` and available
+   cash correct within a pass, and dropping it to save a call would trade a
+   spurious alert for a breached risk limit. Opens are rare; the per-cycle cost
+   #19 is about is elsewhere.
+
+8. The calendar handed to `lifecycle.exits` comes from `market.session.calendar()`
+   (v1.40), never from a fetch of this module's own. It fetched a fourteen-day
+   schedule **every cycle** — once a minute, for data that changes at most daily
+   and that `market.session` already held, refreshed daily by task 3 of `run`
+   (#19). On a broker error that fetch returned an *empty* calendar, so
+   `clock.trading_days_between` counted zero and `MAX_AGE` exits silently stopped
+   firing; reading the cache cannot reach that state.
+
 Steps 3 and 4 running before step 5 is what implements the brief's
 halt-blocks-entries-only rule, and their order is binding.
 
@@ -181,6 +216,17 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A second consecutive cycle with rejections produces **no** further alert, and a
   cycle with none re-arms it (proves the latch — the difference between a
   monitoring channel the owner reads and one they mute).
+- Two strategies signalling the same ticker in one pass open **one** position,
+  record the second as `DUPLICATE_TICKER`, raise no crash alert, and still
+  evaluate the remaining tickers (proves a correct refusal is an ordinary
+  outcome — it reached the supervisor, alerted "Background task trading
+  crashed", and abandoned the rest of the pass).
+- `open_position` raising `PositionStateError` or `DuplicateOrderError` is
+  caught and the pass continues (proves both siblings of `OrderRejected` are
+  handled, not just the one that had a branch).
+- A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
+  `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
+  is no longer re-fetched once a minute).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every

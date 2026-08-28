@@ -18,6 +18,13 @@ Module **22** of 40 in `dependency-order.md`. Everything before it is complete a
 
 **`async refresh(days: int) → None`**
 - Caches the schedule. Called at startup and once per trading day.
+- **The unavailability latch is cleared on the success path**, next to the cache
+  write (v1.40). It was set on the first failure and never cleared, so a schedule
+  that went unavailable, recovered, and went unavailable again produced silence
+  from this module for the rest of the process lifetime (#32). Rule 10 says
+  "alert once" without saying once per incident or once per process; `app.loops`
+  resets its equivalent latch on a successful refresh, and that asymmetry is what
+  settles the reading — **once per incident**.
 - **A response containing no trading sessions is treated as unavailable**, per
   error rule 10: the cache is left as it was, and the owner is alerted once. It
   must never replace a populated cache with an empty one, and it must never
@@ -62,6 +69,25 @@ is the failure this cadence exists to prevent.
 
 **`in_closing_window(now: datetime, minutes: int) → bool`** — true during the final `minutes` of the current session; used only by the maximum-age exit.
 
+**`calendar() → TradingCalendar`**
+- The cached schedule as a `TradingCalendar`, for callers that need to count
+  trading days rather than ask whether a moment is inside a session. Empty
+  calendar when the cache is empty; never `None`.
+- Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
+  minute** for data that changes at most daily and that this module already
+  holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
+  day; that is the only fetch there should ever be.
+- It also removes a silent failure the caller had no way to see: `app.loops`
+  returned an *empty* calendar on a broker error, which made
+  `clock.trading_days_between` count zero and disabled `MAX_AGE` exits with no
+  alert. Reading the cache cannot produce that state — an unavailable schedule
+  leaves the cache as it was and alerts under rule 10, and an empty cache makes
+  `is_open` false, so the cycle never reaches the exit step at all.
+- **This does not fix #45.** The cached window is the same forward-looking one,
+  anchored to the start of the current UTC day, so counting trading days
+  *backwards* from a position's entry still finds nothing before today. That is a
+  separate defect in what the calendar spans, not in how often it is fetched.
+
 **`next_open(now: datetime) → datetime`** — used by the loop to sleep rather than poll.
 
 ## Relevant error handling rules
@@ -78,6 +104,12 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
+- A refresh that fails, then succeeds, then fails again alerts **twice** (proves
+  the latch is per incident: it was set once and never cleared, so every outage
+  after the first was silent from this module for the life of the process).
+- `calendar()` returns the cached sessions as a `TradingCalendar`, and an empty
+  one when the cache is empty rather than `None` (proves the caller has a total
+  answer and never has to fetch its own).
 - A timestamp inside the main session reports open (happy path).
 - Exactly at the session open instant reports open; exactly at the close instant
   reports closed (boundary, proves inclusivity at both ends).

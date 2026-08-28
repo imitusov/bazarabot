@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.39
+**Version:** 1.40
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -603,6 +603,12 @@ it proves.
   modules outside `db.*` that were opening their own).
 
 **`market.session`**
+- A refresh that fails, then succeeds, then fails again alerts **twice** (proves
+  the latch is per incident: it was set once and never cleared, so every outage
+  after the first was silent from this module for the life of the process).
+- `calendar()` returns the cached sessions as a `TradingCalendar`, and an empty
+  one when the cache is empty rather than `None` (proves the caller has a total
+  answer and never has to fetch its own).
 - A timestamp inside the main session reports open (happy path).
 - Exactly at the session open instant reports open; exactly at the close instant
   reports closed (boundary, proves inclusivity at both ends).
@@ -978,6 +984,17 @@ Additionally, on exits booked from an exchange stop:
 - A second consecutive cycle with rejections produces **no** further alert, and a
   cycle with none re-arms it (proves the latch — the difference between a
   monitoring channel the owner reads and one they mute).
+- Two strategies signalling the same ticker in one pass open **one** position,
+  record the second as `DUPLICATE_TICKER`, raise no crash alert, and still
+  evaluate the remaining tickers (proves a correct refusal is an ordinary
+  outcome — it reached the supervisor, alerted "Background task trading
+  crashed", and abandoned the rest of the pass).
+- `open_position` raising `PositionStateError` or `DuplicateOrderError` is
+  caught and the pass continues (proves both siblings of `OrderRejected` are
+  handled, not just the one that had a branch).
+- A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
+  `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
+  is no longer re-fetched once a minute).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every
@@ -1981,6 +1998,13 @@ was one of the eight sites opening its own connection.
 
 **`async refresh(days: int) → None`**
 - Caches the schedule. Called at startup and once per trading day.
+- **The unavailability latch is cleared on the success path**, next to the cache
+  write (v1.40). It was set on the first failure and never cleared, so a schedule
+  that went unavailable, recovered, and went unavailable again produced silence
+  from this module for the rest of the process lifetime (#32). Rule 10 says
+  "alert once" without saying once per incident or once per process; `app.loops`
+  resets its equivalent latch on a successful refresh, and that asymmetry is what
+  settles the reading — **once per incident**.
 - **A response containing no trading sessions is treated as unavailable**, per
   error rule 10: the cache is left as it was, and the owner is alerted once. It
   must never replace a populated cache with an empty one, and it must never
@@ -2024,6 +2048,25 @@ is the failure this cadence exists to prevent.
 **`current_session(now: datetime) → SessionInfo | None`**
 
 **`in_closing_window(now: datetime, minutes: int) → bool`** — true during the final `minutes` of the current session; used only by the maximum-age exit.
+
+**`calendar() → TradingCalendar`**
+- The cached schedule as a `TradingCalendar`, for callers that need to count
+  trading days rather than ask whether a moment is inside a session. Empty
+  calendar when the cache is empty; never `None`.
+- Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
+  minute** for data that changes at most daily and that this module already
+  holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
+  day; that is the only fetch there should ever be.
+- It also removes a silent failure the caller had no way to see: `app.loops`
+  returned an *empty* calendar on a broker error, which made
+  `clock.trading_days_between` count zero and disabled `MAX_AGE` exits with no
+  alert. Reading the cache cannot produce that state — an unavailable schedule
+  leaves the cache as it was and alerts under rule 10, and an empty cache makes
+  `is_open` false, so the cycle never reaches the exit step at all.
+- **This does not fix #45.** The cached window is the same forward-looking one,
+  anchored to the start of the current UTC day, so counting trading days
+  *backwards* from a position's entry still finds nothing before today. That is a
+  separate defect in what the calendar spans, not in how often it is fetched.
 
 **`next_open(now: datetime) → datetime`** — used by the loop to sleep rather than poll.
 
@@ -2626,6 +2669,41 @@ Fixed ordering; each step completes before the next begins:
 5. If halted, return; entries stop here.
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
+
+   **A ticker already opened earlier in this same pass is skipped before the
+   gate, and recorded as `DUPLICATE_TICKER` (v1.40).** Strategies are looped
+   outer and tickers inner, so two strategies can signal one ticker in a single
+   pass. The gate's duplicate check reads `state.positions` from
+   `get_portfolio()`, and the broker's portfolio lags a market order that has
+   only just filled, so the second signal could pass a gate that was working
+   correctly. `execution.orders.open_position` then refused it — also correctly —
+   with `PositionStateError`, which nothing in this module caught (#24).
+
+   The set of tickers opened in the pass lives here, not in `risk.gate`, which
+   stays pure. It is the local record, which is immediately consistent, deciding
+   a question the broker's eventually-consistent one cannot answer in time.
+
+   **A refused entry is an ordinary outcome, not a fault.** `OrderRejected`,
+   `PositionStateError` and `db.orders.DuplicateOrderError` are all caught here,
+   logged, and the pass continues to the next ticker. Only `OrderRejected` was,
+   so a correct refusal propagated to `run`'s supervisor, which logged
+   `task_crashed`, alerted **"Background task trading crashed"**, slept, restarted
+   the loop — and skipped every remaining ticker in the pass. The guard was
+   doing its job; the caller was routing its success through the crash path.
+
+   The portfolio is still re-read from the broker after each successful open.
+   That read is what keeps `MAX_POSITIONS`, `PORTFOLIO_EXPOSURE` and available
+   cash correct within a pass, and dropping it to save a call would trade a
+   spurious alert for a breached risk limit. Opens are rare; the per-cycle cost
+   #19 is about is elsewhere.
+
+8. The calendar handed to `lifecycle.exits` comes from `market.session.calendar()`
+   (v1.40), never from a fetch of this module's own. It fetched a fourteen-day
+   schedule **every cycle** — once a minute, for data that changes at most daily
+   and that `market.session` already held, refreshed daily by task 3 of `run`
+   (#19). On a broker error that fetch returned an *empty* calendar, so
+   `clock.trading_days_between` counted zero and `MAX_AGE` exits silently stopped
+   firing; reading the cache cannot reach that state.
 
 Steps 3 and 4 running before step 5 is what implements the brief's
 halt-blocks-entries-only rule, and their order is binding.
