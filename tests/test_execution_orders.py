@@ -582,6 +582,24 @@ async def _unresolved_exit(lots: int) -> str:
     return order.key
 
 
+def _broker_entry(key: str, lots: int) -> OrderRecord:
+    return OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=lots,
+        status=OrderStatus.FILLED,
+        filled_lots=lots,
+        filled_price=Decimal("100"),
+        commission=Decimal("1"),
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+
+
 def _broker_exit(key: str, lots: int, filled: int, status: OrderStatus) -> OrderRecord:
     return OrderRecord(
         key=key,
@@ -1119,6 +1137,51 @@ async def test_resolve_uses_recorded_signal_strategy(env: _Broker) -> None:
     await resolve_unfinished(NOW)
     opened = await list_open()
     assert opened[0].strategy == "ma_crossover"
+
+
+async def test_recovered_entry_without_a_signal_is_unattributed(
+    env: _Broker,
+) -> None:
+    """ma_crossover is a real strategy whose figures decide whether it stays
+    enabled; absorbing every recovered trade biased it in one direction (#11)."""
+    from zarabot.reporter.weekly import _strategy_section
+
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    key = (await list_unresolved())[0].key
+    env.state[key] = _broker_entry(key, 2)
+    await resolve_unfinished(NOW)
+    opened = await list_open()
+    assert opened[0].strategy == "UNATTRIBUTED"
+
+    position = await close_position(opened[0], ExitTrigger.TAKE_PROFIT)
+    section = _strategy_section([position])
+    assert "UNATTRIBUTED" in section
+    assert "ma_crossover" not in section
+
+
+async def test_recovered_entry_finds_a_signal_from_the_previous_moscow_day(
+    env: _Broker,
+) -> None:
+    """An order filled at 23:58 MSK and recovered at 00:05 is the case where
+    recovery matters most, and a single-date lookup failed exactly there."""
+    late = datetime(2026, 3, 16, 20, 58, tzinfo=UTC)  # 23:58 MSK
+    after_midnight = datetime(2026, 3, 16, 21, 5, tzinfo=UTC)  # 00:05 MSK
+    # A strategy that is not the old hardcoded default, so finding the signal
+    # and falling back are distinguishable outcomes.
+    await record(
+        replace(_signal(), strategy="rsi_reversion", generated_at=late),
+        RiskDecision(approved=True, lots=2, reason=None),
+    )
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    key = (await list_unresolved())[0].key
+    env.state[key] = replace(_broker_entry(key, 2), created_at=late)
+    await resolve_unfinished(after_midnight)
+    opened = await list_open()
+    assert opened[0].strategy == "rsi_reversion"
 
 
 async def test_resolve_exit_fill_closes_position(env: _Broker) -> None:
