@@ -601,8 +601,10 @@ only by `app.shutdown`.
 **`async get_candles(figi: str, interval: CandleInterval, since: datetime, until: datetime) → list[Candle]`**
 Oldest-first. Empty list when none. `ValueError` on naive datetimes.
 **`async get_last_price(figi: str) → Decimal`**
-Rejects non-positive prices, quotes older than `price_max_age_seconds`, quotes
-with a missing or naive timestamp, and moves beyond `price_max_move_pct` from
+Reads the quote's `time` directly — a quote object without that attribute
+raises `AttributeError`, since a renamed SDK field is an integration break and
+not bad data (#33). Rejects non-positive prices, quotes older than
+`price_max_age_seconds`, quotes with a missing or naive timestamp, and moves beyond `price_max_move_pct` from
 the last accepted price for that instrument (`PriceRejected`). A rejected quote
 does not update the last accepted price.
 **`async get_portfolio() → PortfolioState`**

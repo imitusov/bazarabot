@@ -380,10 +380,17 @@ async def get_candles(
     return candles
 
 
-def _quote_time(raw: object) -> datetime | None:
-    moment = getattr(raw, "time", None)
-    if moment is None:
-        moment = getattr(raw, "timestamp", None)
+def _quote_time(raw: Any) -> datetime | None:
+    """The quote's own timestamp, read directly.
+
+    `LastPrice` carries `figi`, `price`, `time`, `instrument_uid` and
+    `last_price_type` — measured against the live account, and there is no
+    `timestamp` to fall back to. Probing for one could only ever turn a rename
+    of `time` into every quote being rejected as stale, which reads like a
+    broker data problem and would stop any LOCAL stop-loss firing. An
+    `AttributeError` names the field and the line instead (#33).
+    """
+    moment = raw.time
     return moment if isinstance(moment, datetime) else None
 
 
