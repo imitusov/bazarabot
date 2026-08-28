@@ -17,6 +17,18 @@ Module **34** of 40 in `dependency-order.md`. Everything before it is complete a
 ### `zarabot/app/shutdown.py`
 
 **`async shutdown(ctx, signal) → None`**
+- **Stops entries before it drains, and now actually does (v1.45).** It calls
+  `app.loops.stop_entries()` first, then settles. This contract and the
+  function's own docstring both claimed it stopped accepting new signals, and
+  nothing implemented that half: `shutdown` ran as a task *concurrently with*
+  `run`, and the runner was cancelled only after the drain returned, so for the
+  whole thirty-second window the trading loop kept cycling and could open a
+  position the drain had already looked past (#21).
+- The flag is process-local and deliberately does **not** persist: a restarted
+  process must accept entries again. It is the one piece of loop state that
+  would be wrong to keep in `db.job_runs`.
+- Exits are unaffected. A cycle already past the entry check completes and its
+  order is drained; the flag closes the window before the *next* entry.
 - Stops accepting new signals, waits for in-flight submissions to reach a known
   state or a bounded timeout, settles what it can, records state, calls
   `db.connection.disconnect()` and `broker.client.close()`, and exits. Closing the
@@ -82,6 +94,21 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
   `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
   is no longer re-fetched once a minute).
+- A process restarted after the Sunday 12:00–12:59 MSK hour still sends that
+  week's report, once (proves the skip is gone — the exact-hour condition lost
+  the week with no report, no alert and no record, against acceptance criterion
+  9).
+- Three restarts in one Moscow day produce **one** heartbeat and one rollover,
+  not three (proves schedule state survives a restart, which is the ordinary
+  case rather than an edge one).
+- A job already marked run for its period does not run again on the next tick
+  (proves the guard is the record, not the module global that a restart cleared).
+- After `stop_entries()`, a cycle evaluates no entries and still submits exits
+  (proves shutdown closes the entry window without blocking the closes it exists
+  to settle — the half of the contract that was written and never implemented).
+- `shutdown` calls `stop_entries` **before** it drains (proves the ordering: a
+  drain that runs first has already looked past the position the next cycle
+  opens).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every

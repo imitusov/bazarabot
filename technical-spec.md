@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.44
+**Version:** 1.45
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -609,6 +609,18 @@ it proves.
   on `db.connection.shared()` (proves the shared connection reached the two
   modules outside `db.*` that were opening their own).
 
+**`db.job_runs`**
+- A job marked run reports `has_run` true for that period and false for the
+  next (happy path).
+- Marking the same pair twice keeps the first `ran_at` (proves the record is
+  *when it first completed*, which is what makes a late run distinguishable
+  from a repeated one).
+- `last_run` on a job that has never run returns `None` (proves "did the weekly
+  report go out?" is answerable, including when the answer is no).
+- A naive `ran_at` raises `ValueError`.
+- The module calls `aiosqlite.connect` nowhere and issues no `BEGIN`, `commit`
+  or `rollback`.
+
 **`db.trading_days`**
 - A window recorded then read back returns the same days, oldest first (happy
   path).
@@ -1034,6 +1046,21 @@ Additionally, on exits booked from an exchange stop:
 - A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
   `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
   is no longer re-fetched once a minute).
+- A process restarted after the Sunday 12:00–12:59 MSK hour still sends that
+  week's report, once (proves the skip is gone — the exact-hour condition lost
+  the week with no report, no alert and no record, against acceptance criterion
+  9).
+- Three restarts in one Moscow day produce **one** heartbeat and one rollover,
+  not three (proves schedule state survives a restart, which is the ordinary
+  case rather than an edge one).
+- A job already marked run for its period does not run again on the next tick
+  (proves the guard is the record, not the module global that a restart cleared).
+- After `stop_entries()`, a cycle evaluates no entries and still submits exits
+  (proves shutdown closes the entry window without blocking the closes it exists
+  to settle — the half of the contract that was written and never implemented).
+- `shutdown` calls `stop_entries` **before** it drains (proves the ordering: a
+  drain that runs first has already looked past the position the next cycle
+  opens).
 - `run` starts the Telegram command listener, and a `/halt` sent afterwards
   halts trading (proves the kill switch exists at runtime — the acceptance
   criterion that a defined-but-uncalled listener left unmeetable while every
@@ -1504,6 +1531,30 @@ its own (rule 31).
 - Events are never updated and never deleted. This reader is what makes the
   brief's requirement — that a post-incident question be answerable from the
   database alone — true rather than aspirational.
+
+### `zarabot/db/job_runs.py`
+
+**Sole owner of the `job_runs` table.** No other module writes it, and no SQL
+for it lives anywhere else.
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; every write runs inside
+`db.connection.transaction()` (rule 31).
+
+**`async has_run(job: str, period_key: str) → bool`**
+- Whether `job` has completed for that period. `period_key` is whatever
+  identifies the period the caller schedules on — a Moscow date for a daily job,
+  a week-start date for the weekly report.
+
+**`async mark_run(job: str, period_key: str, ran_at: datetime) → None`**
+- Records completion. Idempotent: a second call for the same pair keeps the
+  first `ran_at`, since when the job *first* completed is the fact worth having.
+- Raises `ValueError` on a naive `ran_at`.
+
+**`async last_run(job: str) → datetime | None`**
+- The most recent completion of `job`, or `None`. This is what makes "did the
+  weekly report go out?" answerable from the database, which it was not while
+  the answer lived in a module global (#27).
 
 ### `zarabot/db/trading_days.py`
 
@@ -2786,6 +2837,10 @@ Fixed ordering; each step completes before the next begins:
    deliberately stricter than step 2, where one rejected quote omits its ticker
    and the cycle continues — there, a missing price costs one position's exit
    evaluation; here it costs the measurement that bounds the whole day.
+4b. If shutdown has been requested, return; entries stop here and exits do not
+   (v1.45). The same shape as the halt check below, for the same reason: a
+   process on its way down must not open what nobody will be watching, and must
+   not be stopped from closing what is already open.
 5. If halted, return; entries stop here.
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
@@ -2836,6 +2891,35 @@ Fixed ordering; each step completes before the next begins:
 Steps 3 and 4 running before step 5 is what implements the brief's
 halt-blocks-entries-only rule, and their order is binding.
 
+**Scheduling is "due and not yet done", recorded in the database (v1.45).**
+Every periodic job — rollover, backup, weekly report, schedule refresh,
+heartbeat — asks `db.job_runs.has_run(job, period_key)` and records completion
+with `mark_run`. Two defects go with that change (#27):
+
+- **Exact-hour matching is gone.** The weekly report fired only if the loop
+  observed an instant inside the 12:00–12:59 MSK hour on a Sunday. A process
+  down, restarting, or backing off through that hour skipped the week entirely,
+  with no report, no alert and no record — against acceptance criterion 9. It is
+  now due from 12:00 MSK Sunday onward and runs the moment the process is up. A
+  report delivered at 14:00 after a restart is strictly better than none.
+- **Schedule state survives restarts.** It lived in module globals, so every
+  restart re-armed every job. Three restarts in a day produced three heartbeats
+  and could repeat a rollover; a restart through the report hour lost the week.
+  Restarts are routine — six in one evening during the #45 work — so this is the
+  ordinary case, not an edge one.
+
+**Not every latch moves.** `_first_cycle_at` stays process-local and must: it
+means "was *this process* running when the session opened", which is exactly
+what decides whether the day's opening snapshot may be written (step 4).
+Persisting it would let a restarted process claim an origin it did not have. The
+alert latches stay process-local too — they suppress repetition within a run,
+and a restart is a reasonable moment to speak up again.
+
+**There is no separate "overdue" alert**, because due-and-not-yet-done removes
+the condition it would guard: a job is no longer skipped, only run late. The
+weekly report carries its own timestamp, so lateness is visible in the artefact
+rather than in a second alert with a threshold nobody chose.
+
 **`async run(ctx) → None`** — **the sole owner of composition.** Every
 long-running task in the system is started here and nowhere else, and this list
 is exhaustive:
@@ -2864,6 +2948,18 @@ restarted with backoff. A failure in one task must never terminate another.
 ### `zarabot/app/shutdown.py`
 
 **`async shutdown(ctx, signal) → None`**
+- **Stops entries before it drains, and now actually does (v1.45).** It calls
+  `app.loops.stop_entries()` first, then settles. This contract and the
+  function's own docstring both claimed it stopped accepting new signals, and
+  nothing implemented that half: `shutdown` ran as a task *concurrently with*
+  `run`, and the runner was cancelled only after the drain returned, so for the
+  whole thirty-second window the trading loop kept cycling and could open a
+  position the drain had already looked past (#21).
+- The flag is process-local and deliberately does **not** persist: a restarted
+  process must accept entries again. It is the one piece of loop state that
+  would be wrong to keep in `db.job_runs`.
+- Exits are unaffected. A cycle already past the entry check completes and its
+  order is drained; the flag closes the window before the *next* entry.
 - Stops accepting new signals, waits for in-flight submissions to reach a known
   state or a bounded timeout, settles what it can, records state, calls
   `db.connection.disconnect()` and `broker.client.close()`, and exits. Closing the
@@ -3025,6 +3121,24 @@ explicit UTC offset. Booleans are `INTEGER` 0 or 1.
 - `stop_price` and `target_price` are frozen at entry. Changing `STOP_LOSS_PCT`
   in configuration must never move the stop of an already-open position.
 - Rows are never deleted.
+
+### `job_runs`
+
+When each periodic job last completed, per period. Owned by `db.job_runs`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `job` | TEXT | Part of the primary key. `rollover`, `backup`, `weekly_report`, `schedule_refresh`, `heartbeat` |
+| `period_key` | TEXT | Part of the primary key. A Moscow date for a daily job, a week-start date for the weekly report |
+| `ran_at` | TEXT NOT NULL | UTC. The moment the job **first** completed for that period |
+
+**Invariants.**
+- Primary key `(job, period_key)`. A second completion for the same period keeps
+  the first `ran_at`: when it first ran is the fact worth having.
+- Rows are never deleted. Growth is a handful of rows a day.
+- It exists because this state was process-local, so every restart re-armed
+  every job — three restarts in a day meant three heartbeats, and a restart
+  through the report hour lost the week silently (#27).
 
 ### `trading_days`
 
@@ -3217,6 +3331,8 @@ historical record is the purpose of the project. Backups are retained 30 days.
   constraint. It is a separate migration rather than an edit to `001` because
   `001` has been applied — in tests, and potentially on a developer machine — and
   the forward-only rule holds without exception.
+- `007_job_runs.sql` creates `job_runs`. Empty at first, which simply means
+  every job is due once after the migration — correct, not a gap.
 - `006_trading_days.sql` creates `trading_days`. It holds no history at first,
   and that is correct rather than a gap to backfill: there is nowhere to backfill
   *from*, since the broker will not serve a past schedule at all. The table fills
