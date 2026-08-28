@@ -18,6 +18,7 @@ from zarabot.db.orders import (
     get,
     list_missing_commission,
     list_unresolved,
+    mark_commission_alerted,
     record_commission,
     record_submitting,
     settle,
@@ -152,6 +153,59 @@ async def test_record_commission_clears_missing_list(db: Path) -> None:
     updated = await record_commission(KEY, Decimal("1.25"))
     assert updated.commission == Decimal("1.25")
     assert await list_missing_commission(since, until) == []
+
+
+async def test_settle_records_the_brokers_own_id(db: Path) -> None:
+    """The local key is a UUID the broker never saw for a row describing an
+    execution the exchange performed; without its own id the row can never be
+    re-queried (#8)."""
+    await record_submitting(KEY, "SBER", Side.SELL, 2, "EXIT", ExitTrigger.STOP_LOSS)
+    settled = await settle(
+        KEY, OrderStatus.FILLED, 2, Decimal("95"), None, "stop executed", "exch-77"
+    )
+    assert settled.broker_order_id == "exch-77"
+    reloaded = await get(KEY)
+    assert reloaded is not None
+    assert reloaded.broker_order_id == "exch-77"
+
+
+async def test_settle_without_a_broker_id_leaves_it_none(db: Path) -> None:
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    settled = await settle(
+        KEY, OrderStatus.FILLED, 2, Decimal("100"), Decimal("1"), None
+    )
+    assert settled.broker_order_id is None
+
+
+async def test_mark_commission_alerted_keeps_the_first_moment(db: Path) -> None:
+    """The fact worth keeping is when the owner was first told, not when the
+    condition was last considered."""
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    await settle(KEY, OrderStatus.FILLED, 2, Decimal("100"), None, None)
+    first = await mark_commission_alerted(KEY, NOW)
+    assert first.commission_alerted_at == NOW
+    later = await mark_commission_alerted(KEY, NOW + timedelta(days=1))
+    assert later.commission_alerted_at == NOW
+
+
+async def test_mark_commission_alerted_rejects_absent_and_naive(db: Path) -> None:
+    with pytest.raises(OrderStateError):
+        await mark_commission_alerted("no-such-key", NOW)
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    await settle(KEY, OrderStatus.FILLED, 2, Decimal("100"), None, None)
+    with pytest.raises(ValueError):
+        await mark_commission_alerted(KEY, datetime(2026, 3, 16, 10, 0))
+
+
+async def test_alerted_row_is_still_listed_as_missing(db: Path) -> None:
+    """The terminal state stops the telling, not the trying: a commission that
+    finally lands is still worth writing."""
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    await settle(KEY, OrderStatus.FILLED, 2, Decimal("100"), None, None)
+    await mark_commission_alerted(KEY, NOW)
+    since = NOW - timedelta(days=1)
+    until = NOW + timedelta(days=1)
+    assert [order.key for order in await list_missing_commission(since, until)] == [KEY]
 
 
 async def test_get_returns_order_or_none(db: Path) -> None:

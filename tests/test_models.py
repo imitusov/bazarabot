@@ -147,6 +147,21 @@ def _operation(**overrides: object) -> OperationRecord:
     return OperationRecord(**fields)  # type: ignore[arg-type]
 
 
+def test_order_carries_a_broker_id_and_an_alerted_marker() -> None:
+    """A row describing an execution the exchange performed is filed under a key
+    the broker has never seen, so it needs the broker's own id to be re-queryable
+    and a marker so its alert can terminate (#8)."""
+    order = _order(
+        broker_order_id="exch-1",
+        commission_alerted_at=AWARE,
+    )
+    assert order.broker_order_id == "exch-1"
+    assert order.commission_alerted_at == AWARE
+    plain = _order()
+    assert plain.broker_order_id is None
+    assert plain.commission_alerted_at is None
+
+
 def test_operation_carries_the_brokers_own_type_and_state() -> None:
     """A sale used to be identifiable only by the sign of `payment`, and a fee
     only by a substring of a name the dataclass did not expose (#11)."""
