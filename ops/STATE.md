@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-28 · spec v1.40 · brief v1.11 · 16 open issues
+Updated: 2026-08-28 · spec v1.42 · brief v1.11 · 17 open issues
 
 ## What this is
 
@@ -288,6 +288,35 @@ calendar `app.loops` actually holds contain those days?* **A test that
 constructs its own fixture cannot discover that production builds a different
 one.** That is a sixth failure class, and it is the one that hid an exit trigger
 that has never worked.
+
+## I broke production tonight, and it took two minutes to find because I deployed
+
+The #45 fix — a backward calendar window — was implemented test-first, passed
+every gate, and **aborted startup on the first real request**:
+`TradingSchedules INVALID_ARGUMENT 30003`. Rolled back to `b1a1e6d` inside two
+minutes; the bot is healthy. Reverted on main, and #45 is open again.
+
+**The broker serves no trading schedule for any date before today.** Measured
+across seven ranges — 14 days back, 7, 1, every end date. All rejected; only a
+range starting at today's midnight is served. In §2.1 now, beside #39 and #43.
+
+Three things worth keeping from it:
+
+1. **The tests mock the broker, so a function that cannot work passed the very
+   §3.2 case written to close the seam.** Same shape as #39 and #43. The lesson
+   was already written in this file and I walked into it anyway: the assumption
+   the whole design rests on is the one to check against the account *first*,
+   before writing the tests that will agree with it.
+2. **Deploying is what found it.** Nothing in the local toolchain could have.
+   That is the third time production answered a question inspection could not.
+3. **The revert was the right move, not a patch.** The design was wrong, not its
+   parameters — no range works — so there was nothing to tune.
+
+What remains for #45: the forward window fetched on day N covers N..N+14, so the
+union of fetches already being made covers any span a position can be open. The
+data is being discarded, not missing. Keeping it needs either a small table and
+repository, or a switch to calendar-day counting — the second changes what
+`MAX_HOLDING_DAYS=3` means, so it is the owner's call.
 
 ## Failure classes that keep recurring
 
