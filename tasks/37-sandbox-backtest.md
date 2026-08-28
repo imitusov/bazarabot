@@ -28,15 +28,80 @@ Module **37** of 40 in `dependency-order.md`. Everything before it is complete a
   the missing span, never by refetching the whole range.
 - Must never be imported by `zarabot/`.
 
-**`backtest.run(strategy, candles, config, commission, slippage) → BacktestResult`**
-- Replays candles in order, calling the **same** `strategies`, `risk.sizing` and
-  `lifecycle.exits` functions the live path uses. Reimplementing any of them here
-  is a critical defect: it makes every backtest unfalsifiable.
-- A strategy is never passed a candle timestamped at or after the decision
-  instant.
-- Applies commission and the configured slippage assumption to every fill.
-- Returns trades, P&L, win rate, maximum drawdown, exit-trigger distribution, and
-  the buy-and-hold benchmark.
+**`sandbox/exchange.py` — a simulated broker (v1.46)**
+
+A double for every function of `broker.client` the trading cycle calls, backed
+by historical bars. It is the piece that makes a backtest mean something,
+because with it the simulation does not *resemble* the live path — it **is** the
+live path, with only the broker and the clock replaced.
+
+- **`SimulatedExchange(bars, instruments, cash, slippage, commission)`** holds
+  simulated cash, holdings, submitted orders and standing stop orders, and a
+  cursor into the bars. `advance(moment)` moves the cursor and settles anything
+  the newly-visible bar triggers.
+- It exposes `get_candles`, `get_last_price`, `get_instrument`, `get_portfolio`,
+  `get_max_lots`, `get_order_state`, `post_market_order`, `post_stop_loss`,
+  `cancel_stop_order`, `cancel_order`, `list_stop_orders`,
+  `get_executed_stop_fills` and `get_trading_schedule` with the signatures and
+  the failure types `interfaces.md` records for the real ones. Where the real
+  module raises, this raises the same exception.
+- **`market.session` is driven, not stubbed.** The simulator answers
+  `get_trading_schedule`, and the real `refresh` / `is_open` / `calendar` /
+  `covers` run on top. A backtest that stubbed those would not exercise the
+  code that decides whether the market is open, which is where #39 and #43
+  lived.
+
+**Fill model.** The four rules below are where a backtest is honest or is not:
+
+1. **Decide at a bar's close, fill at the next bar's open.** A strategy sees
+   bars up to and including the one just closed, and any order it produces fills
+   on the next. This removes look-ahead completely. It is *conservative relative
+   to live*, which polls intra-day and can act within the bar — that gap is #13,
+   and it is now a measurable difference rather than a hidden one.
+2. **Stops are checked against the bar's low, take-profits against its high.**
+   Checking the close, as the old code did, means a day that traded 8% down
+   intraday and closed at −1% never triggers a 5% stop — while the exchange stop
+   fires on the intraday print. Backtested stop-hit rates were systematically
+   optimistic, which is the worst direction for them to be wrong in.
+3. **A gapped open fills worse than the trigger.** A sell stop fills at
+   `min(stop_price, bar.open)`; a take-profit at `max(target, bar.open)`. The
+   exchange cannot fill at a price the market never traded at.
+4. **When one bar touches both the stop and the target, the stop wins.** Daily
+   bars cannot say which came first, and the pessimistic reading is the only one
+   that cannot flatter the result.
+
+**Commission is the broker's tariff, not a flat fee** — a percentage of turnover
+with a minimum, applied per fill. The old flat figure was also applied twice to
+one round trip.
+
+**`async backtest.run(bars, config, strategies, commission, slippage) → BacktestResult`**
+- **Drives `app.loops.trading_cycle` itself**, once per bar, against a temporary
+  database with the migrations applied and a `SimulatedExchange` in place of
+  `broker.client`. Live and backtest cannot diverge, because they are the same
+  code: the gate, the sizing, the exits, the cooldowns, the halt, the
+  duplicate-ticker rule and the portfolio-exposure ceiling are all the live ones,
+  reached the way live reaches them.
+- This replaces a module that imported `strategies`, `risk.sizing` and
+  `lifecycle.exits` but **not `risk.gate`** — obeying "never reimplement" while
+  omitting the gate entirely, so that cooldowns, `max_open_positions`,
+  duplicate-ticker rejection, halt and session state played no part in any
+  result. An omission reads as compliance, which is why it survived (#12).
+- Runs the **whole watchlist** with concurrent positions against one shared cash
+  balance. One ticker and one position modelled away capital contention,
+  correlation and portfolio drawdown — the three things a portfolio-level risk
+  answer depends on.
+- **Equity is marked to market on every bar.** `max_drawdown` came from the cash
+  balance, appended only on trade events; cash *falls* when you buy, so the
+  reported figure was approximately the position size and meant nothing.
+- Returns trades, P&L, win rate, maximum drawdown, exit-trigger distribution and
+  the buy-and-hold benchmark, as before.
+
+**What this costs, stated plainly.** The simulator is a second implementation of
+the *exchange*, and it can be wrong in ways that flatter or punish a strategy
+without either being detectable from the result. It is not a substitute for the
+verification suite against the live account: it answers "what would this strategy
+have done", never "does the broker behave as we think". Those are different
+questions and #44 is still the other one.
 
 **`fit(candles_by_ticker: dict[str, list[Candle]], horizon_days: int, folds: int, seed: int) → FittedModel`**
 - Trains a buy/no-buy classifier. The label is whether the take-profit level is
@@ -68,6 +133,20 @@ would catch it — the names would still match.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
+- The result is produced by running `app.loops.trading_cycle`, and a run with
+  the gate rejecting everything opens no position (proves the gate is in the
+  path at all — it was absent entirely, and its absence read as compliance with
+  the no-reimplementation rule).
+- A cooldown, a `MAX_POSITIONS` limit and a duplicate ticker each block an entry
+  in the backtest exactly as live (proves the whole gate, not a re-derived
+  subset).
+- Two simultaneous signals with cash for only one → the second is rejected
+  (proves capital contention is modelled, which one ticker and one position made
+  impossible).
+- `max_drawdown` reflects an open position moving against the book, on a run
+  with no closed trades at all (proves equity is marked to market rather than
+  read off the cash balance, where the number was approximately the position
+  size).
 - A backtest over a known price series produces the hand-computed trade sequence
   (proves the engine is correct against a worked example).
 - The backtester and the live path produce identical decisions for identical
