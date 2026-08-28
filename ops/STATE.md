@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-28 · spec v1.42 · brief v1.11 · 17 open issues
+Updated: 2026-08-28 · spec v1.44 · brief v1.11 · 15 open issues
 
 ## What this is
 
@@ -317,6 +317,33 @@ union of fetches already being made covers any span a position can be open. The
 data is being discarded, not missing. Keeping it needs either a small table and
 repository, or a switch to calendar-day counting — the second changes what
 `MAX_HOLDING_DAYS=3` means, so it is the owner's call.
+
+## #45 fixed on the second attempt, by remembering instead of asking
+
+The broker serves no schedule before today, so the past is now **recorded**:
+every `refresh` writes its whole window to `db.trading_days`, and `calendar()`
+unions that history with the live cache. Verified end to end through the real
+wiring — 7 trading days where the same query returned 1.
+
+The property that makes it work is that the window is **fourteen days wide, not
+one**: a single run records the next fortnight, so a bot that ran any time in
+the last fortnight has every day since on disk, including days it was off for.
+
+**The design deliberately adds no new broker assumption.** That is the whole
+difference from the attempt that broke production: the only fetch is the one
+already verified against the account, and everything new is a local table that
+tests can actually exercise. When a design needs a fact about the broker that
+has not been measured, measure it *first* — before writing the tests that will
+agree with the guess.
+
+Where it can still fail — an outage longer than the window — it is loud:
+`covers` reports it, `app.loops` passes `trading_days_open=None`, and
+`lifecycle.exits` suppresses `MAX_AGE` for that position alone. A short count
+reads as a young position; `None` cannot be mistaken for a measurement.
+
+Also worth keeping: `market.session`'s tests now run against a **real**
+`db.trading_days` on a temp file database, not a stub. Stubbing that seam is how
+the original defect survived, and failure class 6 says so.
 
 ## Failure classes that keep recurring
 
