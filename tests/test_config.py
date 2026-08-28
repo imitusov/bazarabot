@@ -277,19 +277,6 @@ def test_price_max_move_pct_out_of_range_raises(
         load()
 
 
-def test_max_holding_days_above_the_calendar_horizon_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A limit the calendar cannot measure fails silently: the count comes back
-    short and MAX_AGE simply does not fire, which is #45 in a new place. The
-    broker serves 14 days at a time and 14 calendar days hold 10 weekdays."""
-    _env(monkeypatch, {"MAX_HOLDING_DAYS": "9"})
-    with pytest.raises(ConfigError, match="MAX_HOLDING_DAYS"):
-        load()
-    _env(monkeypatch, {"MAX_HOLDING_DAYS": "8"})
-    assert load().max_holding_days == 8
-
-
 def test_cash_reserve_pct_defaults_to_1(monkeypatch: pytest.MonkeyPatch) -> None:
     _env(monkeypatch)
     assert load().cash_reserve_pct == Decimal("1")

@@ -157,22 +157,6 @@ consecutive-failure alert and is retried as though waiting would help.
   contract to amend, and V10's recorded SDK version is what makes the change
   visible.
 
-**`async get_past_trading_schedule(days: int) → list[SessionInfo]`**
-- The `days` days **ending** at the start of the current UTC day, in order.
-  Same 14-day ceiling and the same `ValueError` above it, for the same reason:
-  the broker measures the horizon from the start of the day of `from_` and
-  rejects a longer one with `INVALID_ARGUMENT` / 30002 (#39).
-- Added in v1.41 because `get_trading_schedule` looks **forward**, which is
-  right for "is the market open" and wrong for "how long has this position been
-  held". `clock.trading_days_between` counts only dates the calendar contains,
-  so every day between a position's entry and yesterday fell outside it,
-  `trading_days_open` was capped at 1, and the `MAX_AGE` exit could never fire
-  (#45). Measured before the fix: 1 counted against 7 actual.
-- It is a separate function rather than a flag on `get_trading_schedule`,
-  because that function's anchoring is the one thing in this module verified
-  against the live account, and the two windows answer different questions.
-  Both compose the same private range call.
-
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 - Submits a market order using `key` as the broker-side idempotency key.
 - Raises `OrderRejected` carrying the broker's reason, `BrokerUnavailable`, or
@@ -369,10 +353,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-- `get_past_trading_schedule` requests a range **ending** at the start of the
-  current UTC day, and refuses more than 14 days with the same `ValueError` as
-  its forward sibling (proves both windows respect the horizon the broker
-  actually enforces).
 - Each method returns the documented domain type given a scripted broker
   response (happy path per method).
 - A transport error raises `BrokerUnavailable` (proves transport failures are

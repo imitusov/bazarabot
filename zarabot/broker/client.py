@@ -536,27 +536,18 @@ def _session_from_day(day: object) -> SessionInfo:
     return SessionInfo(start=start, end=end, is_trading_day=True)
 
 
-def _day_start() -> datetime:
-    """Midnight of the current UTC day.
-
-    The broker measures the calendar horizon from the start of the day of
-    `from_`, never from the instant of the call (#39), so every schedule range
-    is anchored here.
-    """
-    return (
-        clock.now().astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    )
-
-
-def _check_horizon(days: int) -> None:
+async def get_trading_schedule(days: int) -> list[SessionInfo]:
     if days > _MAX_SCHEDULE_DAYS:
         raise ValueError(
             f"days must not exceed {_MAX_SCHEDULE_DAYS}; the broker rejects a "
             "longer horizon with INVALID_ARGUMENT / 30002"
         )
-
-
-async def _schedule_range(start: datetime, until: datetime) -> list[SessionInfo]:
+    # Anchored to the start of the current UTC day, because the broker measures
+    # the horizon from there and not from the instant of the call (#39).
+    start = (
+        clock.now().astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    until = start + timedelta(days=days)
     conn = await _connect()
     try:
         response = await conn.services.instruments.trading_schedules(
@@ -570,27 +561,6 @@ async def _schedule_range(start: datetime, until: datetime) -> list[SessionInfo]
             continue
         sessions.extend(_session_from_day(day) for day in exchange.days)
     return sessions
-
-
-async def get_trading_schedule(days: int) -> list[SessionInfo]:
-    """The next `days` days, from the start of the current UTC day."""
-    _check_horizon(days)
-    start = _day_start()
-    return await _schedule_range(start, start + timedelta(days=days))
-
-
-async def get_past_trading_schedule(days: int) -> list[SessionInfo]:
-    """The `days` days ENDING at the start of the current UTC day.
-
-    `get_trading_schedule` looks forward, which is right for "is the market
-    open" and wrong for "how long has this position been held":
-    `clock.trading_days_between` counts only dates the calendar contains, so
-    every day between an entry and yesterday fell outside it and
-    `trading_days_open` was capped at 1 (#45).
-    """
-    _check_horizon(days)
-    until = _day_start()
-    return await _schedule_range(until - timedelta(days=days), until)
 
 
 def _order_record(

@@ -17,10 +17,7 @@ Module **22** of 40 in `dependency-order.md`. Everything before it is complete a
 ### `zarabot/market/session.py`
 
 **`async refresh(days: int) → None`**
-- Caches the schedule — **both windows** since v1.41, forward through
-  `get_trading_schedule` and backward through `get_past_trading_schedule`.
-  Called at startup and once per trading day, so this is two broker calls a
-  day, not two a cycle.
+- Caches the schedule. Called at startup and once per trading day.
 - **The unavailability latch is cleared on the success path**, next to the cache
   write (v1.40). It was set on the first failure and never cleared, so a schedule
   that went unavailable, recovered, and went unavailable again produced silence
@@ -76,15 +73,6 @@ is the failure this cadence exists to prevent.
 - The cached schedule as a `TradingCalendar`, for callers that need to count
   trading days rather than ask whether a moment is inside a session. Empty
   calendar when the cache is empty; never `None`.
-- **It spans backwards as well as forwards (v1.41).** `refresh` fetches both
-  windows and this returns their union, oldest first, because the question it
-  serves — how many trading days a position has been open — is asked about the
-  past, and the forward window contains none of it (#45). The session questions
-  below read only the forward cache; nothing about them changes.
-- A failed backward fetch leaves the backward cache as it was and alerts under
-  rule 10, exactly like the forward one. It does not stop `refresh` storing a
-  forward window that did arrive: whether the market is open is the more urgent
-  of the two questions, and one answer is better than none.
 - Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
   minute** for data that changes at most daily and that this module already
   holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
@@ -116,14 +104,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-- `calendar()` after a refresh contains days **before** today as well as after
-  (proves the union — the forward-only window is why `MAX_AGE` could never fire).
-- A position entered 7 trading days ago reports 7 from
-  `clock.trading_days_between` against the calendar `refresh` actually builds,
-  not one the test constructed to span the query (proves the seam, which is
-  where #45 lived while both sides passed their own tests).
-- A backward fetch that fails leaves the forward cache populated and alerts
-  (proves the more urgent question still gets an answer).
 - A refresh that fails, then succeeds, then fails again alerts **twice** (proves
   the latch is per incident: it was set once and never cleared, so every outage
   after the first was silent from this module for the life of the process).

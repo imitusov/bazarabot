@@ -43,7 +43,6 @@ from zarabot.broker.client import (
     get_operations,
     get_order_state,
     get_order_state_by_broker_id,
-    get_past_trading_schedule,
     get_portfolio,
     get_trading_schedule,
     list_stop_orders,
@@ -682,21 +681,6 @@ async def test_get_order_state_by_broker_id_not_found(capture: _Capture) -> None
     capture.fail = AioRequestError(StatusCode.NOT_FOUND, "no such order", None)
     with pytest.raises(OrderNotFound):
         await get_order_state_by_broker_id("exch-77")
-
-
-async def test_past_schedule_ends_at_the_start_of_today(capture: _Capture) -> None:
-    """get_trading_schedule looks forward, which is right for "is the market
-    open" and wrong for "how long has this been held" (#45)."""
-    await get_past_trading_schedule(SCHEDULE_DAYS)
-    requested = capture.kwargs_for("trading_schedules")[-1]
-    assert requested["to"] == MIDNIGHT
-    assert requested["from_"] == MIDNIGHT - timedelta(days=SCHEDULE_DAYS)
-    assert requested["exchange"] == "MOEX"
-
-
-async def test_past_schedule_refuses_a_longer_horizon(capture: _Capture) -> None:
-    with pytest.raises(ValueError, match="14"):
-        await get_past_trading_schedule(SCHEDULE_DAYS + 1)
 
 
 async def test_get_max_lots_returns_int(capture: _Capture) -> None:

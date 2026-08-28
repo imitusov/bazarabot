@@ -113,9 +113,6 @@ Loads and validates every setting once at startup. Tokens never appear in
 **`ConfigError`**
 Raised when a required variable is missing or empty, a numeric value is out of
 range, or a cross-field rule fails. The message names the offending variable.
-`MAX_HOLDING_DAYS` is capped at 8 — the broker serves 14 days of calendar at a
-time, and a limit the calendar cannot measure would make `MAX_AGE` silently
-never fire (#45).
 
 **`Config`** (frozen)
 `tinvest_token: str`, `tinvest_account_id: str`, `trading_mode: str`,
@@ -626,11 +623,6 @@ order. A day that is not a session — `is_trading_day` false, or `1970-01-01`
 timestamps whatever the flag says — comes back as
 `SessionInfo(start=None, end=None, is_trading_day=False)`. Empty list when the
 exchange is absent from the response.
-**`async get_past_trading_schedule(days: int) → list[SessionInfo]`**
-The `days` days **ending** at the start of the current UTC day, same MOEX board
-and same 14-day `ValueError` as the forward one. Exists because
-`get_trading_schedule` looks forward, so counting a position's age against it
-found nothing before today and `MAX_AGE` could never fire (#45).
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 `confirm_margin_trade=False`. Raises `OrderRejected`. `commission` is
 `executed_commission` converted with `money_to_decimal`, or `None` until filled.
@@ -684,19 +676,15 @@ Cached broker calendar. Closed when the schedule is missing. Never hardcodes
 weekdays.
 
 **`async refresh(days: int) → None`**
-Loads **both** windows — `broker.client.get_trading_schedule` forward and
-`get_past_trading_schedule` backward. Unavailable broker, or a response with no
-trading sessions, leaves that cache intact, logs WARNING, and alerts once
-(rule 10); a failed backward fetch does not discard a forward window that did
-arrive. The latch is cleared on the success path, so "once" is per incident
-rather than per process (#32). Does not raise.
+Loads `broker.client.get_trading_schedule`. Unavailable broker, or a response
+with no trading sessions, leaves any existing cache intact, logs WARNING, and
+alerts once (rule 10). The latch is cleared on the success path, so "once" is
+per incident rather than per process (#32). Does not raise.
 
 **`calendar() → TradingCalendar`**
-Both cached windows merged, oldest first, for callers counting trading days.
-Empty calendar when both caches are; never `None`. `app.loops` reads this
-instead of fetching a fourteen-day schedule every cycle (#19), and it spans the
-past because counting a position's age against a forward-only window found
-nothing before today (#45).
+The cached schedule, for callers counting trading days. Empty calendar when the
+cache is empty; never `None`. `app.loops` reads this instead of fetching a
+fourteen-day schedule every cycle (#19).
 
 **`is_open(now: datetime) → bool`**
 True iff `now` is in a trading session, inclusive of `start`, exclusive of

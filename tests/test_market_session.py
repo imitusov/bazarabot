@@ -44,7 +44,6 @@ def _holiday() -> SessionInfo:
 @pytest.fixture(autouse=True)
 def _reset_cache(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     session_mod._cache = None
-    session_mod._past_cache = None
     session_mod._alerted = False
     alerts: list[str] = []
 
@@ -62,11 +61,7 @@ async def schedule(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake(days: int) -> list[SessionInfo]:
         return sessions[:days] if days < len(sessions) else sessions
 
-    async def _past(days: int) -> list[SessionInfo]:
-        return []
-
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fake)
-    monkeypatch.setattr("zarabot.market.session.get_past_trading_schedule", _past)
     await refresh(7)
 
 
@@ -137,11 +132,7 @@ async def test_rollover_refresh_clears_cache_exhausted(
     async def _first(days: int) -> list[SessionInfo]:
         return [_weekday()]
 
-    async def _past(days: int) -> list[SessionInfo]:
-        return [_weekday()]
-
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _first)
-    monkeypatch.setattr("zarabot.market.session.get_past_trading_schedule", _past)
     await refresh(7)
     past_last = CLOSE + timedelta(hours=1)
     assert cache_exhausted(past_last) is True
@@ -205,7 +196,6 @@ async def test_a_second_outage_alerts_again(
         return sessions
 
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
-    monkeypatch.setattr("zarabot.market.session.get_past_trading_schedule", _fetch)
     await refresh(7)
     assert len(_reset_cache) == 1
     failing = False
@@ -214,92 +204,6 @@ async def test_a_second_outage_alerts_again(
     failing = True
     await refresh(7)
     assert len(_reset_cache) == 2
-
-
-def _past_weekday(day: int) -> SessionInfo:
-    """A trading day BEFORE the forward window starts."""
-    base = datetime(2026, 3, day, tzinfo=UTC)
-    return SessionInfo(
-        start=base.replace(hour=6, minute=50),
-        end=base.replace(hour=15, minute=50),
-        is_trading_day=True,
-    )
-
-
-async def test_calendar_spans_backwards_as_well_as_forwards(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The forward-only window is why MAX_AGE could never fire (#45)."""
-
-    async def _forward(days: int) -> list[SessionInfo]:
-        return [_weekday()]
-
-    async def _past(days: int) -> list[SessionInfo]:
-        return [_past_weekday(11), _past_weekday(12), _past_weekday(13)]
-
-    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _forward)
-    monkeypatch.setattr("zarabot.market.session.get_past_trading_schedule", _past)
-    await refresh(7)
-
-    dates = [s.start.date() for s in calendar().sessions if s.start is not None]
-    assert dates == sorted(dates), "oldest first"
-    assert min(dates) < datetime(2026, 3, 16, tzinfo=UTC).date()
-    assert max(dates) == datetime(2026, 3, 16, tzinfo=UTC).date()
-
-
-async def test_a_weeks_old_position_counts_its_trading_days(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Against the calendar `refresh` actually builds, not one constructed to
-    span the query — that seam is where #45 lived while both sides passed.
-    """
-    from zarabot.clock import trading_days_between
-
-    # 2-16 March 2026: the 16th is a Monday, so the 9th is the Monday before.
-    def _day(n: int) -> SessionInfo:
-        base = datetime(2026, 3, n, tzinfo=UTC)
-        trading = base.weekday() < 5
-        return SessionInfo(
-            start=base.replace(hour=6, minute=50) if trading else None,
-            end=base.replace(hour=15, minute=50) if trading else None,
-            is_trading_day=trading,
-        )
-
-    async def _forward(days: int) -> list[SessionInfo]:
-        return [_day(n) for n in range(16, 21)]
-
-    async def _past(days: int) -> list[SessionInfo]:
-        return [_day(n) for n in range(2, 16)]
-
-    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _forward)
-    monkeypatch.setattr("zarabot.market.session.get_past_trading_schedule", _past)
-    await refresh(14)
-
-    entry = datetime(2026, 3, 5, 10, 0, tzinfo=UTC)  # Thursday
-    now = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)  # the Monday after next
-    # 6, 9, 10, 11, 12, 13, 16 March are weekdays -> 7 trading days.
-    assert trading_days_between(entry, now, calendar()) == 7
-
-
-async def test_a_failed_past_fetch_keeps_the_forward_window(
-    _reset_cache: list[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Whether the market is open is the more urgent of the two questions."""
-    from zarabot.broker.client import BrokerUnavailable
-
-    async def _forward(days: int) -> list[SessionInfo]:
-        return [_weekday()]
-
-    async def _past(days: int) -> list[SessionInfo]:
-        raise BrokerUnavailable("broker unavailable")
-
-    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _forward)
-    monkeypatch.setattr("zarabot.market.session.get_past_trading_schedule", _past)
-    await refresh(7)
-
-    assert is_open(INSIDE) is True
-    assert len(_reset_cache) == 1
 
 
 async def test_calendar_returns_the_cached_sessions(schedule: None) -> None:
