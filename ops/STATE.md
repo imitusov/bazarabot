@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-28 · spec v1.40 · brief v1.11 · 17 open issues
+Updated: 2026-08-28 · spec v1.40 · brief v1.11 · 16 open issues
 
 ## What this is
 
