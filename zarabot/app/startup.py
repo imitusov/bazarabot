@@ -51,7 +51,17 @@ _STOP_TYPES = frozenset(
 # Types reconciliation resolves itself. They need no remedy, but they are known,
 # so they must not be reported as an adjustment the executor cannot act on.
 _OBSERVED_TYPES = frozenset(
-    {"CLOSED_EXTERNALLY", "ADOPTED", "LOTS_ADJUSTED", "FOREIGN_HOLDING"}
+    {
+        "CLOSED_EXTERNALLY",
+        "ADOPTED",
+        "LOTS_ADJUSTED",
+        "FOREIGN_HOLDING",
+        # A position the broker no longer holds whose sale could not be found in
+        # the operations feed. The shares are already gone, so there is nothing
+        # for execution.orders to do; it is here so it does not trip the alert
+        # reserved for a report this build genuinely cannot read (#11).
+        "EXIT_UNRESOLVED",
+    }
 )
 
 

@@ -910,6 +910,10 @@ when Telegram credentials are present. Sleep-on-failure belongs to `__main__`.
 Wires `/report` to `reporter.weekly.build`. Applies stop remedies from
 reconciliation via `execution.orders` — every adjustment type the report can
 carry is handled, and an unrecognised one alerts rather than being dropped.
+`CLOSED_EXTERNALLY`, `ADOPTED`, `LOTS_ADJUSTED`, `FOREIGN_HOLDING` and
+`EXIT_UNRESOLVED` are recognised without a remedy; `EXIT_UNRESOLVED` in
+particular does not stop startup, since the shares it names are already gone
+(#11).
 
 **`StartupError`**
 Raised when startup aborts. No trading has begun.
