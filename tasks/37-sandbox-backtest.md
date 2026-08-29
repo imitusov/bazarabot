@@ -45,6 +45,20 @@ live path, with only the broker and the clock replaced.
   `get_executed_stop_fills` and `get_trading_schedule` with the signatures and
   the failure types `interfaces.md` records for the real ones. Where the real
   module raises, this raises the same exception.
+- **The seam table covers four kinds of escape, and the guard checks all
+  four (v1.48).** Broker, clock, configuration **and alerts**. It patched
+  `alert` in four modules while eleven import it, and `state.halt` — which
+  `trading_cycle` reaches on the daily loss limit — was not among them, so a
+  backtest run where credentials happen to be present sent real messages to the
+  owner (#49). `telegram.notifier.alert` is patched at its source as well as in
+  each importer, so a module that starts importing it later is covered by
+  default.
+- **A guard that covers one class of escape reads as covering all of them.**
+  The guard test asserted only that no broker call escaped, while describing
+  itself as proving the table complete. It now asserts, for a whole run, that
+  no real alert is sent, no unpatched clock is read and no configuration is
+  loaded from the environment. This is the same omission-reads-as-compliance
+  shape as the defect #12 was closed for, reproduced inside #12's own fix.
 - **`market.session` is driven, not stubbed.** The simulator answers
   `get_trading_schedule`, and the real `refresh` / `is_open` / `calendar` /
   `covers` run on top. A backtest that stubbed those would not exercise the
@@ -89,6 +103,15 @@ live path, with only the broker and the clock replaced.
 4. **When one bar touches both the stop and the target, the stop wins.** Daily
    bars cannot say which came first, and the pessimistic reading is the only one
    that cannot flatter the result.
+
+**The simulator refuses what the broker would refuse (v1.48).** A market buy
+whose turnover plus fee exceeds simulated cash raises `OrderRejected`, leaving
+cash and holdings untouched — as `broker.client` does, and as `get_max_lots`
+exists to make avoidable. It previously debited unconditionally, so cash went
+negative and the next `get_portfolio()` raised `ValueError: cash must not be
+negative` (#47). Beyond the crash: a simulator that funds any order cannot
+demonstrate that the gate and sizing keep the bot solvent, which is one of the
+things a backtest is for.
 
 **Commission is the broker's tariff, not a flat fee** — a percentage of turnover
 with a minimum, applied per fill. The old flat figure was also applied twice to
@@ -157,6 +180,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   the gate rejecting everything opens no position (proves the gate is in the
   path at all — it was absent entirely, and its absence read as compliance with
   the no-reimplementation rule).
+- A whole run sends no real alert, reads no unpatched clock and loads no
+  configuration from the environment (proves the guard covers every class of
+  escape the seam table covers, not only the broker — the omission that let a
+  backtest page the owner from a laptop).
 - A cooldown, a `MAX_POSITIONS` limit and a duplicate ticker each block an entry
   in the backtest exactly as live (proves the whole gate, not a re-derived
   subset).

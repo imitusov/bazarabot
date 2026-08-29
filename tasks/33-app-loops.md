@@ -120,11 +120,22 @@ Module **33** of 40 in `dependency-order.md`. Everything before it is complete a
 
 7b. **A position whose entry the recorded calendar does not reach is evaluated
    with `trading_days_open = None`, and the owner is alerted, latched (v1.44).**
-   `market.session.covers` answers the question; the alert is latched like every
-   other in this module, because the condition persists for as long as the
-   position does and one message is the difference between a channel the owner
-   reads and one they mute. Stop-loss and take-profit still evaluate normally —
-   only the age trigger is suppressed, and only for that position.
+   `market.session.covers` answers the question. Stop-loss and take-profit still
+   evaluate normally — only the age trigger is suppressed, and only for that
+   position.
+
+   **The latch re-arms when a cycle measures every open position (v1.48).** It
+   was set and never reset, so the alert fired once per process and a second
+   occurrence after recovery was silent — which is #32 exactly, reintroduced in
+   this module hours after #32 was closed for it. The condition is not
+   permanent: it clears as soon as the recorded calendar reaches back far
+   enough, which after an outage is the next refresh.
+
+   It takes the shape of `_prices_for`'s rejection latch, deliberately: one alert
+   when a cycle first cannot measure an age, **naming the count**, and none until
+   a cycle measures them all. Re-arming per position would let one covered
+   position clear a latch while an uncovered one is still suppressed, so the
+   whole cycle is the unit.
 
 8. The calendar handed to `lifecycle.exits` comes from `market.session.calendar()`
    (v1.40), never from a fetch of this module's own. It fetched a fourteen-day

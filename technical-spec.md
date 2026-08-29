@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.47
+**Version:** 1.48
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -822,6 +822,13 @@ Additionally, `strategies.ml_model`:
   returns `STOP_LOSS` and `TAKE_PROFIT` normally (proves an unmeasured age
   suppresses exactly one trigger, and that a short count can no longer read as a
   young position — the silent shape of #45).
+- An unmeasurable age alerts once naming the count, stays silent on a second
+  such cycle, and alerts **again** after a cycle in which every position was
+  measurable (proves the latch re-arms per incident — it fired once per process,
+  which is #32 in a second module).
+- A cycle with one measurable and one unmeasurable position does not re-arm the
+  latch (proves the whole cycle is the unit, so one covered position cannot
+  clear a warning another still needs).
 - A `LOCAL` position returns `STOP_LOSS` from `lifecycle.exits`; an `EXCHANGE`
   position never does (proves the trigger has exactly one owner — the test that
   prevents selling a position twice).
@@ -1101,6 +1108,11 @@ Additionally, on exits booked from an exchange stop:
   (proves the exchange cannot fill where the market never traded).
 - A bar touching both stop and target books the **stop** (proves the pessimistic
   tie-break, which daily bars cannot resolve any other way).
+- A buy for more than the simulated cash raises `OrderRejected` and leaves cash
+  and holdings unchanged (proves the double refuses what the broker refuses, and
+  that a backtest cannot fund a position the account could not).
+- `get_portfolio()` returns without raising after any sequence of fills (proves
+  the negative-cash crash is closed at its cause rather than at its symptom).
 - Commission is a percentage of turnover with a minimum, charged once per fill
   (proves the tariff shape, and that a round trip is not charged twice for one
   leg).
@@ -1114,6 +1126,10 @@ Additionally, on exits booked from an exchange stop:
   the gate rejecting everything opens no position (proves the gate is in the
   path at all — it was absent entirely, and its absence read as compliance with
   the no-reimplementation rule).
+- A whole run sends no real alert, reads no unpatched clock and loads no
+  configuration from the environment (proves the guard covers every class of
+  escape the seam table covers, not only the broker — the omission that let a
+  backtest page the owner from a laptop).
 - A cooldown, a `MAX_POSITIONS` limit and a duplicate ticker each block an entry
   in the backtest exactly as live (proves the whole gate, not a re-derived
   subset).
@@ -2915,11 +2931,22 @@ Fixed ordering; each step completes before the next begins:
 
 7b. **A position whose entry the recorded calendar does not reach is evaluated
    with `trading_days_open = None`, and the owner is alerted, latched (v1.44).**
-   `market.session.covers` answers the question; the alert is latched like every
-   other in this module, because the condition persists for as long as the
-   position does and one message is the difference between a channel the owner
-   reads and one they mute. Stop-loss and take-profit still evaluate normally —
-   only the age trigger is suppressed, and only for that position.
+   `market.session.covers` answers the question. Stop-loss and take-profit still
+   evaluate normally — only the age trigger is suppressed, and only for that
+   position.
+
+   **The latch re-arms when a cycle measures every open position (v1.48).** It
+   was set and never reset, so the alert fired once per process and a second
+   occurrence after recovery was silent — which is #32 exactly, reintroduced in
+   this module hours after #32 was closed for it. The condition is not
+   permanent: it clears as soon as the recorded calendar reaches back far
+   enough, which after an outage is the next refresh.
+
+   It takes the shape of `_prices_for`'s rejection latch, deliberately: one alert
+   when a cycle first cannot measure an age, **naming the count**, and none until
+   a cycle measures them all. Re-arming per position would let one covered
+   position clear a latch while an uncovered one is still suppressed, so the
+   whole cycle is the unit.
 
 8. The calendar handed to `lifecycle.exits` comes from `market.session.calendar()`
    (v1.40), never from a fetch of this module's own. It fetched a fourteen-day
@@ -3092,6 +3119,20 @@ live path, with only the broker and the clock replaced.
   `get_executed_stop_fills` and `get_trading_schedule` with the signatures and
   the failure types `interfaces.md` records for the real ones. Where the real
   module raises, this raises the same exception.
+- **The seam table covers four kinds of escape, and the guard checks all
+  four (v1.48).** Broker, clock, configuration **and alerts**. It patched
+  `alert` in four modules while eleven import it, and `state.halt` — which
+  `trading_cycle` reaches on the daily loss limit — was not among them, so a
+  backtest run where credentials happen to be present sent real messages to the
+  owner (#49). `telegram.notifier.alert` is patched at its source as well as in
+  each importer, so a module that starts importing it later is covered by
+  default.
+- **A guard that covers one class of escape reads as covering all of them.**
+  The guard test asserted only that no broker call escaped, while describing
+  itself as proving the table complete. It now asserts, for a whole run, that
+  no real alert is sent, no unpatched clock is read and no configuration is
+  loaded from the environment. This is the same omission-reads-as-compliance
+  shape as the defect #12 was closed for, reproduced inside #12's own fix.
 - **`market.session` is driven, not stubbed.** The simulator answers
   `get_trading_schedule`, and the real `refresh` / `is_open` / `calendar` /
   `covers` run on top. A backtest that stubbed those would not exercise the
@@ -3136,6 +3177,15 @@ live path, with only the broker and the clock replaced.
 4. **When one bar touches both the stop and the target, the stop wins.** Daily
    bars cannot say which came first, and the pessimistic reading is the only one
    that cannot flatter the result.
+
+**The simulator refuses what the broker would refuse (v1.48).** A market buy
+whose turnover plus fee exceeds simulated cash raises `OrderRejected`, leaving
+cash and holdings untouched — as `broker.client` does, and as `get_max_lots`
+exists to make avoidable. It previously debited unconditionally, so cash went
+negative and the next `get_portfolio()` raised `ValueError: cash must not be
+negative` (#47). Beyond the crash: a simulator that funds any order cannot
+demonstrate that the gate and sizing keep the bot solvent, which is one of the
+things a backtest is for.
 
 **Commission is the broker's tariff, not a flat fee** — a percentage of turnover
 with a minimum, applied per fill. The old flat figure was also applied twice to

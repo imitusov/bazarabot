@@ -404,6 +404,13 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   returns `STOP_LOSS` and `TAKE_PROFIT` normally (proves an unmeasured age
   suppresses exactly one trigger, and that a short count can no longer read as a
   young position — the silent shape of #45).
+- An unmeasurable age alerts once naming the count, stays silent on a second
+  such cycle, and alerts **again** after a cycle in which every position was
+  measurable (proves the latch re-arms per incident — it fired once per process,
+  which is #32 in a second module).
+- A cycle with one measurable and one unmeasurable position does not re-arm the
+  latch (proves the whole cycle is the unit, so one covered position cannot
+  clear a warning another still needs).
 - A `LOCAL` position returns `STOP_LOSS` from `lifecycle.exits`; an `EXCHANGE`
   position never does (proves the trigger has exactly one owner — the test that
   prevents selling a position twice).
