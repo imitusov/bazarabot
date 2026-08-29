@@ -1121,6 +1121,9 @@ so `market.session` runs on top rather than being stubbed.
 bar triggers. `hold(figi, lots, average_price)` seeds a holding;
 `touched(figi, level, trigger)` reports whether the current bar reached a level.
 
+A buy whose turnover plus fee exceeds simulated cash raises `OrderRejected`,
+leaving cash and holdings untouched, as the broker would (#47).
+
 Fill model: a market order is priced at the **next** bar's open and returned on
 the submitting call; stops read the bar **low** and take-profits the **high**; a
 bar gapping through a stop fills at its open; a bar touching both books the
@@ -1135,8 +1138,10 @@ live and backtest are the same code.
 **`async run(bars: dict[str, list[Candle]], instruments: dict[str, Instrument], config: Config, strategies: Sequence[Strategy], commission: Commission, slippage: Decimal) → BacktestResult`**
 Replays every bar oldest-first across the whole watchlist with concurrent
 positions on one shared cash balance. Equity is marked to market on every bar,
-so `max_drawdown` means something. The seam table it patches is explicit and is
-proved complete by a test that fails if any real broker call escapes.
+so `max_drawdown` means something. The seam table it patches is explicit and covers four kinds of escape — broker,
+clock, configuration and alerts. Guarded by tests that fail if a real broker
+call, alert, clock read or environment config load escapes, plus a structural
+test comparing the table against every module that imports `alert` (#49).
 
 ## `sandbox.train`
 

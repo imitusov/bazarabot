@@ -221,18 +221,38 @@ async def _age_in_trading_days(
     short, which reads as a young position and silently suppresses MAX_AGE —
     that was #45. `None` says so instead, and `lifecycle.exits` then leaves the
     age trigger alone while stop and target carry on.
+
+    The alert belongs to the cycle, not to this call: see `_report_ages`.
     """
-    global _age_unmeasurable_alerted
     if not covers(moscow_date(position.entry_at)):
-        if not _age_unmeasurable_alerted:
-            _age_unmeasurable_alerted = True
-            await alert(
-                f"age unmeasurable for {position.ticker}: the recorded trading "
-                "calendar does not reach its entry, so MAX_AGE is suspended for "
-                "it. Stop-loss and take-profit are unaffected."
-            )
         return None
     return trading_days_between(position.entry_at, moment, cal)
+
+
+async def _report_ages(unmeasurable: list[str]) -> None:
+    """One alert per incident, naming the count, re-armed by a clean cycle.
+
+    The latch was set and never reset, so this fired once per process and a
+    second occurrence after recovery was silent — which is #32 exactly, in a
+    second module (#48). The condition is not permanent: it clears as soon as
+    the recorded calendar reaches back far enough.
+
+    The whole cycle is the unit. Re-arming per position would let one covered
+    position clear a warning that an uncovered one still needs.
+    """
+    global _age_unmeasurable_alerted
+    if not unmeasurable:
+        _age_unmeasurable_alerted = False
+        return
+    if _age_unmeasurable_alerted:
+        return
+    _age_unmeasurable_alerted = True
+    await alert(
+        f"{len(unmeasurable)} position(s) with an unmeasurable age this cycle "
+        f"({', '.join(sorted(unmeasurable))}): the recorded trading calendar "
+        "does not reach their entry, so MAX_AGE is suspended for them. "
+        "Stop-loss and take-profit are unaffected."
+    )
 
 
 async def _submit_exits(
@@ -251,6 +271,7 @@ async def _submit_exits(
     # EMPTY calendar, which made trading_days_between count zero and disabled
     # MAX_AGE exits with nothing raised (#19).
     calendar_now = calendar()
+    unmeasurable: list[str] = []
     for position in positions:
         if position.id in skip:
             continue
@@ -258,6 +279,8 @@ async def _submit_exits(
         if price is None:
             continue
         days = await _age_in_trading_days(position, moment, calendar_now)
+        if days is None:
+            unmeasurable.append(position.ticker)
         trigger = evaluate(position, price, moment, session, days, ctx.config)
         if trigger is None:
             continue
@@ -265,6 +288,7 @@ async def _submit_exits(
             await close_position(position, trigger)
         except (ExitFailed, ValueError):
             _LOG.exception("exit failed for %s trigger=%s", position.ticker, trigger)
+    await _report_ages(unmeasurable)
 
 
 async def _write_opening_snapshot(moment: datetime, open_count: int) -> None:

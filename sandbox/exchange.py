@@ -269,6 +269,16 @@ class SimulatedExchange:
         # outage counter, a live/backtest divergence on the ordinary path
         # (v1.47).
         following = self._next_bar(ticker)
+        if following is not None and side is Side.BUY:
+            # The broker refuses what the account cannot fund, and get_max_lots
+            # exists to make that avoidable. Debiting unconditionally drove cash
+            # negative and the next get_portfolio raised "cash must not be
+            # negative" — and a simulator that funds any order cannot show that
+            # the gate and sizing keep the bot solvent (#47).
+            price = self._slipped(following.open, side)
+            turnover = price * Decimal(lots * self.instruments[ticker].lot)
+            if turnover + self.commission.on(turnover) > self.cash:
+                raise OrderRejected("insufficient funds")
         if following is None:
             # History ran out. Inventing a price here is the look-ahead the
             # next-open rule exists to prevent.

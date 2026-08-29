@@ -89,11 +89,22 @@ def _seams(
         ("zarabot.db.positions", "load", lambda: config),
         ("zarabot.execution.orders", "load", lambda: config),
         ("zarabot.pnl", "config", _ConfigModule(config)),
-        # alerts go nowhere
+        # Alerts go nowhere. At the source as well as in every importer, so a
+        # module that starts importing it later is covered by default — the
+        # table patched four while eleven imported it, and state.halt was not
+        # among them (#49).
+        ("zarabot.telegram.notifier", "alert", _silent),
         ("zarabot.app.loops", "alert", _silent),
+        ("zarabot.app.shutdown", "alert", _silent),
+        ("zarabot.app.startup", "alert", _silent),
+        ("zarabot.broker.reconcile", "alert", _silent),
         ("zarabot.execution.orders", "alert", _silent),
         ("zarabot.market.session", "alert", _silent),
+        ("zarabot.ops.backup", "alert", _silent),
+        ("zarabot.ops.commissions", "alert", _silent),
         ("zarabot.pnl", "alert", _silent),
+        ("zarabot.reporter.weekly", "alert", _silent),
+        ("zarabot.state.halt", "alert", _silent),
     ]
 
 
