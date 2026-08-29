@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-29 · spec v1.47 · brief v1.11 · 18 open issues
+Updated: 2026-08-29 · spec v1.48 · brief v1.11 · 16 open issues
 
 ## What this is
 
@@ -452,7 +452,18 @@ Recorded because they will happen again, and three of them were mine.
    that "proves it complete" checks only the broker. Whenever a check is
    described as proving completeness, ask *of what* — and enumerate the classes
    it does not touch.
-7. **A test that builds its own fixture cannot see that production builds a
+7. **A guard that can only fire when a code path executes is worthless for the
+   paths a simulation never reaches** — and those are the paths most likely to
+   hide an unpatched seam. #49: the behavioural alert guard passed with the
+   defect live, because the daily loss limit cannot trip in a daily-bar
+   backtest (#53). The structural guard — parse the source, compare against the
+   table — named all seven missing modules immediately.
+8. **Knowing a failure class does not prevent writing it; only a check does.**
+   #48 is #32 in a second module, written hours after closing #32. The check is
+   mechanical: list every `_*_alerted = True` in a module against every
+   `_*_alerted = False` and look for the asymmetry. Do it whenever a latch is
+   added.
+9. **A test that builds its own fixture cannot see that production builds a
    different one.** #45: `trading_days_between` is tested against a calendar
    spanning the query, and the calendar production hands it spans the opposite
    direction. Both sides pass, the seam is broken, and no gate looks at seams.
