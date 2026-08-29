@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.49
+**Version:** 1.50
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -1113,9 +1113,12 @@ Additionally, on exits booked from an exchange stop:
   that a backtest cannot fund a position the account could not).
 - `get_portfolio()` returns without raising after any sequence of fills (proves
   the negative-cash crash is closed at its cause rather than at its symptom).
-- `advance(moment, mark)` makes `get_last_price` report that mark, and the
-  bar's close when none is given (proves the sub-bar marks reach the code that
-  values a position).
+- `advance(moment, phase)` makes `get_last_price` report that phase of the
+  current bar, and its close by default (proves the sub-bar marks reach the code
+  that values a position).
+- Two instruments advanced to the same phase each report **their own** bar's
+  value (proves the phase is resolved per instrument — a scalar price passed in
+  by the caller would report one ticker's low as every ticker's).
 - A standing stop is checked once per bar however many marks are walked (proves
   four cycles are not four chances to fire).
 - Commission is a percentage of turnover with a minimum, charged once per fill
@@ -3128,9 +3131,14 @@ live path, with only the broker and the clock replaced.
 
 - **`SimulatedExchange(bars, instruments, cash, slippage, commission)`** holds
   simulated cash, holdings, submitted orders and standing stop orders, and a
-  cursor into the bars. `advance(moment, mark)` moves the cursor and reports
-  `mark` as the last price until the next call; `mark` is `None` for the bar's
-  close. Standing stops are checked **once per bar**, on first entry to it, so
+  cursor into the bars. `advance(moment, phase)` moves the cursor and reports
+  that **phase** of each instrument's current bar as its last price — `OPEN`,
+  `LOW`, `HIGH` or `CLOSE`, defaulting to `CLOSE`.
+
+  A phase rather than a price (v1.50): the marks are per instrument, and a
+  backtest runs the whole watchlist, so a single price passed by the caller
+  would report one ticker's low as every ticker's. The exchange holds the bars
+  and is the only thing that can resolve a phase per instrument. Standing stops are checked **once per bar**, on first entry to it, so
   four cycles do not become four chances to fire.
 - It exposes `get_candles`, `get_last_price`, `get_instrument`, `get_portfolio`,
   `get_max_lots`, `get_order_state`, `post_market_order`, `post_stop_loss`,

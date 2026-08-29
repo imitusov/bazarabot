@@ -37,9 +37,14 @@ live path, with only the broker and the clock replaced.
 
 - **`SimulatedExchange(bars, instruments, cash, slippage, commission)`** holds
   simulated cash, holdings, submitted orders and standing stop orders, and a
-  cursor into the bars. `advance(moment, mark)` moves the cursor and reports
-  `mark` as the last price until the next call; `mark` is `None` for the bar's
-  close. Standing stops are checked **once per bar**, on first entry to it, so
+  cursor into the bars. `advance(moment, phase)` moves the cursor and reports
+  that **phase** of each instrument's current bar as its last price — `OPEN`,
+  `LOW`, `HIGH` or `CLOSE`, defaulting to `CLOSE`.
+
+  A phase rather than a price (v1.50): the marks are per instrument, and a
+  backtest runs the whole watchlist, so a single price passed by the caller
+  would report one ticker's low as every ticker's. The exchange holds the bars
+  and is the only thing that can resolve a phase per instrument. Standing stops are checked **once per bar**, on first entry to it, so
   four cycles do not become four chances to fire.
 - It exposes `get_candles`, `get_last_price`, `get_instrument`, `get_portfolio`,
   `get_max_lots`, `get_order_state`, `post_market_order`, `post_stop_loss`,
