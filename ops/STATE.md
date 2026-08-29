@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-29 · spec v1.47 · brief v1.11 · 12 open issues
+Updated: 2026-08-29 · spec v1.47 · brief v1.11 · 18 open issues
 
 ## What this is
 
@@ -401,6 +401,32 @@ change the producer.
 the strategy is not. The real answer needs `sandbox.data.load` against the
 broker's ~456 daily candles, and that is the next thing.
 
+## An audit of one night's own work — six findings, four of them mine
+
+Ran a self-audit over the code written in this session, reproducing every
+hypothesis before filing rather than reasoning about it. Six issues: #47-#52.
+
+**The uncomfortable one is #48.** `_age_unmeasurable_alerted` is set and never
+reset — a latch that fires once per process and never again. That is #32
+*exactly*, written **hours after closing #32** for the same defect, in the same
+codebase, with the fix fresh. Every other latch in that module resets. Knowing
+a failure class does not stop you writing it; only a check does. There is no
+automated one for this, and the table in #48 shows how easily it would have
+been spotted by simply listing set-sites against reset-sites.
+
+**#49 is the seam guard failing at its own job.** The table covers broker,
+clock and config; the guard test checks only the broker. `state.halt` reaches
+the real notifier, so a backtest on a laptop with a populated `.env` sends real
+alerts to the owner's phone. An omission that reads as compliance — which is
+the exact defect #12 was closed for, reproduced in #12's own fix.
+
+**Two habits that paid.** Reproducing before filing killed one candidate
+outright: module-level `asyncio.Lock` looked like the #20 defect, and the
+uncontended fast path meant it did not reproduce — it only fails under
+contention (#50), which is a materially different and much narrower claim than
+the one I was about to write. And auditing *my own fresh work* was far more
+productive than auditing old code: four of six findings are from tonight.
+
 ## Failure classes that keep recurring
 
 Recorded because they will happen again, and three of them were mine.
@@ -421,7 +447,12 @@ Recorded because they will happen again, and three of them were mine.
 5. **Defensive fallbacks that convert a loud failure into a silent one.** #33:
    probing for a field that does not exist turns a rename into total rejection
    with a plausible-sounding message instead of an `AttributeError`.
-6. **A test that builds its own fixture cannot see that production builds a
+6. **A guard that covers one class of escape reads as covering all of them.**
+   #49: the backtest's seam table patches broker, clock and config, and the test
+   that "proves it complete" checks only the broker. Whenever a check is
+   described as proving completeness, ask *of what* — and enumerate the classes
+   it does not touch.
+7. **A test that builds its own fixture cannot see that production builds a
    different one.** #45: `trading_days_between` is tested against a calendar
    spanning the query, and the calendar production hands it spans the opposite
    direction. Both sides pass, the seam is broken, and no gate looks at seams.
