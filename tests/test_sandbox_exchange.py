@@ -12,7 +12,7 @@ from decimal import Decimal
 
 import pytest
 
-from sandbox.exchange import Commission, SimulatedExchange
+from sandbox.exchange import Commission, Phase, SimulatedExchange
 from zarabot.broker.client import (
     InstrumentNotFound,
     OrderNotFound,
@@ -209,16 +209,49 @@ async def test_the_portfolio_never_goes_negative() -> None:
         assert state.cash >= 0
 
 
-async def test_a_mark_becomes_the_last_price() -> None:
+async def test_a_phase_becomes_the_last_price() -> None:
     """The sub-bar marks have to reach the code that values a position."""
     bars = [_bar(0, "100", "110", "90", "105"), _bar(1, "105", "106", "104", "105")]
     ex = _exchange(bars)
     await ex.advance(bars[0].timestamp)
     assert await ex.get_last_price(FIGI) == Decimal("105"), "the close by default"
-    await ex.advance(bars[0].timestamp + timedelta(hours=2), mark=Decimal("90"))
-    assert await ex.get_last_price(FIGI) == Decimal("90"), "the low mark"
-    await ex.advance(bars[0].timestamp + timedelta(hours=4), mark=Decimal("110"))
-    assert await ex.get_last_price(FIGI) == Decimal("110"), "the high mark"
+    await ex.advance(bars[0].timestamp + timedelta(hours=2), phase=Phase.LOW)
+    assert await ex.get_last_price(FIGI) == Decimal("90")
+    await ex.advance(bars[0].timestamp + timedelta(hours=4), phase=Phase.HIGH)
+    assert await ex.get_last_price(FIGI) == Decimal("110")
+    await ex.advance(bars[0].timestamp + timedelta(hours=6), phase=Phase.OPEN)
+    assert await ex.get_last_price(FIGI) == Decimal("100")
+
+
+async def test_a_phase_resolves_per_instrument() -> None:
+    """A scalar price passed in by the caller would report one ticker's low as
+    every ticker's — and a backtest runs the whole watchlist."""
+    sber = _bar(0, "100", "110", "90", "105")
+    gazp = Candle(
+        timestamp=sber.timestamp,
+        open=Decimal("200"),
+        high=Decimal("260"),
+        low=Decimal("140"),
+        close=Decimal("210"),
+        volume=1000,
+    )
+    other = Instrument(
+        figi="BBG000GAZP01",
+        ticker="GAZP",
+        lot=1,
+        min_price_increment=Decimal("0.01"),
+        currency="RUB",
+        trading_status="NORMAL_TRADING",
+        refreshed_at=DAY0,
+    )
+    ex = _exchange(
+        [sber],
+        bars={"SBER": [sber], "GAZP": [gazp]},
+        instruments={"SBER": _instrument(), "GAZP": other},
+    )
+    await ex.advance(sber.timestamp, phase=Phase.LOW)
+    assert await ex.get_last_price(FIGI) == Decimal("90")
+    assert await ex.get_last_price("BBG000GAZP01") == Decimal("140")
 
 
 async def test_a_stop_is_checked_once_per_bar_not_once_per_mark() -> None:
@@ -231,8 +264,8 @@ async def test_a_stop_is_checked_once_per_bar_not_once_per_mark() -> None:
     await ex.advance(bars[0].timestamp)
     ex.hold(FIGI, 10, Decimal("100"))
     await ex.post_stop_loss("s1", FIGI, 10, Decimal("95"))
-    for hours, mark in ((0, None), (2, Decimal("90")), (4, Decimal("101"))):
-        await ex.advance(bars[1].timestamp + timedelta(hours=hours), mark=mark)
+    for hours, phase in ((0, Phase.OPEN), (2, Phase.LOW), (4, Phase.HIGH)):
+        await ex.advance(bars[1].timestamp + timedelta(hours=hours), phase=phase)
     fills = await ex.get_executed_stop_fills(
         bars[0].timestamp, bars[1].timestamp + timedelta(hours=8)
     )
