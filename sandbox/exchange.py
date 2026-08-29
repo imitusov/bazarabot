@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 
 from zarabot.broker.client import (
     InstrumentNotFound,
@@ -36,6 +37,22 @@ from zarabot.models import (
     StopOrderStatus,
     StopProtection,
 )
+
+
+class Phase(StrEnum):
+    """Which price of a bar the exchange reports as the last price.
+
+    A phase rather than a price, because the marks are per instrument and a
+    backtest runs the whole watchlist: a scalar passed by the caller would
+    report one ticker's low as every ticker's. The exchange holds the bars, so
+    it is the only thing that can resolve this per instrument (v1.50).
+    """
+
+    OPEN = "open"
+    LOW = "low"
+    HIGH = "high"
+    CLOSE = "close"
+
 
 _ONE = Decimal("1")
 _HUNDRED = Decimal("100")
@@ -72,7 +89,16 @@ class SimulatedExchange:
     slippage: Decimal
     commission: Commission
 
+    reject_stops: bool = False
+
     _now: datetime | None = None
+    # Which price of the current bar `get_last_price` reports. Walking a bar's
+    # open, low and high is what makes the daily loss limit and a LOCAL stop
+    # reachable at all (#53).
+    _phase: Phase = Phase.CLOSE
+    # Bars whose standing stops have already been checked. Four cycles across a
+    # bar must not be four chances to fire.
+    _stops_checked: set[datetime] = field(default_factory=set)
     _orders: dict[str, OrderRecord] = field(default_factory=dict)
     _stops: dict[str, StopOrderRecord] = field(default_factory=dict)
     _executed_stops: dict[str, OrderRecord] = field(default_factory=dict)
@@ -92,11 +118,14 @@ class SimulatedExchange:
             return []
         return [bar for bar in self.bars.get(ticker, []) if bar.timestamp <= self._now]
 
-    def _bar_at(self, ticker: str, moment: datetime) -> Candle | None:
-        for bar in self.bars.get(ticker, []):
-            if bar.timestamp == moment:
-                return bar
-        return None
+    def _bar_for(self, ticker: str) -> Candle | None:
+        """The bar the cursor is inside — the latest one at or before `now`.
+
+        `now` may be a sub-bar instant, so this is a search rather than an
+        exact match on the timestamp.
+        """
+        seen = self._visible(ticker)
+        return seen[-1] if seen else None
 
     def _next_bar(self, ticker: str) -> Candle | None:
         """The bar after the cursor — where a market order gets its price.
@@ -111,10 +140,6 @@ class SimulatedExchange:
                 return bar
         return None
 
-    def _current(self, ticker: str) -> Candle | None:
-        seen = self._visible(ticker)
-        return seen[-1] if seen else None
-
     def hold(self, figi: str, lots: int, average_price: Decimal) -> None:
         """Seed a holding, for tests and for a backtest resumed mid-history."""
         self._holdings[figi] = _Holding(lots=lots, average_price=average_price)
@@ -127,7 +152,7 @@ class SimulatedExchange:
         closed at -1% never triggers a 5% stop — while the exchange stop fires
         on the intraday print (#12).
         """
-        bar = self._current(self._ticker_for(figi))
+        bar = self._bar_for(self._ticker_for(figi))
         if bar is None:
             return False
         if trigger is ExitTrigger.TAKE_PROFIT:
@@ -136,9 +161,14 @@ class SimulatedExchange:
 
     # ------------------------------------------------------------------ clock
 
-    async def advance(self, moment: datetime) -> None:
-        """Move the cursor and fire any stop the newly-visible bar triggers."""
+    async def advance(self, moment: datetime, phase: Phase = Phase.CLOSE) -> None:
+        """Move the cursor, set the reported phase, fire any triggered stop.
+
+        Stops are checked once per bar, on first entry to it, so walking four
+        phases does not give four chances to fire.
+        """
         self._now = moment
+        self._phase = phase
         self._fire_stops(moment)
 
     def _apply_fill(self, order: OrderRecord, price: Decimal) -> OrderRecord:
@@ -163,13 +193,24 @@ class SimulatedExchange:
         return _settled(order, price, fee, self._moment())
 
     def _fire_stops(self, moment: datetime) -> None:
-        """A standing stop fires on the bar's low, filling no better than its open."""
+        """A standing stop fires on the bar's low, filling no better than its open.
+
+        Checked once per bar, on first entry to it: four cycles across a bar are
+        four marks, not four chances to fire.
+        """
+        entered = {
+            bar.timestamp
+            for bar in (self._bar_for(ticker) for ticker in self.bars)
+            if bar is not None and bar.timestamp not in self._stops_checked
+        }
         for key, stop in list(self._stops.items()):
             if stop.status is not StopOrderStatus.ACTIVE:
                 continue
             ticker = stop.ticker
-            bar = self._bar_at(ticker, moment)
-            if bar is None or bar.low > stop.stop_price:
+            bar = self._bar_for(ticker)
+            if bar is None or bar.timestamp in self._stops_checked:
+                continue
+            if bar.low > stop.stop_price:
                 continue
             # The exchange cannot fill where the market never traded: a bar
             # that gaps through the stop fills at its open.
@@ -201,6 +242,7 @@ class SimulatedExchange:
                 settled_at=moment,
             )
             self._stops[key] = _stop_settled(stop, moment)
+        self._stops_checked |= entered
 
     def _slipped(self, price: Decimal, side: Side) -> Decimal:
         if side is Side.BUY:
@@ -222,10 +264,11 @@ class SimulatedExchange:
         return [bar for bar in self._visible(ticker) if since <= bar.timestamp <= until]
 
     async def get_last_price(self, figi: str) -> Decimal:
-        bar = self._current(self._ticker_for(figi))
+        bar = self._bar_for(self._ticker_for(figi))
         if bar is None:
             raise InstrumentNotFound(figi)
-        return bar.close
+        price: Decimal = getattr(bar, self._phase.value)
+        return price
 
     async def get_portfolio(self) -> PortfolioState:
         positions: list[Position] = []
@@ -235,7 +278,7 @@ class SimulatedExchange:
         return PortfolioState(cash=self.cash, positions=tuple(positions))
 
     async def get_max_lots(self, figi: str) -> int:
-        bar = self._current(self._ticker_for(figi))
+        bar = self._bar_for(self._ticker_for(figi))
         if bar is None or bar.close <= 0:
             return 0
         lot = self.instruments[self._ticker_for(figi)].lot
@@ -304,6 +347,11 @@ class SimulatedExchange:
     ) -> StopOrderRecord:
         if lots <= 0:
             raise StopOrderRejected("lots must be positive")
+        if self.reject_stops:
+            # A failure the real broker can produce, and the only way a
+            # backtest can reach rule 23's degrade path, where a position
+            # stays LOCAL and the bot owns its own stop.
+            raise StopOrderRejected("stop orders refused")
         ticker = self._ticker_for(figi)
         record = StopOrderRecord(
             key=key,

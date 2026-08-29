@@ -1116,9 +1116,16 @@ so `market.session` runs on top rather than being stubbed.
 **`Commission(pct: Decimal, minimum: Decimal)`** — the broker's tariff.
 `on(turnover)` is the fee for one fill.
 
-**`SimulatedExchange(bars, instruments, cash, slippage, commission)`**
-`await advance(moment)` moves the cursor and fires any stop the newly-visible
-bar triggers. `hold(figi, lots, average_price)` seeds a holding;
+**`Phase`** — `OPEN` / `LOW` / `HIGH` / `CLOSE`, which price of a bar the
+exchange reports as the last price. A phase rather than a price because the
+marks are per instrument (#53).
+
+**`SimulatedExchange(bars, instruments, cash, slippage, commission, reject_stops=False)`**
+`await advance(moment, phase=Phase.CLOSE)` moves the cursor, sets the reported
+phase and fires any stop the newly-entered bar triggers — checked **once per
+bar**, so four marks are not four chances to fire. `reject_stops` makes
+`post_stop_loss` raise, which is the only way a backtest reaches rule 23's
+degrade path where a position stays `LOCAL`. `hold(figi, lots, average_price)` seeds a holding;
 `touched(figi, level, trigger)` reports whether the current bar reached a level.
 
 A buy whose turnover plus fee exceeds simulated cash raises `OrderRejected`,
@@ -1135,9 +1142,11 @@ Runs `app.loops.trading_cycle` itself against a `SimulatedExchange` and a
 temporary database. Nothing is reimplemented, because nothing needs to be —
 live and backtest are the same code.
 
-**`async run(bars: dict[str, list[Candle]], instruments: dict[str, Instrument], config: Config, strategies: Sequence[Strategy], commission: Commission, slippage: Decimal) → BacktestResult`**
+**`async run(bars: dict[str, list[Candle]], instruments: dict[str, Instrument], config: Config, strategies: Sequence[Strategy], commission: Commission, slippage: Decimal, reject_stops: bool = False) → BacktestResult`**
 Replays every bar oldest-first across the whole watchlist with concurrent
-positions on one shared cash balance. Equity is marked to market on every bar,
+positions on one shared cash balance, running **four cycles per bar** at the
+open, low, high and close — the last inside the closing window. One cycle a bar
+made the daily loss limit and `MAX_AGE` structurally unreachable (#53). Equity is marked to market on every bar,
 so `max_drawdown` means something. The seam table it patches is explicit and covers four kinds of escape — broker,
 clock, configuration and alerts. Guarded by tests that fail if a real broker
 call, alert, clock read or environment config load escapes, plus a structural

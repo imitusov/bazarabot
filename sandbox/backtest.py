@@ -18,14 +18,14 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
-from sandbox.exchange import Commission, SimulatedExchange
+from sandbox.exchange import Commission, Phase, SimulatedExchange
 from zarabot.config import Config
 from zarabot.models import (
     BacktestResult,
@@ -37,6 +37,26 @@ from zarabot.models import (
 )
 
 _ZERO = Decimal("0")
+
+# The simulated session runs from the bar timestamp to +8h45m, matching what
+# `SimulatedExchange.get_trading_schedule` reports.
+_SESSION_MINUTES = 525
+
+# Four cycles a bar, in this order: open, low, high, close — the drawdown
+# before the recovery. That is the same pessimism as the stop-beats-target
+# tie-break, and for the same reason: a daily bar cannot say which came first,
+# and only the pessimistic reading cannot flatter the result.
+#
+# The last sits five minutes before the session end, inside
+# `in_closing_window`'s fifteen. That is what makes MAX_AGE reachable:
+# `lifecycle.exits` requires it, and a single cycle at the session start never
+# satisfied it (#53).
+_MARKS: tuple[tuple[int, Phase], ...] = (
+    (0, Phase.OPEN),
+    (_SESSION_MINUTES // 3, Phase.LOW),
+    (2 * _SESSION_MINUTES // 3, Phase.HIGH),
+    (_SESSION_MINUTES - 5, Phase.CLOSE),
+)
 
 
 def _seams(
@@ -212,6 +232,7 @@ async def run(
     strategies: Sequence[object],
     commission: Commission,
     slippage: Decimal,
+    reject_stops: bool = False,
 ) -> BacktestResult:
     """Replay `bars` through the live trading cycle. Returns what it did."""
     from zarabot.app.loops import trading_cycle
@@ -240,6 +261,7 @@ async def run(
         cash=config.allocated_capital,
         slippage=slippage,
         commission=commission,
+        reject_stops=reject_stops,
     )
     ctx = AppContext(
         config=config,
@@ -265,13 +287,16 @@ async def run(
             await exchange.advance(timeline[0])
             await refresh(len(timeline))
             for moment in timeline:
-                clock.set(moment)
-                await exchange.advance(moment)
-                await trading_cycle(ctx)
-                # Marked to market on EVERY bar. The old module appended the
-                # cash balance on trade events only, and cash falls when you
-                # buy, so its drawdown was roughly the position size (#12).
-                equity.append(await bot_equity())
+                for minutes, phase in _MARKS:
+                    at = moment + timedelta(minutes=minutes)
+                    clock.set(at)
+                    await exchange.advance(at, phase=phase)
+                    await trading_cycle(ctx)
+                    # Marked to market on EVERY mark. The old module appended
+                    # the cash balance on trade events only, and cash falls
+                    # when you buy, so its drawdown was roughly the position
+                    # size (#12).
+                    equity.append(await bot_equity())
             closed = await list_closed()
             still_open = await list_open()
         finally:

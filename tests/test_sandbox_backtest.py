@@ -151,8 +151,16 @@ async def test_capital_contention_rejects_the_second_signal() -> None:
         max_open_positions=10,
     )
     result = await _run(bars, (_AlwaysBuy(),), config=lean)
-    tickers = {trade.ticker for trade in result.trades}
-    assert len(tickers) <= 1, "there was only cash for one"
+    # Not "only one ticker ever traded" — with four cycles a bar there is time
+    # for one to exit and the other to enter on the freed cash, which is
+    # correct. What contention means is that two were never open at once.
+    spans = sorted(
+        (trade.entry_at, trade.exit_at)
+        for trade in result.trades
+        if trade.exit_at is not None
+    )
+    for earlier, later in zip(spans, spans[1:], strict=False):
+        assert earlier[1] <= later[0], f"overlapping positions: {earlier} {later}"
 
 
 async def test_the_daily_loss_limit_can_fire_at_all() -> None:

@@ -54,9 +54,11 @@ def _instrument() -> Instrument:
     )
 
 
-def _exchange(bars: list[Candle], **kwargs: object) -> SimulatedExchange:
+def _exchange(bars: object = None, **kwargs: object) -> SimulatedExchange:
+    """`bars` is SBER's series, or a whole {ticker: series} mapping."""
+    series = bars if isinstance(bars, dict) else {"SBER": bars or []}
     defaults: dict[str, object] = {
-        "bars": {"SBER": bars},
+        "bars": series,
         "instruments": {"SBER": _instrument()},
         "cash": Decimal("100000"),
         "slippage": Decimal("0"),
@@ -245,7 +247,6 @@ async def test_a_phase_resolves_per_instrument() -> None:
         refreshed_at=DAY0,
     )
     ex = _exchange(
-        [sber],
         bars={"SBER": [sber], "GAZP": [gazp]},
         instruments={"SBER": _instrument(), "GAZP": other},
     )
