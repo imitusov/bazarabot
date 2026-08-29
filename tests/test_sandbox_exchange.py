@@ -17,6 +17,7 @@ from zarabot.broker.client import (
     InstrumentNotFound,
     OrderNotFound,
     OrderRejected,
+    StopOrderRejected,
 )
 from zarabot.models import Candle, ExitTrigger, Instrument, OrderStatus, Side
 
@@ -206,6 +207,47 @@ async def test_the_portfolio_never_goes_negative() -> None:
         await ex.advance(bars[min(n + 1, 3)].timestamp)
         state = await ex.get_portfolio()
         assert state.cash >= 0
+
+
+async def test_a_mark_becomes_the_last_price() -> None:
+    """The sub-bar marks have to reach the code that values a position."""
+    bars = [_bar(0, "100", "110", "90", "105"), _bar(1, "105", "106", "104", "105")]
+    ex = _exchange(bars)
+    await ex.advance(bars[0].timestamp)
+    assert await ex.get_last_price(FIGI) == Decimal("105"), "the close by default"
+    await ex.advance(bars[0].timestamp + timedelta(hours=2), mark=Decimal("90"))
+    assert await ex.get_last_price(FIGI) == Decimal("90"), "the low mark"
+    await ex.advance(bars[0].timestamp + timedelta(hours=4), mark=Decimal("110"))
+    assert await ex.get_last_price(FIGI) == Decimal("110"), "the high mark"
+
+
+async def test_a_stop_is_checked_once_per_bar_not_once_per_mark() -> None:
+    """Four cycles must not become four chances to fire."""
+    bars = [
+        _bar(0, "100", "101", "99", "100"),
+        _bar(1, "100", "101", "90", "99"),
+    ]
+    ex = _exchange(bars)
+    await ex.advance(bars[0].timestamp)
+    ex.hold(FIGI, 10, Decimal("100"))
+    await ex.post_stop_loss("s1", FIGI, 10, Decimal("95"))
+    for hours, mark in ((0, None), (2, Decimal("90")), (4, Decimal("101"))):
+        await ex.advance(bars[1].timestamp + timedelta(hours=hours), mark=mark)
+    fills = await ex.get_executed_stop_fills(
+        bars[0].timestamp, bars[1].timestamp + timedelta(hours=8)
+    )
+    assert len(fills) == 1, "one fill, however many marks were walked"
+
+
+async def test_it_can_refuse_a_stop_order() -> None:
+    """The broker can reject a stop, and the degrade path that leaves a position
+    LOCAL is only reachable in a backtest if the double can too."""
+    bars = [_bar(0, "100", "101", "99", "100"), _bar(1, "100", "101", "99", "100")]
+    ex = _exchange(bars, reject_stops=True)
+    await ex.advance(bars[0].timestamp)
+    with pytest.raises(StopOrderRejected):
+        await ex.post_stop_loss("s1", FIGI, 10, Decimal("95"))
+    assert await ex.list_stop_orders() == []
 
 
 async def test_it_raises_what_the_real_client_raises() -> None:

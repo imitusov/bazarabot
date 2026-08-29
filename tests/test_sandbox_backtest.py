@@ -16,7 +16,14 @@ import pytest
 from sandbox.backtest import run
 from sandbox.exchange import Commission
 from zarabot.config import Config
-from zarabot.models import BacktestResult, Candle, Instrument, Side, Signal
+from zarabot.models import (
+    BacktestResult,
+    Candle,
+    ExitTrigger,
+    Instrument,
+    Side,
+    Signal,
+)
 
 DAY0 = datetime(2026, 3, 16, 7, 0, tzinfo=UTC)
 COMMISSION = Commission(pct=Decimal("0.05"), minimum=Decimal("1"))
@@ -109,6 +116,7 @@ async def _run(bars: dict[str, list[Candle]], strategies: tuple[object, ...], **
         strategies=strategies,  # type: ignore[arg-type]
         commission=COMMISSION,
         slippage=Decimal("0"),
+        reject_stops=kw.pop("reject_stops", False),
     )
 
 
@@ -145,6 +153,118 @@ async def test_capital_contention_rejects_the_second_signal() -> None:
     result = await _run(bars, (_AlwaysBuy(),), config=lean)
     tickers = {trade.ticker for trade in result.trades}
     assert len(tickers) <= 1, "there was only cash for one"
+
+
+async def test_the_daily_loss_limit_can_fire_at_all() -> None:
+    """One cycle per bar wrote the opening snapshot and measured against it in
+    the same instant, so the intra-day loss was always zero and the limit was
+    structurally unreachable (#53)."""
+    import zarabot.state.halt as halt_mod
+
+    # A bar that opens at 100 and trades down to 40 intraday.
+    bars = [
+        Candle(
+            timestamp=DAY0 + timedelta(days=n),
+            open=Decimal("100"),
+            high=Decimal("100"),
+            low=Decimal("40") if n == 2 else Decimal("99"),
+            close=Decimal("100") if n != 2 else Decimal("99"),
+            volume=1000,
+        )
+        for n in range(6)
+    ]
+    halted: list[str] = []
+    original = halt_mod.halt
+
+    async def _spy(reason, detail, at):  # type: ignore[no-untyped-def]
+        halted.append(reason.value)
+        return await original(reason, detail, at)
+
+    import zarabot.app.loops as loops
+
+    real = loops.halt
+    loops.halt = _spy  # type: ignore[assignment]
+    try:
+        await _run(
+            {"SBER": bars},
+            (_AlwaysBuy(),),
+            config=_config(
+                watchlist=("SBER",),
+                position_size_pct=Decimal("90"),
+                daily_loss_limit_pct=Decimal("5"),
+                stop_loss_pct=Decimal("80"),
+            ),
+        )
+    finally:
+        loops.halt = real  # type: ignore[assignment]
+    assert "DAILY_LOSS_LIMIT" in halted, "the limit must be reachable"
+
+
+async def test_max_age_can_fire_at_all() -> None:
+    """lifecycle.exits needs in_closing_window, and the single cycle sat at the
+    session start: twenty flat bars with max_holding_days=1 gave zero exits."""
+    flat = _bars("SBER", ["100"] * 12)
+    result = await _run(
+        {"SBER": flat},
+        (_AlwaysBuy(),),
+        config=_config(
+            watchlist=("SBER",),
+            max_holding_days=1,
+            stop_loss_pct=Decimal("50"),
+            take_profit_pct=Decimal("50"),
+            reentry_cooldown_minutes=1,
+        ),
+    )
+    triggers = {trigger for trigger, _ in result.exit_trigger_distribution}
+    assert ExitTrigger.MAX_AGE in triggers
+
+
+async def test_a_local_stop_fires_on_the_bar_low() -> None:
+    """get_last_price returned the bar's close, so a LOCAL stop was checked
+    against the close only — the same optimism the exchange-stop rule removes,
+    still present where the bot owns the stop."""
+    bars = [
+        Candle(
+            timestamp=DAY0 + timedelta(days=n),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            # Day 3 trades down to 90 but closes back at 99.
+            low=Decimal("90") if n == 3 else Decimal("99"),
+            close=Decimal("99"),
+            volume=1000,
+        )
+        for n in range(6)
+    ]
+    # Refuse stop orders so the position stays LOCAL and the bot owns the
+    # trigger — otherwise the exchange stop fires and this proves nothing.
+    result = await _run(
+        {"SBER": bars},
+        (_AlwaysBuy(),),
+        config=_config(watchlist=("SBER",), stop_loss_pct=Decimal("5")),
+        reject_stops=True,
+    )
+    triggers = {trigger for trigger, _ in result.exit_trigger_distribution}
+    assert ExitTrigger.STOP_LOSS in triggers, "a 5% stop with a low of 90"
+
+
+async def test_the_opening_snapshot_is_written_once_a_day() -> None:
+    """Four cycles must not move the baseline the intra-day loss is measured
+    against."""
+    import zarabot.app.loops as loops
+
+    written: list[object] = []
+    real = loops.write_daily
+
+    async def _spy(snapshot: object) -> None:
+        written.append(snapshot)
+        return await real(snapshot)  # type: ignore[arg-type]
+
+    loops.write_daily = _spy  # type: ignore[assignment]
+    try:
+        await _run({"SBER": _bars("SBER", ["100"] * 4)}, (_NeverBuy(),))
+    finally:
+        loops.write_daily = real  # type: ignore[assignment]
+    assert len(written) == 4, "one per Moscow date, not one per cycle"
 
 
 async def test_drawdown_is_marked_to_market_not_read_off_cash() -> None:
