@@ -6,13 +6,18 @@ four rules directly rather than through a whole run.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from sandbox.exchange import Commission, SimulatedExchange
-from zarabot.broker.client import InstrumentNotFound, OrderNotFound
+from zarabot.broker.client import (
+    InstrumentNotFound,
+    OrderNotFound,
+    OrderRejected,
+)
 from zarabot.models import Candle, ExitTrigger, Instrument, OrderStatus, Side
 
 DAY0 = datetime(2026, 3, 16, 7, 0, tzinfo=UTC)
@@ -174,6 +179,33 @@ async def test_commission_is_a_percentage_with_a_minimum() -> None:
     settled2 = await ex2.post_market_order("k2", FIGI, Side.BUY, 10)
     # Turnover 1000 x 1% = 10, above the minimum.
     assert settled2.commission == Decimal("10")
+
+
+async def test_a_buy_beyond_the_balance_is_rejected() -> None:
+    """The broker refuses it and get_max_lots exists to make it avoidable. The
+    simulator debited unconditionally, so cash went negative and the next
+    get_portfolio raised "cash must not be negative" (#47)."""
+    bars = [_bar(0, "100", "101", "99", "100"), _bar(1, "100", "101", "99", "100")]
+    ex = _exchange(bars, cash=Decimal("500"))
+    await ex.advance(bars[0].timestamp)
+    with pytest.raises(OrderRejected):
+        await ex.post_market_order("k1", FIGI, Side.BUY, 100)
+    assert ex.cash == Decimal("500"), "cash untouched"
+    assert (await ex.get_portfolio()).positions == (), "no holding created"
+
+
+async def test_the_portfolio_never_goes_negative() -> None:
+    """A simulator that funds any order cannot show that the gate and sizing
+    keep the bot solvent, which is one of the things a backtest is for."""
+    bars = [_bar(n, "100", "101", "99", "100") for n in range(4)]
+    ex = _exchange(bars, cash=Decimal("1000"))
+    await ex.advance(bars[0].timestamp)
+    for n in range(3):
+        with contextlib.suppress(OrderRejected):
+            await ex.post_market_order(f"k{n}", FIGI, Side.BUY, 5)
+        await ex.advance(bars[min(n + 1, 3)].timestamp)
+        state = await ex.get_portfolio()
+        assert state.cash >= 0
 
 
 async def test_it_raises_what_the_real_client_raises() -> None:

@@ -170,3 +170,81 @@ async def test_no_real_broker_call_escapes(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(client, "_open", _boom)
     result = await _run({"SBER": _bars("SBER", ["100"] * 6)}, (_AlwaysBuy(),))
     assert isinstance(result, BacktestResult)
+
+
+def test_the_seam_table_covers_every_module_that_alerts() -> None:
+    """Structural, not behavioural, and deliberately so.
+
+    The obvious test — trip the loss limit and assert nothing was sent — cannot
+    work: one bar is one cycle and one Moscow date, so the opening snapshot is
+    written and measured in the same instant and the daily loss is always zero.
+    `state.halt` is unreachable on that path, and a behavioural guard would pass
+    while the seam stayed open. Comparing the table against the source cannot be
+    defeated by a path not being reached (#49).
+    """
+    import ast
+    import pathlib
+    import re
+
+    importers = set()
+    for path in pathlib.Path("zarabot").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "zarabot.telegram.notifier"
+                and any(a.name == "alert" for a in node.names)
+            ):
+                importers.add(str(path)[:-3].replace("/", "."))
+
+    table = pathlib.Path("sandbox/backtest.py").read_text()
+    patched = {
+        module
+        for module, attr in re.findall(r'"(zarabot\.[a-z_.]+)",\s*\n?\s*"(\w+)"', table)
+        if attr == "alert"
+    }
+    missing = importers - patched
+    assert not missing, f"modules that alert but are not patched: {sorted(missing)}"
+
+
+async def test_no_real_alert_escapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The behavioural half: nothing reaches the notifier on the ordinary path."""
+    import zarabot.telegram.notifier as notifier
+
+    sent: list[str] = []
+
+    async def _record(text: str, urgent: bool) -> None:
+        sent.append(text)
+
+    monkeypatch.setattr(notifier, "_send", _record)
+    await _run(
+        {"SBER": _bars("SBER", ["100", "98", "96", "94", "92", "90"])}, (_AlwaysBuy(),)
+    )
+    assert sent == [], f"a real alert escaped the simulator: {sent}"
+
+
+async def test_no_unpatched_clock_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Simulated time must be total. A module still reading the wall clock
+    would date a backtest's rows to today."""
+    import zarabot.clock as clock
+
+    def _boom() -> object:
+        raise AssertionError("an unpatched clock read escaped the simulator")
+
+    monkeypatch.setattr(clock, "now", _boom)
+    result = await _run({"SBER": _bars("SBER", ["100"] * 6)}, (_AlwaysBuy(),))
+    assert isinstance(result, BacktestResult)
+
+
+async def test_no_configuration_is_loaded_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backtest's Config is the one the whole run must see."""
+    import zarabot.config as config
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("configuration was loaded from the environment")
+
+    monkeypatch.setattr(config, "load", _boom)
+    monkeypatch.setattr(config, "get", _boom)
+    result = await _run({"SBER": _bars("SBER", ["100"] * 6)}, (_AlwaysBuy(),))
+    assert isinstance(result, BacktestResult)

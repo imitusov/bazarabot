@@ -880,6 +880,77 @@ async def test_uncovered_entry_suppresses_max_age_and_alerts_once(
     assert len(alerts) == 1, "latched, like every other alert in this module"
 
 
+async def test_unmeasurable_age_alerts_once_until_a_clean_cycle_rearms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Set and never reset means one alert per process, so a second occurrence
+    after recovery is silent. That is #32, in a second module (#48)."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(stop_protection=StopProtection.LOCAL)
+    covered = True
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "covers", lambda day: covered)
+    monkeypatch.setattr(loops, "alert", _alert)
+
+    covered = False
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1
+    assert "1" in alerts[0], "the count is named"
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1, "latched"
+    covered = True
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1, "a clean cycle is silent"
+    covered = False
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 2, "re-armed by the clean cycle"
+
+
+async def test_one_measurable_position_does_not_rearm_the_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole cycle is the unit, so a covered position cannot clear a
+    warning that an uncovered one still needs."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    alerts: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    sber = _position(id=1, ticker="SBER", figi="BBG000SBER01")
+    gazp = _position(id=2, ticker="GAZP", figi="BBG000GAZP01")
+
+    async def _open() -> list[Position]:
+        return [sber, gazp]
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    # SBER's entry is covered, GAZP's is not, on every cycle.
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "covers", lambda day: False)
+    monkeypatch.setattr(loops, "alert", _alert)
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    assert len(alerts) == 1, "still latched while any position is unmeasurable"
+
+
 async def test_covered_entry_passes_the_measured_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
