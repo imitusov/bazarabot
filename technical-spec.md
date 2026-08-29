@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.48
+**Version:** 1.49
 **Date:** 2026-08-18
 **Implements:** `business-brief.md` v1.11
 
@@ -1113,6 +1113,11 @@ Additionally, on exits booked from an exchange stop:
   that a backtest cannot fund a position the account could not).
 - `get_portfolio()` returns without raising after any sequence of fills (proves
   the negative-cash crash is closed at its cause rather than at its symptom).
+- `advance(moment, mark)` makes `get_last_price` report that mark, and the
+  bar's close when none is given (proves the sub-bar marks reach the code that
+  values a position).
+- A standing stop is checked once per bar however many marks are walked (proves
+  four cycles are not four chances to fire).
 - Commission is a percentage of turnover with a minimum, charged once per fill
   (proves the tariff shape, and that a round trip is not charged twice for one
   leg).
@@ -1130,6 +1135,18 @@ Additionally, on exits booked from an exchange stop:
   configuration from the environment (proves the guard covers every class of
   escape the seam table covers, not only the broker — the omission that let a
   backtest page the owner from a laptop).
+- A bar whose **low** breaches the daily loss limit halts the run, and no entry
+  is opened afterwards that day (proves the limit is reachable at all — it could
+  not fire, so every result silently assumed it never would).
+- A position held past `MAX_HOLDING_DAYS` exits with `MAX_AGE` (proves the
+  closing-window mark: with one cycle at the session start, twenty flat bars and
+  `max_holding_days=1` produced zero exits).
+- A `LOCAL` position whose bar low breaches its stop exits `STOP_LOSS`, on a bar
+  that closes above it (proves the close-only optimism is gone from the path
+  where the bot owns the stop, not only from the exchange's).
+- The day's opening snapshot is written **once** per Moscow date across the four
+  cycles (proves the baseline stays the open, which is what makes the intra-day
+  loss meaningful).
 - A cooldown, a `MAX_POSITIONS` limit and a duplicate ticker each block an entry
   in the backtest exactly as live (proves the whole gate, not a re-derived
   subset).
@@ -3111,8 +3128,10 @@ live path, with only the broker and the clock replaced.
 
 - **`SimulatedExchange(bars, instruments, cash, slippage, commission)`** holds
   simulated cash, holdings, submitted orders and standing stop orders, and a
-  cursor into the bars. `advance(moment)` moves the cursor and settles anything
-  the newly-visible bar triggers.
+  cursor into the bars. `advance(moment, mark)` moves the cursor and reports
+  `mark` as the last price until the next call; `mark` is `None` for the bar's
+  close. Standing stops are checked **once per bar**, on first entry to it, so
+  four cycles do not become four chances to fire.
 - It exposes `get_candles`, `get_last_price`, `get_instrument`, `get_portfolio`,
   `get_max_lots`, `get_order_state`, `post_market_order`, `post_stop_loss`,
   `cancel_stop_order`, `cancel_order`, `list_stop_orders`,
@@ -3187,14 +3206,45 @@ negative` (#47). Beyond the crash: a simulator that funds any order cannot
 demonstrate that the gate and sizing keep the bot solvent, which is one of the
 things a backtest is for.
 
+**Four cycles per bar, at the open, the low, the high and the close (v1.49).**
+One cycle per bar made two of the system's controls structurally unreachable,
+and neither absence was visible in a result:
+
+- **The daily loss limit could never fire.** One bar is one cycle *and* one
+  Moscow date, so step 4 wrote the day's opening snapshot and measured against
+  it in the same instant; the intra-day loss was always zero (#53). On any run
+  where the strategy would have breached the limit, live stops trading for the
+  rest of the day and the backtest kept going — optimistic in exactly the
+  scenario the limit exists for.
+- **`MAX_AGE` could never fire.** `lifecycle.exits` requires
+  `session.in_closing_window(now)`, the final fifteen minutes, and the single
+  cycle sat at the session start. Measured: `max_holding_days=1` over twenty
+  flat bars with stop and target 50% away produced **zero exits**.
+
+The four instants are the session start, two marks a third and two thirds
+through it, and one **inside the closing window**, which is what makes
+`MAX_AGE` reachable. The day's opening snapshot is still written once, on the
+first of the four, so the loss is measured against the open rather than against
+the previous mark.
+
+**The order is open, low, high, close** — the drawdown before the recovery.
+That is the same pessimism as the stop-beats-target tie-break above, and for the
+same reason: a daily bar cannot say which came first, and only the pessimistic
+reading cannot flatter the result.
+
+It also fixes a third thing that was never filed: `get_last_price` returned the
+bar's **close**, so a `LOCAL` position's stop was checked against the close
+only — the exact optimism the exchange-stop rule above removes, still present on
+the path where the bot owns the stop itself.
+
 **Commission is the broker's tariff, not a flat fee** — a percentage of turnover
 with a minimum, applied per fill. The old flat figure was also applied twice to
 one round trip.
 
 **`async backtest.run(bars, config, strategies, commission, slippage) → BacktestResult`**
-- **Drives `app.loops.trading_cycle` itself**, once per bar, against a temporary
-  database with the migrations applied and a `SimulatedExchange` in place of
-  `broker.client`. Live and backtest cannot diverge, because they are the same
+- **Drives `app.loops.trading_cycle` itself, four times per bar**, against a
+  temporary database with the migrations applied and a `SimulatedExchange` in
+  place of `broker.client`. Live and backtest cannot diverge, because they are the same
   code: the gate, the sizing, the exits, the cooldowns, the halt, the
   duplicate-ticker rule and the portfolio-exposure ceiling are all the live ones,
   reached the way live reaches them.
