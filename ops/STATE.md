@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-29 · spec v1.48 · brief v1.11 · 16 open issues
+Updated: 2026-08-29 · spec v1.50 · brief v1.11 · 15 open issues
 
 ## What this is
 
@@ -426,6 +426,38 @@ uncontended fast path meant it did not reproduce — it only fails under
 contention (#50), which is a materially different and much narrower claim than
 the one I was about to write. And auditing *my own fresh work* was far more
 productive than auditing old code: four of six findings are from tonight.
+
+## The first real strategy finding: MAX_HOLDING_DAYS=3 dominates everything
+
+#53 is closed — four cycles a bar, at the open, low, high and close, the last
+inside the closing window. It made the daily loss limit reachable, and turned up
+that **`MAX_AGE` was unreachable too**, for the same reason: `lifecycle.exits`
+needs `in_closing_window` and the single cycle sat at the session start.
+
+The numbers moved more than the mechanism suggests. Same 180 bars, same
+strategy, shipped `MAX_HOLDING_DAYS=3`:
+
+| | before | after |
+|---|---|---|
+| exits | 10 STOP_LOSS, 2 TAKE_PROFIT | **13 MAX_AGE** |
+| realised | -7746 | +3580 |
+
+**Every position now exits on age.** Checked it was the fix and not a new
+defect by loosening the cap to 8, where all three triggers reappear — so the
+stop machinery is intact and positions were simply ageing out before a 5% stop
+was touched.
+
+That is a **strategy-parameter finding, not a code one**: at the shipped
+configuration the stop and target levels are nearly decorative, and every
+backtest before today said the opposite because it could not fire the trigger
+that actually governs. It is the first thing this project has learned about its
+own strategy rather than about its own plumbing.
+
+**Writing the consumer exposed the producer's flaw for the second time today.**
+`advance` first took a price; the marks are per instrument and a backtest runs
+the whole watchlist, so one ticker's low would have been every ticker's price.
+It takes a phase now. Build the caller early enough that it can still change
+the callee.
 
 ## Failure classes that keep recurring
 
