@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-28 · spec v1.45 · brief v1.11 · 13 open issues
+Updated: 2026-08-29 · spec v1.47 · brief v1.11 · 12 open issues
 
 ## What this is
 
@@ -370,6 +370,37 @@ contract satisfied vacuously** — and the second instance this month. Worth
 asking of any contract line that reads like a guarantee: what would fail if this
 were simply absent? If the answer is "nothing", it is absent.
 
+## #12 closed — the backtest is now the live path, not a resemblance of it
+
+`sandbox/exchange.py` is a simulated broker; `sandbox/backtest.py` runs
+`app.loops.trading_cycle` itself against it, once per bar. Nothing is
+reimplemented because nothing needs to be.
+
+**The defect worth remembering is how it hid.** The old module imported
+`strategies`, `risk.sizing` and `lifecycle.exits` but not `risk.gate`. It obeyed
+"never reimplement" by *omitting* the gate entirely — so cooldowns,
+`max_open_positions`, duplicate-ticker rejection, halt and session state played
+no part in any backtest. **An omission reads as compliance.** That is failure
+class 4's cousin: a rule satisfied by absence.
+
+**The seam guard is the transferable artefact.** `_seams()` is an explicit table
+of every place a live module reached the broker, the clock or config, and
+`test_no_real_broker_call_escapes` patches `broker.client._connect` to raise and
+runs a whole backtest. A missed seam is a test failure instead of a network
+call. #39, #43 and the reverted #45 attempt all died for want of exactly that.
+
+**A design correction came from building the consumer, not from review.** The
+exchange first held orders `SUBMITTED` until the cursor advanced, which would
+have sent every entry through `open_position`'s crash-recovery path and tripped
+the outage counter every third time. Writing the caller is what exposed it.
+Worth doing deliberately: build the consumer early enough that it can still
+change the producer.
+
+**It runs.** 180 bars x 4 tickers: 13 trades, 10 stop-losses to 2 take-profits,
+8.23% marked-to-market drawdown. On synthetic bars — the machinery is proved,
+the strategy is not. The real answer needs `sandbox.data.load` against the
+broker's ~456 daily candles, and that is the next thing.
+
 ## Failure classes that keep recurring
 
 Recorded because they will happen again, and three of them were mine.
@@ -414,7 +445,8 @@ sentence*, not *which module is this sentence about*.
 
 ## Not yet done
 
-- A sandbox session — never run
+- A sandbox session on **real** candles — the tool exists now (#12), the run
+  does not
 - CI workflows exist but **have never executed on GitHub**
 - The VPS deploy path (`scripts/deploy/`) is written and untested
 - `#30`: `broker.client` 74.9% and `pnl` 69.6%, on ratchet floors
