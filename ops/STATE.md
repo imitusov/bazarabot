@@ -517,6 +517,41 @@ catches, and it is the one that keeps recurring. The habit that catches it is
 re-reading each amendment asking *which module's code changes because of this
 sentence*, not *which module is this sentence about*.
 
+## Still zero trades, and the system cannot say why
+
+Asked again on 2026-08-31. Read the whole entry path — `trading_cycle` →
+`is_open` → `_measure_daily_loss` → `_evaluate_entries` → `risk.gate` →
+`execution.orders` — and the honest finding is that **no evidence exists
+locally that can answer the question**, for a structural reason worth naming:
+
+**`db.signals` is the only record of the entry path, and it is written only
+when a strategy fires.** Everything upstream of that is unrecorded. If
+`market.data` drops a ticker — `except Exception: continue`, one WARNING, no
+alert, #23 — no strategy is ever consulted for it, and the database looks
+exactly as it does when the market simply offered no setup. Zero signals is
+therefore ambiguous between *the bot never looked* and *there was nothing to
+see*, and those two have opposite fixes.
+
+That is #39's shape again: silence that reads as health. The three candidates
+it hides, in likelihood order — a candle fetch failing every cycle for every
+ticker; entries never reached because `is_open` or the daily-loss step returns
+first; the strategies genuinely not firing on this watchlist.
+
+`scripts/diagnose/entry_funnel.py` answers it in one run against the live
+account. It imports the live modules and calls them unchanged — the same
+`candles_for_watchlist` with the same lookback, the shipped strategy objects,
+the real `risk.gate` — and prints the seven stages in cycle order, so the first
+one that stops is the answer. It places no orders. Stage 5 replays the shipped
+strategies over ~400 days of real candles: a healthy signal count there beside
+an empty `signals` table means the bot is not reaching its strategies at all,
+and zero there is a strategy finding rather than a plumbing one.
+
+Two things this session could not do, and they bound the answer: this container
+has no broker token and no route to MOEX, and the weekly health export has
+**never pushed** — the `ops/health` branch does not exist on the remote, so the
+one mechanism designed to show rejection reasons has produced nothing in five
+weeks of uptime. Whatever the funnel says, that timer needs checking too.
+
 ## Not yet done
 
 - A sandbox session on **real** candles — the tool exists now (#12), the run
