@@ -877,9 +877,11 @@ async def test_raising_broker_unavailable_emits_broker_unavailable_with_method(
     capture: _Capture, caplog: pytest.LogCaptureFixture
 ) -> None:
     capture.fail = AioRequestError(StatusCode.UNAVAILABLE, "down", None)
-    with caplog.at_level(logging.WARNING, logger="zarabot.broker.client"):
-        with pytest.raises(BrokerUnavailable):
-            await get_last_price("BBG000000001")
+    with (
+        caplog.at_level(logging.WARNING, logger="zarabot.broker.client"),
+        pytest.raises(BrokerUnavailable),
+    ):
+        await get_last_price("BBG000000001")
     records = [
         record
         for record in caplog.records
@@ -899,9 +901,11 @@ async def test_raising_broker_rate_limited_emits_rate_limited_with_retry_after_s
     capture.fail = AioRequestError(
         StatusCode.RESOURCE_EXHAUSTED, "slow down", {"retry-after": "2.5"}
     )
-    with caplog.at_level(logging.WARNING, logger="zarabot.broker.client"):
-        with pytest.raises(BrokerRateLimited):
-            await get_last_price("BBG000000001")
+    with (
+        caplog.at_level(logging.WARNING, logger="zarabot.broker.client"),
+        pytest.raises(BrokerRateLimited),
+    ):
+        await get_last_price("BBG000000001")
     records = [
         record
         for record in caplog.records
