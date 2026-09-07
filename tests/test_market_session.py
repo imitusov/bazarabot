@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 
@@ -390,3 +391,104 @@ async def test_calendar_is_empty_not_none_before_any_refresh() -> None:
     result = calendar()
     assert isinstance(result, TradingCalendar)
     assert result.sessions == ()
+
+
+def _session_events(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) in ("session_open", "session_closed")
+    ]
+
+
+async def test_successful_refresh_of_a_trading_day_emits_session_open(
+    store: list[SessionInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """v1.61: first day of the window is a trading session → session_open."""
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [_weekday()]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
+        await refresh(7)
+
+    events = _session_events(caplog)
+    assert len(events) == 1
+    record = events[0]
+    assert record.event == "session_open"
+    assert record.levelno == logging.INFO
+    assert record.trade_date == date(2026, 3, 16)
+    assert record.opens_at == OPEN
+    assert record.closes_at == CLOSE
+
+
+async def test_successful_refresh_of_a_holiday_emits_session_closed(
+    store: list[SessionInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """v1.67: closed days have no timestamps; trade_date still comes from clock."""
+
+    closed = SessionInfo(start=None, end=None, is_trading_day=False)
+    refresh_at = datetime(2026, 3, 9, 10, 0, tzinfo=UTC)
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [closed, _weekday()]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    monkeypatch.setattr("zarabot.clock.now", lambda: refresh_at)
+    with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
+        await refresh(7)
+
+    events = _session_events(caplog)
+    assert len(events) == 1
+    record = events[0]
+    assert record.event == "session_closed"
+    assert record.levelno == logging.INFO
+    assert record.trade_date == date(2026, 3, 9)
+    assert record.opens_at is None
+    assert record.closes_at is None
+
+
+async def test_session_open_trade_date_is_moscow_not_utc(
+    store: list[SessionInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """v1.67: 21:30 UTC is the next calendar date in Moscow."""
+
+    start = datetime(2026, 3, 16, 21, 30, tzinfo=UTC)
+    end = datetime(2026, 3, 17, 6, 40, tzinfo=UTC)
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [SessionInfo(start=start, end=end, is_trading_day=True)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
+        await refresh(7)
+
+    events = _session_events(caplog)
+    assert len(events) == 1
+    record = events[0]
+    assert record.event == "session_open"
+    assert record.trade_date == date(2026, 3, 17)
+    assert record.opens_at == start
+    assert record.closes_at == end
+
+
+async def test_unavailable_refresh_does_not_emit_session_events(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from zarabot.broker.client import BrokerUnavailable
+
+    async def _fail(days: int) -> list[SessionInfo]:
+        raise BrokerUnavailable("broker unavailable")
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fail)
+    with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
+        await refresh(7)
+    assert _session_events(caplog) == []

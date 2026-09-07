@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime
 
 import aiosqlite
 
+from zarabot import clock
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
@@ -60,7 +61,38 @@ async def refresh(days: int) -> None:
     # schedule that went unavailable, recovered, and went unavailable again was
     # silent from here for the rest of the process lifetime (#32).
     _alerted = False
+    _emit_session_state(fetched[0])
     await _remember(fetched)
+
+
+def _emit_session_state(first: SessionInfo) -> None:
+    """Log whether the first day of a successful fetch is a trading session.
+
+    A log, not a Telegram alert — the brief does not alert session open/close.
+    Closed days from the broker have no timestamps; `trade_date` then comes from
+    `clock.now()` (v1.67 / v1.68). `opens_at` / `closes_at` are null on close.
+    """
+    if first.is_trading_day:
+        event = "session_open"
+        trade_date = (
+            clock.moscow_date(first.start)
+            if first.start is not None
+            else clock.moscow_date(clock.now())
+        )
+        opens_at, closes_at = first.start, first.end
+    else:
+        event = "session_closed"
+        trade_date = clock.moscow_date(clock.now())
+        opens_at, closes_at = None, None
+    _LOG.info(
+        event,
+        extra={
+            "event": event,
+            "trade_date": trade_date,
+            "opens_at": opens_at,
+            "closes_at": closes_at,
+        },
+    )
 
 
 async def _remember(fetched: list[SessionInfo]) -> None:
