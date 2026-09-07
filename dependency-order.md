@@ -17,7 +17,7 @@ reads.
 1. **models** — depends on: (nothing)
 2. **clock** — depends on: (nothing)
 3. **config** — depends on: (nothing)
-4. **logging_setup** — depends on: config
+4. **logging_setup** — depends on: config, clock
 4b. **telegram.notifier** — depends on: config, logging_setup
     *(built as step 28 — see Corrections. It belongs here: it imports nothing
     but `config`, and modules from step 21 onward are contractually required to
