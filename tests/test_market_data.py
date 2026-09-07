@@ -64,10 +64,18 @@ def alerts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 @pytest.fixture
-def broker(monkeypatch: pytest.MonkeyPatch) -> dict[str, BaseException]:
+def history(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Candle]]:
+    """The series each ticker returns, mutable so a test can shorten one."""
+    return {"SBER": _candles(40), "GAZP": _candles(10)}
+
+
+@pytest.fixture
+def broker(
+    monkeypatch: pytest.MonkeyPatch, history: dict[str, list[Candle]]
+) -> dict[str, BaseException]:
     """Maps a ticker to the exception its fetch raises. Empty means success."""
     instruments = {"SBER": _instrument("SBER"), "GAZP": _instrument("GAZP")}
-    series = {"SBER": _candles(40), "GAZP": _candles(10)}
+    series = history
     fail: dict[str, BaseException] = {}
 
     async def get_instrument(ticker: str) -> Instrument:
@@ -148,22 +156,22 @@ async def test_recovery_re_arms_the_alert(
     broker: dict[str, BaseException], alerts: list[str]
 ) -> None:
     """A latch set once per process and never reset is #32 and #48."""
-    broker["GAZP"] = BrokerUnavailable("broker unavailable: UNAVAILABLE")
+    broker["SBER"] = BrokerUnavailable("broker unavailable: UNAVAILABLE")
     for _ in range(3):
-        await candles_for_watchlist(["GAZP"], 20, NOW)
+        await candles_for_watchlist(["SBER"], 20, NOW)
     assert len(alerts) == 1
 
-    del broker["GAZP"]
-    result = await candles_for_watchlist(["GAZP"], 20, NOW)
-    assert result["GAZP"]
+    del broker["SBER"]
+    result = await candles_for_watchlist(["SBER"], 20, NOW)
+    assert result["SBER"]
     assert len(alerts) == 1, "recovery itself alerted"
 
-    broker["GAZP"] = BrokerUnavailable("broker unavailable: UNAVAILABLE")
+    broker["SBER"] = BrokerUnavailable("broker unavailable: UNAVAILABLE")
     for _ in range(2):
-        await candles_for_watchlist(["GAZP"], 20, NOW)
+        await candles_for_watchlist(["SBER"], 20, NOW)
     assert len(alerts) == 1, "the count was not cleared by the success"
 
-    await candles_for_watchlist(["GAZP"], 20, NOW)
+    await candles_for_watchlist(["SBER"], 20, NOW)
     assert len(alerts) == 2
 
 
@@ -178,6 +186,51 @@ async def test_two_tickers_crossing_together_share_one_alert(
     assert len(alerts) == 1
     assert "SBER" in alerts[0]
     assert "GAZP" in alerts[0]
+
+
+async def test_no_candles_is_a_degraded_call(
+    broker: dict[str, BaseException],
+    history: dict[str, list[Candle]],
+    alerts: list[str],
+) -> None:
+    """An empty success looks like health to every counter (#23, downstream)."""
+    history["GAZP"] = []
+    await candles_for_watchlist(["SBER", "GAZP"], 20, NOW)
+    await candles_for_watchlist(["SBER", "GAZP"], 20, NOW)
+    assert alerts == []
+
+    await candles_for_watchlist(["SBER", "GAZP"], 20, NOW)
+    assert len(alerts) == 1
+    assert "GAZP" in alerts[0]
+    assert "SBER" not in alerts[0]
+
+
+async def test_a_short_history_alerts_and_names_both_counts(
+    broker: dict[str, BaseException], alerts: list[str]
+) -> None:
+    """GAZP has ten candles and the call asks for thirty."""
+    for _ in range(3):
+        result = await candles_for_watchlist(["GAZP"], 30, NOW)
+    assert len(alerts) == 1
+    assert "GAZP" in alerts[0]
+    assert "10" in alerts[0]
+    assert "30" in alerts[0]
+    assert len(result["GAZP"]) == 10, "the short series stopped being returned"
+
+
+async def test_a_failure_and_a_shortfall_share_one_counter(
+    broker: dict[str, BaseException], alerts: list[str]
+) -> None:
+    """Two counters would let a ticker alternate and never cross a threshold."""
+    broker["GAZP"] = BrokerUnavailable("broker unavailable: UNAVAILABLE")
+    await candles_for_watchlist(["GAZP"], 30, NOW)
+    await candles_for_watchlist(["GAZP"], 30, NOW)
+    assert alerts == []
+
+    del broker["GAZP"]
+    result = await candles_for_watchlist(["GAZP"], 30, NOW)
+    assert len(result["GAZP"]) == 10
+    assert len(alerts) == 1, "the shortfall did not continue the failure count"
 
 
 async def test_a_non_broker_exception_propagates(
