@@ -102,6 +102,7 @@ def test_every_record_includes_utc_timestamp_and_moscow_time(
     assert payload["level"] == "INFO"
     assert payload["logger"] == LOGGER_NAME
     assert payload["message"] == "heartbeat ok"
+    assert "event" not in payload
     utc = datetime.fromisoformat(payload["timestamp"])
     moscow = datetime.fromisoformat(payload["moscow_time"])
     assert utc.tzinfo is not None
@@ -112,13 +113,16 @@ def test_every_record_includes_utc_timestamp_and_moscow_time(
     assert moscow == utc.astimezone(ZoneInfo("Europe/Moscow"))
 
 
-def test_event_extra_field_round_trips(
+def test_event_is_producer_set_and_absent_when_omitted(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     configure("INFO", [])
     _logger().info("cycle", extra={"event": "heartbeat"})
-    payload = _last_payload(capsys)
-    assert payload["event"] == "heartbeat"
+    with_event = _last_payload(capsys)
+    assert with_event["event"] == "heartbeat"
+    _logger().info("library noise")
+    without_event = _last_payload(capsys)
+    assert "event" not in without_event
 
 
 def test_event_field_is_redacted_when_it_contains_a_secret(
