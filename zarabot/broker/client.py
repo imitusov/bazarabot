@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -106,6 +107,11 @@ _RUB_PREFIX = "RUB"
 # which is what makes the implausible-move check possible.
 _last_accepted: dict[str, Decimal] = {}
 
+# Process-local consecutive `BrokerUnavailable` counts, keyed by public method
+# name. Cleared when that method succeeds.
+_consecutive_failures: dict[str, int] = {}
+_log = logging.getLogger(__name__)
+
 
 class InstrumentNotFound(Exception):
     """Ticker did not resolve at the broker."""
@@ -177,12 +183,12 @@ async def _open() -> _Connection:
     return _connection
 
 
-async def _connect() -> _Connection:
+async def _connect(*, method: str) -> _Connection:
     """Open or reuse the process client, typing a transport failure."""
     try:
         return await _open()
     except AioRequestError as exc:
-        _translate(exc, _token(), not_found=None)
+        _translate(exc, _token(), method=method, not_found=None)
 
 
 async def close() -> None:
@@ -226,8 +232,48 @@ def _retry_after(metadata: Any) -> Decimal | None:
         return None
 
 
+def _note_success(method: str) -> None:
+    _consecutive_failures.pop(method, None)
+
+
+def _raise_unavailable(
+    method: str, message: str, cause: BaseException | None = None
+) -> NoReturn:
+    count = _consecutive_failures.get(method, 0) + 1
+    _consecutive_failures[method] = count
+    _log.warning(
+        "broker unavailable",
+        extra={
+            "event": "broker_unavailable",
+            "method": method,
+            "consecutive_failures": count,
+        },
+    )
+    if cause is None:
+        raise BrokerUnavailable(message)
+    raise BrokerUnavailable(message) from cause
+
+
+def _raise_rate_limited(
+    method: str, retry_after: Decimal | None, cause: BaseException
+) -> NoReturn:
+    _log.warning(
+        "broker rate limited",
+        extra={
+            "event": "rate_limited",
+            "method": method,
+            "retry_after_seconds": retry_after,
+        },
+    )
+    raise BrokerRateLimited(retry_after) from cause
+
+
 def _translate(
-    exc: AioRequestError, token: str, *, not_found: type[Exception] | None
+    exc: AioRequestError,
+    token: str,
+    *,
+    method: str,
+    not_found: type[Exception] | None,
 ) -> NoReturn:
     """Type the failure by what it is, never by where it was caught (#23).
 
@@ -239,12 +285,12 @@ def _translate(
     is what makes preserving the cause safe.
     """
     if exc.code is StatusCode.RESOURCE_EXHAUSTED:
-        raise BrokerRateLimited(_retry_after(exc.metadata)) from exc
+        _raise_rate_limited(method, _retry_after(exc.metadata), exc)
     if exc.code is StatusCode.NOT_FOUND and not_found is not None:
         raise not_found(_redact(exc.details or "not found", token)) from exc
     if exc.code in _TRANSPORT_STATUSES:
         name = getattr(exc.code, "name", str(exc.code))
-        raise BrokerUnavailable(_redact(f"broker unavailable: {name}", token)) from exc
+        _raise_unavailable(method, _redact(f"broker unavailable: {name}", token), exc)
     raise exc
 
 
@@ -329,7 +375,7 @@ def _lots_from_quote(raw: object | None) -> int:
 
 
 async def get_instrument(ticker: str) -> Instrument:
-    conn = await _connect()
+    conn = await _connect(method="get_instrument")
     try:
         response = await conn.services.instruments.share_by(
             id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
@@ -337,8 +383,14 @@ async def get_instrument(ticker: str) -> Instrument:
             id=ticker,
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=InstrumentNotFound)
+        _translate(
+            exc,
+            conn.config.tinvest_token,
+            method="get_instrument",
+            not_found=InstrumentNotFound,
+        )
     share = response.instrument
+    _note_success("get_instrument")
     return Instrument(
         figi=share.figi,
         ticker=share.ticker,
@@ -355,7 +407,7 @@ async def get_candles(
 ) -> list[Candle]:
     _reject_naive(since)
     _reject_naive(until)
-    conn = await _connect()
+    conn = await _connect(method="get_candles")
     try:
         response = await conn.services.market_data.get_candles(
             instrument_id=figi,
@@ -364,7 +416,7 @@ async def get_candles(
             interval=interval,
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(exc, conn.config.tinvest_token, method="get_candles", not_found=None)
     candles = [
         Candle(
             timestamp=item.time,
@@ -377,6 +429,7 @@ async def get_candles(
         for item in response.candles
     ]
     candles.sort(key=lambda candle: candle.timestamp)
+    _note_success("get_candles")
     return candles
 
 
@@ -416,11 +469,13 @@ def _reject_quote(
 
 
 async def get_last_price(figi: str) -> Decimal:
-    conn = await _connect()
+    conn = await _connect(method="get_last_price")
     try:
         response = await conn.services.market_data.get_last_prices(instrument_id=[figi])
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc, conn.config.tinvest_token, method="get_last_price", not_found=None
+        )
     prices = list(response.last_prices)
     if not prices:
         # No quote at all is neither of the two documented shapes: nothing
@@ -428,13 +483,16 @@ async def get_last_price(figi: str) -> Decimal:
         # pre-existing BrokerUnavailable so the caller retries — `reconcile`
         # falls back to the entry price on exactly this type — rather than
         # changing another module's behaviour from inside this one.
-        raise BrokerUnavailable("broker returned no quote for this instrument")
+        _raise_unavailable(
+            "get_last_price", "broker returned no quote for this instrument"
+        )
     quote = prices[0]
     price = _decimal_quote(quote.price)
     _reject_quote(figi, price, _quote_time(quote), conn.config)
     # A rejected quote never reaches here, so it cannot become the baseline
     # that makes the next implausible value look reasonable.
     _last_accepted[figi] = price
+    _note_success("get_last_price")
     return price
 
 
@@ -479,14 +537,14 @@ def _rub_buying_power(response: object) -> Decimal:
 
 
 async def get_portfolio() -> PortfolioState:
-    conn = await _connect()
+    conn = await _connect(method="get_portfolio")
     cfg = conn.config
     try:
         response = await conn.services.operations.get_portfolio(
             account_id=cfg.tinvest_account_id
         )
     except AioRequestError as exc:
-        _translate(exc, cfg.tinvest_token, not_found=None)
+        _translate(exc, cfg.tinvest_token, method="get_portfolio", not_found=None)
     cash = _rub_buying_power(response)
     holdings: list[Position] = []
     for raw in response.positions:
@@ -526,6 +584,7 @@ async def get_portfolio() -> PortfolioState:
                 stop_order_key=None,
             )
         )
+    _note_success("get_portfolio")
     return PortfolioState(cash=cash, positions=tuple(holdings))
 
 
@@ -555,18 +614,24 @@ async def get_trading_schedule(days: int) -> list[SessionInfo]:
         clock.now().astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     )
     until = start + timedelta(days=days)
-    conn = await _connect()
+    conn = await _connect(method="get_trading_schedule")
     try:
         response = await conn.services.instruments.trading_schedules(
             exchange=_EXCHANGE, from_=start, to=until
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc,
+            conn.config.tinvest_token,
+            method="get_trading_schedule",
+            not_found=None,
+        )
     sessions: list[SessionInfo] = []
     for exchange in response.exchanges:
         if str(exchange.exchange).upper() != _EXCHANGE:
             continue
         sessions.extend(_session_from_day(day) for day in exchange.days)
+    _note_success("get_trading_schedule")
     return sessions
 
 
@@ -603,7 +668,7 @@ def _order_record(
 
 
 async def post_market_order(key: str, figi: str, side: Side, lots: int) -> OrderRecord:
-    conn = await _connect()
+    conn = await _connect(method="post_market_order")
     direction = (
         OrderDirection.ORDER_DIRECTION_BUY
         if side is Side.BUY
@@ -623,7 +688,9 @@ async def post_market_order(key: str, figi: str, side: Side, lots: int) -> Order
             confirm_margin_trade=False,
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc, conn.config.tinvest_token, method="post_market_order", not_found=None
+        )
     status = _order_status(response.execution_report_status)
     reason = _redact(getattr(response, "message", "") or "", conn.config.tinvest_token)
     if status is OrderStatus.REJECTED:
@@ -636,6 +703,7 @@ async def post_market_order(key: str, figi: str, side: Side, lots: int) -> Order
         else None
     )
     now = clock.now()
+    _note_success("post_market_order")
     return _order_record(
         key=key,
         figi=figi,
@@ -654,7 +722,7 @@ async def post_market_order(key: str, figi: str, side: Side, lots: int) -> Order
 async def post_stop_loss(
     key: str, figi: str, lots: int, stop_price: Decimal
 ) -> StopOrderRecord:
-    conn = await _connect()
+    conn = await _connect(method="post_stop_loss")
     try:
         response = await conn.services.stop_orders.post_stop_order(
             instrument_id=figi,
@@ -673,10 +741,13 @@ async def post_stop_loss(
             confirm_margin_trade=False,
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc, conn.config.tinvest_token, method="post_stop_loss", not_found=None
+        )
     stop_id = getattr(response, "stop_order_id", None) or None
     if not stop_id:
         raise StopOrderRejected("rejected")
+    _note_success("post_stop_loss")
     return StopOrderRecord(
         key=key,
         stop_order_id=stop_id,
@@ -691,7 +762,7 @@ async def post_stop_loss(
 
 
 async def cancel_stop_order(stop_order_id: str) -> None:
-    conn = await _connect()
+    conn = await _connect(method="cancel_stop_order")
     try:
         await conn.services.stop_orders.cancel_stop_order(
             account_id=conn.config.tinvest_account_id, stop_order_id=stop_order_id
@@ -700,8 +771,12 @@ async def cancel_stop_order(stop_order_id: str) -> None:
         # The executor calls this while racing the exchange, so an
         # already-cancelled or already-executed stop order is not an error.
         if exc.code is StatusCode.NOT_FOUND:
+            _note_success("cancel_stop_order")
             return
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc, conn.config.tinvest_token, method="cancel_stop_order", not_found=None
+        )
+    _note_success("cancel_stop_order")
 
 
 async def cancel_order(key: str) -> None:
@@ -712,7 +787,7 @@ async def cancel_order(key: str) -> None:
     or unknown here is not an error. The authoritative answer comes from the
     `get_order_state` that follows, never from this call's outcome (#10).
     """
-    conn = await _connect()
+    conn = await _connect(method="cancel_order")
     try:
         await conn.services.orders.cancel_order(
             account_id=conn.config.tinvest_account_id,
@@ -723,8 +798,12 @@ async def cancel_order(key: str) -> None:
         )
     except AioRequestError as exc:
         if exc.code is StatusCode.NOT_FOUND:
+            _note_success("cancel_order")
             return
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc, conn.config.tinvest_token, method="cancel_order", not_found=None
+        )
+    _note_success("cancel_order")
 
 
 def _stop_status(raw: object) -> StopOrderStatus:
@@ -737,14 +816,16 @@ def _stop_status(raw: object) -> StopOrderStatus:
 
 
 async def list_stop_orders() -> list[StopOrderRecord]:
-    conn = await _connect()
+    conn = await _connect(method="list_stop_orders")
     try:
         response = await conn.services.stop_orders.get_stop_orders(
             account_id=conn.config.tinvest_account_id,
             status=StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE,
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc, conn.config.tinvest_token, method="list_stop_orders", not_found=None
+        )
     records: list[StopOrderRecord] = []
     for raw in response.stop_orders:
         lots = int(raw.lots_requested)
@@ -764,6 +845,7 @@ async def list_stop_orders() -> list[StopOrderRecord]:
                 settled_at=None,
             )
         )
+    _note_success("list_stop_orders")
     return records
 
 
@@ -780,7 +862,7 @@ async def get_executed_stop_fills(
     """
     _reject_naive(since)
     _reject_naive(until)
-    conn = await _connect()
+    conn = await _connect(method="get_executed_stop_fills")
     try:
         response = await conn.services.stop_orders.get_stop_orders(
             account_id=conn.config.tinvest_account_id,
@@ -789,7 +871,12 @@ async def get_executed_stop_fills(
             to=until,
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc,
+            conn.config.tinvest_token,
+            method="get_executed_stop_fills",
+            not_found=None,
+        )
 
     fills: dict[str, OrderRecord] = {}
     for raw in response.stop_orders:
@@ -825,32 +912,38 @@ async def get_executed_stop_fills(
             created_at=getattr(state, "order_date", None) or clock.now(),
             settled_at=getattr(state, "order_date", None) or clock.now(),
         )
+    _note_success("get_executed_stop_fills")
     return fills
 
 
 async def get_max_lots(figi: str) -> int:
-    conn = await _connect()
+    conn = await _connect(method="get_max_lots")
     request = GetMaxLotsRequest(
         account_id=conn.config.tinvest_account_id, instrument_id=figi
     )
     try:
         response = await conn.services.orders.get_max_lots(request)
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc, conn.config.tinvest_token, method="get_max_lots", not_found=None
+        )
     # The non-margin limit. buy_margin_limits is never read.
+    _note_success("get_max_lots")
     return int(response.buy_limits.buy_max_market_lots)
 
 
 async def get_operations(since: datetime, until: datetime) -> list[OperationRecord]:
     _reject_naive(since)
     _reject_naive(until)
-    conn = await _connect()
+    conn = await _connect(method="get_operations")
     try:
         response = await conn.services.operations.get_operations(
             account_id=conn.config.tinvest_account_id, from_=since, to=until
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=None)
+        _translate(
+            exc, conn.config.tinvest_token, method="get_operations", not_found=None
+        )
     records: list[OperationRecord] = []
     for raw in response.operations:
         state = _enum_name(getattr(raw, "state", None))
@@ -879,11 +972,12 @@ async def get_operations(since: datetime, until: datetime) -> list[OperationReco
                 parent_operation_id=getattr(raw, "parent_operation_id", "") or None,
             )
         )
+    _note_success("get_operations")
     return records
 
 
 async def get_order_state(key: str) -> OrderRecord:
-    conn = await _connect()
+    conn = await _connect(method="get_order_state")
     try:
         response = await conn.services.orders.get_order_state(
             account_id=conn.config.tinvest_account_id,
@@ -893,7 +987,13 @@ async def get_order_state(key: str) -> OrderRecord:
             order_id_type=OrderIdType.ORDER_ID_TYPE_REQUEST,
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=OrderNotFound)
+        _translate(
+            exc,
+            conn.config.tinvest_token,
+            method="get_order_state",
+            not_found=OrderNotFound,
+        )
+    _note_success("get_order_state")
     return _state_to_record(key, response)
 
 
@@ -907,7 +1007,7 @@ async def get_order_state_by_broker_id(broker_order_id: str) -> OrderRecord:
     different questions: "what happened to the order I sent" is a recovery
     path, "what happened to the order the exchange placed for me" is not.
     """
-    conn = await _connect()
+    conn = await _connect(method="get_order_state_by_broker_id")
     try:
         response = await conn.services.orders.get_order_state(
             account_id=conn.config.tinvest_account_id,
@@ -915,9 +1015,15 @@ async def get_order_state_by_broker_id(broker_order_id: str) -> OrderRecord:
             order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE,
         )
     except AioRequestError as exc:
-        _translate(exc, conn.config.tinvest_token, not_found=OrderNotFound)
+        _translate(
+            exc,
+            conn.config.tinvest_token,
+            method="get_order_state_by_broker_id",
+            not_found=OrderNotFound,
+        )
     # Keyed by what it was asked about: this module does not know the local
     # row's key and must not invent one.
+    _note_success("get_order_state_by_broker_id")
     return _state_to_record(broker_order_id, response)
 
 

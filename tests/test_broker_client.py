@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -447,6 +448,9 @@ async def _reset_module_state() -> AsyncIterator[None]:
     accepted = getattr(broker_client, "_last_accepted", None)
     if isinstance(accepted, dict):
         accepted.clear()
+    consecutive = getattr(broker_client, "_consecutive_failures", None)
+    if isinstance(consecutive, dict):
+        consecutive.clear()
     yield
     closer = getattr(broker_client, "close", None)
     if closer is not None:
@@ -867,6 +871,78 @@ async def test_type_error_from_changed_shape_reaches_caller(
     capture.fail = TypeError("post_order() got an unexpected keyword argument")
     with pytest.raises(TypeError):
         await post_market_order("key-1", "BBG000000001", Side.BUY, 1)
+
+
+async def test_raising_broker_unavailable_emits_broker_unavailable_with_method(
+    capture: _Capture, caplog: pytest.LogCaptureFixture
+) -> None:
+    capture.fail = AioRequestError(StatusCode.UNAVAILABLE, "down", None)
+    with (
+        caplog.at_level(logging.WARNING, logger="zarabot.broker.client"),
+        pytest.raises(BrokerUnavailable),
+    ):
+        await get_last_price("BBG000000001")
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "broker_unavailable"
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.method == "get_last_price"
+    assert record.consecutive_failures == 1
+    assert getattr(record, "backoff_seconds", None) is None
+
+
+async def test_consecutive_failures_reset_after_success(
+    capture: _Capture, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.65: the count is per incident, not for the life of the process."""
+
+    down = AioRequestError(StatusCode.UNAVAILABLE, "down", None)
+    capture.fail = down
+    with (
+        caplog.at_level(logging.WARNING, logger="zarabot.broker.client"),
+        pytest.raises(BrokerUnavailable),
+    ):
+        await get_last_price("BBG000000001")
+    with pytest.raises(BrokerUnavailable):
+        await get_last_price("BBG000000001")
+    capture.fail = None
+    await get_last_price("BBG000000001")
+    capture.fail = down
+    with pytest.raises(BrokerUnavailable):
+        await get_last_price("BBG000000001")
+    counts = [
+        record.consecutive_failures
+        for record in caplog.records
+        if getattr(record, "event", None) == "broker_unavailable"
+    ]
+    assert counts == [1, 2, 1]
+
+
+async def test_raising_broker_rate_limited_emits_rate_limited_with_retry_after_seconds(
+    capture: _Capture, caplog: pytest.LogCaptureFixture
+) -> None:
+    capture.fail = AioRequestError(
+        StatusCode.RESOURCE_EXHAUSTED, "slow down", {"retry-after": "2.5"}
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="zarabot.broker.client"),
+        pytest.raises(BrokerRateLimited),
+    ):
+        await get_last_price("BBG000000001")
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "rate_limited"
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.method == "get_last_price"
+    assert Decimal(str(record.retry_after_seconds)) == Decimal("2.5")
 
 
 async def test_rate_limit_raises_broker_rate_limited_with_hint(
