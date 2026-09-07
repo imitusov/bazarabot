@@ -32,7 +32,7 @@ run **one module per session**, test-first, two commits, never edit the spec.
 
 | Issue | Next |
 |---|---|
-| #52 F-52 `_remember` swallows `Exception` | implementer (code vs rule 23) |
+| #52 F-52 `_remember` swallows `Exception` | **amender** then implementer — see `52-market-session-remember.md` |
 | #51 F-51 closed days collapse | **amender**: `SessionInfo` needs a date — see `51-models-sessioninfo-trade-date.md` |
 
 ### Theme C — Execution / process identity
