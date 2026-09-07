@@ -210,13 +210,29 @@ was one of the eight sites opening its own connection.
   nothing here because the bot never moves a stop after entry — a genuinely
   wrong stop is wrong by the distance between two different prices, not by less
   than one tick.
-- **A stop whose increment cannot be read is not judged (v1.47).** When
-  `get_instrument` fails for the position's ticker, no `STOP_MISPRICED` is
-  reported for it; the failure is alerted and reconciliation continues, and the
-  other findings for that position (`STOP_DUPLICATE`, `STOP_ADOPTABLE`) are
-  unaffected. Reporting it would spend the remedy — cancel and re-post — on a
-  discrepancy the module cannot currently measure, and that remedy is the one
-  that unprotects the position (error rule 37).
+- **A stop whose price cannot be compared is neither mispriced nor adoptable
+  (v1.48).** When `get_instrument` fails for the position's ticker, or reports a
+  `min_price_increment` of zero or less, that position's stop price is not
+  judged: **no `STOP_MISPRICED` and no `STOP_ADOPTABLE`** are reported for it.
+  The failure is alerted and reconciliation continues; `STOP_DUPLICATE` and
+  `STOP_ORPHAN` are unaffected, because neither depends on the price.
+
+  Withholding `STOP_MISPRICED` alone was the v1.47 defect. The price comparison
+  **is** the guard on adoption — `STOP_ADOPTABLE` means "this stop stands at the
+  price the position wants, bind it" — so suppressing only the misprice finding
+  routed an unjudged stop into the `elif` beneath it and reported it adoptable.
+  `app.startup` then calls `adopt_existing_stop`, which sets
+  `stop_protection = EXCHANGE`, and `lifecycle.exits` fires `STOP_LOSS` only
+  while protection is `LOCAL`. A stop standing at a price nobody could verify
+  would have become the position's sole protection, and the bot would have
+  stopped watching its own.
+
+  Not adopting is the safe residual: the position stays `LOCAL`, `lifecycle.exits`
+  keeps watching `stop_price` itself, and the broker's stop stands underneath as
+  well. The next reconciliation with readable metadata judges it properly and
+  either adopts it or reports it mispriced. Neither branch is skipped because
+  the finding is unlikely — it is skipped because both remedies act on a price,
+  and the price is exactly what is missing.
 - **More than one live stop on a position is reported as `STOP_DUPLICATE`**, and
   is the most serious discrepancy this module can find: it is the double-sell
   condition the ownership design exists to prevent, actually present. The remedy
@@ -336,6 +352,15 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   reported, the failure is alerted, and reconciliation still returns its other
   findings (proves an unmeasurable discrepancy does not become a cancel-and-
   re-post).
+- A `LOCAL` position whose increment cannot be read reports **no
+  `STOP_ADOPTABLE`** either, and its `stop_protection` is still `LOCAL` after
+  reconciliation (proves the price comparison guards adoption as well as
+  replacement — the v1.47 defect that would have handed protection to a stop
+  standing at a price nobody could verify, and stopped `lifecycle.exits`
+  watching the position's own).
+- An instrument reporting a `min_price_increment` of zero is treated exactly as
+  an unreadable one, alert included (proves the blind path has one entrance,
+  not one alerted and one silent).
 - A lot-count mismatch adopts the broker's count and alerts (proves quantity
   reconciliation).
 - Reconciliation applies each **corrective write** at most once: running it twice

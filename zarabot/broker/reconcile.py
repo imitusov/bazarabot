@@ -277,7 +277,7 @@ def _keep_stop(
 
 
 def _is_mispriced(
-    broker_price: Decimal, local_price: Decimal, increment: Decimal | None
+    broker_price: Decimal, local_price: Decimal, increment: Decimal
 ) -> bool:
     """Whether a live stop sits at a different price, not merely a snapped one.
 
@@ -295,11 +295,10 @@ def _is_mispriced(
     genuinely wrong stop is wrong by the distance between two prices, not by
     less than one tick.
 
-    An unknown increment is not a licence to judge exactly (rule 37): the caller
-    treats `False` here as "no discrepancy to report".
+    Only called with an increment the broker actually reported: a stop whose
+    increment is unknown is not judged at all, here or in the branch beneath
+    this one (rule 37).
     """
-    if increment is None or increment <= 0:
-        return False
     return abs(broker_price - local_price) >= increment
 
 
@@ -307,9 +306,14 @@ async def _price_increments(tickers: set[str]) -> dict[str, Decimal]:
     """Tick sizes for the tickers whose stops are about to be judged.
 
     A ticker whose metadata cannot be read is absent from the result, and its
-    stop's price is then not compared at all (rule 37). The remedy for a
-    misprice is the one that unprotects the position; it is not spent on a
-    difference this module cannot measure.
+    stop's price is then not judged at all — neither mispriced nor adoptable
+    (rule 37). Both remedies act on the price: one cancels and re-posts, the
+    other makes the exchange the sole protection at that price. Neither is spent
+    on a number this module could not check.
+
+    An increment of zero or less is treated as unread rather than as a licence
+    to compare exactly, and takes the same alert: one entrance to the blind
+    path, not one alerted and one silent (v1.48).
     """
     increments: dict[str, Decimal] = {}
     for ticker in sorted(tickers):
@@ -320,6 +324,15 @@ async def _price_increments(tickers: set[str]) -> dict[str, Decimal]:
             await alert(
                 f"price increment unavailable for {ticker} ({exc}); "
                 f"its stop price was not compared"
+            )
+            continue
+        if instrument.min_price_increment <= 0:
+            _LOG.warning(
+                "price increment for %s is %s", ticker, instrument.min_price_increment
+            )
+            await alert(
+                f"price increment for {ticker} is "
+                f"{instrument.min_price_increment}; its stop price was not compared"
             )
             continue
         increments[ticker] = instrument.min_price_increment
@@ -354,11 +367,14 @@ def _stop_adjustments(
                 )
             for stop in ticker_stops:
                 claimed.add(_identifier(stop))
-            if _is_mispriced(
-                kept.stop_price,
-                position.stop_price,
-                increments.get(position.ticker),
-            ):
+            increment = increments.get(position.ticker)
+            if increment is None:
+                # Neither price-based finding is reported: the price comparison
+                # is the guard on adoption as much as on replacement, and it is
+                # the price that could not be read (rule 37). The position stays
+                # LOCAL and lifecycle.exits keeps watching its own stop.
+                pass
+            elif _is_mispriced(kept.stop_price, position.stop_price, increment):
                 adjustments.append(
                     {
                         "type": "STOP_MISPRICED",
