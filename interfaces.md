@@ -795,7 +795,9 @@ Earliest future trading `start` after `now`. Returns `now` when none is cached
 Daily candles per ticker, oldest-first. A ticker whose fetch raises
 `BrokerUnavailable`, `BrokerRateLimited` or `InstrumentNotFound` is omitted and
 logged at WARNING; the rest of the batch returns. Never pads. Raises
-`ValueError` on naive `now`.
+`ValueError` on naive `now`. Emits `candles_failed` (WARNING) with `ticker` and
+`error` on every omitted or short-history ticker (`error` is the exception type
+name, or `short_history`) (v1.61).
 
 A call is **degraded** for a ticker when the fetch fails, or when it returns
 fewer than `lookback` candles — none at all included. A short series is still

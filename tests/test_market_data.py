@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -241,3 +242,43 @@ async def test_a_non_broker_exception_propagates(
     with pytest.raises(AttributeError):
         await candles_for_watchlist(["SBER", "GAZP"], 20, NOW)
     assert alerts == []
+
+
+def _candles_failed(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "candles_failed"
+    ]
+
+
+async def test_omitted_ticker_emits_candles_failed(
+    broker: dict[str, BaseException],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """v1.61: an omitted ticker is a structured event, not only free text."""
+
+    broker["GAZP"] = BrokerUnavailable("broker unavailable: UNAVAILABLE")
+    with caplog.at_level(logging.WARNING, logger="zarabot.market.data"):
+        await candles_for_watchlist(["SBER", "GAZP"], 20, NOW)
+    events = _candles_failed(caplog)
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.WARNING
+    assert record.ticker == "GAZP"
+    assert record.error == "BrokerUnavailable"
+    assert not any(getattr(r, "ticker", None) == "SBER" for r in events)
+
+
+async def test_short_history_emits_candles_failed_with_short_history(
+    broker: dict[str, BaseException],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Degraded-but-returned still emits; error is short_history, not a type name."""
+
+    with caplog.at_level(logging.WARNING, logger="zarabot.market.data"):
+        await candles_for_watchlist(["GAZP"], 30, NOW)
+    events = _candles_failed(caplog)
+    assert len(events) == 1
+    assert events[0].ticker == "GAZP"
+    assert events[0].error == "short_history"
