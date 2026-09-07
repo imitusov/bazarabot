@@ -1590,7 +1590,7 @@ inherit whichever file the previous importer happened to open.
   reconnect would hide a missing `app.startup` step and would let a test inherit
   a file it did not create.
 
-**`transaction() → async context manager yielding aiosqlite.Connection`**
+**`transaction(*, critical: bool = True) → async context manager yielding aiosqlite.Connection`**
 - **The sole transaction owner.** Every write in the system runs inside it:
   `async with transaction() as conn:`. It holds one process-wide lock, issues
   `BEGIN IMMEDIATE`, commits on clean exit, and rolls back on exception.
