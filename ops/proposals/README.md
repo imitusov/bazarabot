@@ -11,6 +11,9 @@ re-running.
 
 Delete a proposal once its amendment is merged.
 
+Open: `79-broker-unavailable-backoff.md` — drop `backoff_seconds` from
+`broker_unavailable`; hold #79. `76-db-write-failed-critical.md` is on #78.
+
 ## Open GitHub issues grouped by theme (2026-09-07, after `c94e3c7`)
 
 Per `operations-loop.md`: findings become spec amendments before code. Implementers
