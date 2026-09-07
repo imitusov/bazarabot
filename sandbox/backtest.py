@@ -119,6 +119,7 @@ def _seams(
         ("zarabot.app.startup", "alert", _silent),
         ("zarabot.broker.reconcile", "alert", _silent),
         ("zarabot.execution.orders", "alert", _silent),
+        ("zarabot.market.data", "alert", _silent),
         ("zarabot.market.session", "alert", _silent),
         ("zarabot.ops.backup", "alert", _silent),
         ("zarabot.ops.commissions", "alert", _silent),
@@ -189,6 +190,14 @@ def _reset_loop_state() -> None:
     loops._started_at = None
     loops._first_cycle_at = None
     loops._snapshot_on = None
+
+
+def _reset_data_state() -> None:
+    """market.data counts consecutive candle failures per ticker (rule 9)."""
+    import zarabot.market.data as data
+
+    data._failures.clear()
+    data._alerted.clear()
 
 
 def _reset_session_state() -> None:
@@ -278,6 +287,7 @@ async def run(
         tmp = stack.enter_context(tempfile.TemporaryDirectory())
         stack.enter_context(_patched(_seams(exchange, clock, config)))
         _reset_loop_state()
+        _reset_data_state()
         _reset_session_state()
 
         path = str(Path(tmp) / "backtest.db")

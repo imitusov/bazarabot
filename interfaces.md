@@ -759,9 +759,21 @@ Earliest future trading `start` after `now`. Returns `now` when none is cached
 ## `zarabot.market.data`
 
 **`async candles_for_watchlist(tickers: list[str], lookback: int, now: datetime) → dict[str, list[Candle]]`**
-Daily candles per ticker, oldest-first. A failing ticker is omitted and logged
-at WARNING; the rest of the batch returns. Never pads. Raises `ValueError` on
-naive `now`.
+Daily candles per ticker, oldest-first. A ticker whose fetch raises
+`BrokerUnavailable`, `BrokerRateLimited` or `InstrumentNotFound` is omitted and
+logged at WARNING; the rest of the batch returns. Never pads. Raises
+`ValueError` on naive `now`.
+
+Consecutive failures are counted per ticker (rule 9): the third in a row alerts
+**once**, naming the ticker and the failure, and nothing further is sent for it
+until a fetch succeeds — a success clears both its count and its alerted flag.
+Tickers crossing in the same call share one alert. The counters are
+process-local module state, `_failures` and `_alerted`, cleared by
+`sandbox.backtest` between runs the way `market.session`'s cache is.
+
+**Every other exception propagates**, so a renamed SDK field reaches
+`app.loops._supervise` as itself rather than being absorbed as a missing
+instrument.
 
 ## `zarabot.state.halt`
 
