@@ -16,11 +16,26 @@ Module **12** of 40 in `dependency-order.md`. Everything before it is complete a
 
 ### `zarabot/risk/sizing.py`
 
+**`position_budget(allocated: Decimal, size_pct: Decimal) → Decimal`**
+- Pure. Returns `size_pct% × allocated` — the intended cost of one position,
+  before headroom and the cash reserve narrow it further.
+- Exists so that the budget has **one** definition. `size_position` computes it
+  to bound an order; `app.startup` compares it against a lot cost to decide
+  whether any order is possible at all. Two copies of the formula in two modules
+  is a drift hazard on the money path, and the second copy would be in an
+  orchestration module with a 70% coverage floor.
+- `size_position` **must** obtain its budget from this function rather than
+  recomputing it. That is the whole point of extracting it, and a
+  reimplementation satisfies the signature while losing the guarantee.
+- Never negative. `allocated ≤ 0` is refused by `config.load()` and is not this
+  function's concern.
+
 **`size_position(price: Decimal, instrument: Instrument, allocated: Decimal, cash: Decimal, size_pct: Decimal, open_cost: Decimal, reserve_pct: Decimal) → int`**
 - Pure. Returns the number of **whole lots** to buy.
 - Rounds down, always. Never returns a negative number.
 - Bounded by three quantities, and the smallest wins:
-  - **budget** — `size_pct% × allocated`, the intended size of one position;
+  - **budget** — `position_budget(allocated, size_pct)`, the intended size of
+    one position. Obtained from that function, never recomputed here;
   - **headroom** — `allocated − open_cost`, so the portfolio's total cost never
     exceeds the allocated capital (#16). `open_cost` is the summed cost of
     positions already open, supplied by the caller because this function is pure;
@@ -65,6 +80,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   default decimal context `8.999…9 / 3` evaluates to exactly `3`, so dividing
   first would return three lots costing 9 against 8.999…9 of headroom — one lot
   of real money above the ceiling the function exists to enforce.
+- `position_budget` returns `size_pct%` of `allocated` exactly, in `Decimal`
+  (proves the formula, and that it is not routed through `float`).
+- `size_position`'s budget bound and `position_budget` agree for the same inputs
+  (proves the single definition — the seam this extraction exists to close,
+  asserted on the caller's output rather than on the callee's, per failure
+  class 6).
 
 ## Expected output
 

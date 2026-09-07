@@ -85,6 +85,37 @@ Fixed ordering; each step completes before the next begins:
    Refusing is the correct failure direction. The alternative failure is selling
    something the owner chose to hold, at a price they did not choose.
 8. Restore halt state.
+
+8a. **Report a position budget that cannot buy one lot.** For each ticker in
+   `config.watchlist`, read the instrument and its last price, and compare
+   `instrument.lot × price` against
+   `risk.sizing.position_budget(config.allocated_capital, config.position_size_pct)`.
+
+   - When **no** watchlist instrument is affordable, alert the owner that the bot
+     cannot open a position in anything it is watching, naming the budget and the
+     cheapest lot cost found.
+   - When **some** are affordable, name the unaffordable ones in the ready alert
+     of step 9 rather than raising a separate alert. A partially reachable
+     watchlist is a normal operating condition — an instrument's price rises
+     through the budget without anything being wrong — and must not train the
+     owner to ignore the channel.
+   - A ticker whose instrument or price cannot be read is **excluded from the
+     judgement and named separately**, never counted as affordable and never
+     counted as unaffordable. If no price could be read for any ticker, the check
+     is **inconclusive** and says so; it must not report a blackout it did not
+     observe, and it must not stay silent as though it had confirmed health.
+
+   **This step never raises `StartupError`, and never prevents startup.** An
+   unaffordable budget stops *new entries only*. Refusing to start would
+   additionally abandon every open position — no exit evaluation, no stop
+   management, no `MAX_AGE` — converting a benign no-op into an unmanaged holding
+   with real money in it. The bot must keep running to protect what it holds.
+
+   It runs after step 7 so reconciliation has settled position truth first, and
+   before step 9 so the finding can be folded into the ready alert. A broker
+   failure in this step is alerted and startup continues; this is a diagnostic,
+   and it must never be the reason the bot is not running.
+
 9. Alert the owner that the bot is running, reporting version, mode, halt state
    and any reconciliation adjustments.
 
@@ -168,6 +199,21 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   `apply` receives `db.connection.shared()` (proves the connection is opened by
   startup rather than at import or inside a repository).
 - Importing `app.startup` opens no database file.
+- With a budget below every watchlist lot cost, startup **completes** and the
+  owner is alerted that nothing is affordable (proves the silent permanent
+  `ZERO_LOTS` condition is reported, and — the half that matters — that
+  reporting it does not stop the bot protecting open positions).
+- With one affordable instrument and one not, no blackout alert is raised and the
+  ready alert names the unaffordable ticker (proves a partially reachable
+  watchlist is normal and does not burn the alert channel).
+- A ticker whose price cannot be read is named as unknown and is counted neither
+  affordable nor unaffordable (proves missing data is not silently read as either
+  answer).
+- When no price can be read for any ticker, the check reports itself
+  inconclusive rather than reporting a blackout (proves the check cannot
+  manufacture the very finding it exists to detect out of a broker outage).
+- A broker failure in step 8a does not raise `StartupError` (proves a diagnostic
+  cannot become the reason the bot is down).
 
 ## Expected output
 

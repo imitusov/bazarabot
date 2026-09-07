@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.53
+**Version:** 1.54
 **Date:** 2026-09-07
 **Implements:** `business-brief.md` v1.11
 
@@ -760,6 +760,12 @@ Additionally, `strategies.ml_model`:
   default decimal context `8.999…9 / 3` evaluates to exactly `3`, so dividing
   first would return three lots costing 9 against 8.999…9 of headroom — one lot
   of real money above the ceiling the function exists to enforce.
+- `position_budget` returns `size_pct%` of `allocated` exactly, in `Decimal`
+  (proves the formula, and that it is not routed through `float`).
+- `size_position`'s budget bound and `position_budget` agree for the same inputs
+  (proves the single definition — the seam this extraction exists to close,
+  asserted on the caller's output rather than on the callee's, per failure
+  class 6).
 
 **`risk.gate`**
 - Open positions whose summed cost leaves less than one lot of headroom reject
@@ -1041,6 +1047,21 @@ Additionally, on exits booked from an exchange stop:
   `apply` receives `db.connection.shared()` (proves the connection is opened by
   startup rather than at import or inside a repository).
 - Importing `app.startup` opens no database file.
+- With a budget below every watchlist lot cost, startup **completes** and the
+  owner is alerted that nothing is affordable (proves the silent permanent
+  `ZERO_LOTS` condition is reported, and — the half that matters — that
+  reporting it does not stop the bot protecting open positions).
+- With one affordable instrument and one not, no blackout alert is raised and the
+  ready alert names the unaffordable ticker (proves a partially reachable
+  watchlist is normal and does not burn the alert channel).
+- A ticker whose price cannot be read is named as unknown and is counted neither
+  affordable nor unaffordable (proves missing data is not silently read as either
+  answer).
+- When no price can be read for any ticker, the check reports itself
+  inconclusive rather than reporting a blackout (proves the check cannot
+  manufacture the very finding it exists to detect out of a broker outage).
+- A broker failure in step 8a does not raise `StartupError` (proves a diagnostic
+  cannot become the reason the bot is down).
 
 **`app.loops` / `app.shutdown`**
 - With the session closed, no market data call is made (proves the session guard
@@ -2434,11 +2455,26 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 
 ### `zarabot/risk/sizing.py`
 
+**`position_budget(allocated: Decimal, size_pct: Decimal) → Decimal`**
+- Pure. Returns `size_pct% × allocated` — the intended cost of one position,
+  before headroom and the cash reserve narrow it further.
+- Exists so that the budget has **one** definition. `size_position` computes it
+  to bound an order; `app.startup` compares it against a lot cost to decide
+  whether any order is possible at all. Two copies of the formula in two modules
+  is a drift hazard on the money path, and the second copy would be in an
+  orchestration module with a 70% coverage floor.
+- `size_position` **must** obtain its budget from this function rather than
+  recomputing it. That is the whole point of extracting it, and a
+  reimplementation satisfies the signature while losing the guarantee.
+- Never negative. `allocated ≤ 0` is refused by `config.load()` and is not this
+  function's concern.
+
 **`size_position(price: Decimal, instrument: Instrument, allocated: Decimal, cash: Decimal, size_pct: Decimal, open_cost: Decimal, reserve_pct: Decimal) → int`**
 - Pure. Returns the number of **whole lots** to buy.
 - Rounds down, always. Never returns a negative number.
 - Bounded by three quantities, and the smallest wins:
-  - **budget** — `size_pct% × allocated`, the intended size of one position;
+  - **budget** — `position_budget(allocated, size_pct)`, the intended size of
+    one position. Obtained from that function, never recomputed here;
   - **headroom** — `allocated − open_cost`, so the portfolio's total cost never
     exceeds the allocated capital (#16). `open_cost` is the summed cost of
     positions already open, supplied by the caller because this function is pure;
@@ -2911,6 +2947,37 @@ Fixed ordering; each step completes before the next begins:
    Refusing is the correct failure direction. The alternative failure is selling
    something the owner chose to hold, at a price they did not choose.
 8. Restore halt state.
+
+8a. **Report a position budget that cannot buy one lot.** For each ticker in
+   `config.watchlist`, read the instrument and its last price, and compare
+   `instrument.lot × price` against
+   `risk.sizing.position_budget(config.allocated_capital, config.position_size_pct)`.
+
+   - When **no** watchlist instrument is affordable, alert the owner that the bot
+     cannot open a position in anything it is watching, naming the budget and the
+     cheapest lot cost found.
+   - When **some** are affordable, name the unaffordable ones in the ready alert
+     of step 9 rather than raising a separate alert. A partially reachable
+     watchlist is a normal operating condition — an instrument's price rises
+     through the budget without anything being wrong — and must not train the
+     owner to ignore the channel.
+   - A ticker whose instrument or price cannot be read is **excluded from the
+     judgement and named separately**, never counted as affordable and never
+     counted as unaffordable. If no price could be read for any ticker, the check
+     is **inconclusive** and says so; it must not report a blackout it did not
+     observe, and it must not stay silent as though it had confirmed health.
+
+   **This step never raises `StartupError`, and never prevents startup.** An
+   unaffordable budget stops *new entries only*. Refusing to start would
+   additionally abandon every open position — no exit evaluation, no stop
+   management, no `MAX_AGE` — converting a benign no-op into an unmanaged holding
+   with real money in it. The bot must keep running to protect what it holds.
+
+   It runs after step 7 so reconciliation has settled position truth first, and
+   before step 9 so the finding can be folded into the ready alert. A broker
+   failure in this step is alerted and startup continues; this is a diagnostic,
+   and it must never be the reason the bot is not running.
+
 9. Alert the owner that the bot is running, reporting version, mode, halt state
    and any reconciliation adjustments.
 
@@ -3984,6 +4051,22 @@ Applies across all modules. Every external failure mode has exactly one rule.
     Whenever a latch is added, list its set-sites against its reset-sites and
     look for the asymmetry. That check is mechanical, it takes a minute, and it
     is the only thing that has ever caught this class.
+
+37. **No instrument on the watchlist costs less than one position budget** →
+    alert at startup, and continue running. The bot is watching a list it cannot
+    afford to buy any of, and every signal it generates will be rejected
+    `ZERO_LOTS` forever. The rejection itself is correct and stays correct — this
+    rule governs only whether the owner is told. It is reported once per start
+    rather than per cycle or per signal: at one poll a minute the per-signal
+    alternative is several hundred identical messages a day, and an alert that
+    repeats forever is equivalent to no alert in a channel whose premise is that
+    silence means healthy.
+
+    Where **some** instruments are affordable and some are not, the unaffordable
+    ones are named in the ready alert and nothing is escalated. A watchlist the
+    budget only partly reaches is a normal operating state, not a fault: on
+    2026-08-28 MGNT and LKOH were out of reach while SBER and GAZP were buyable,
+    and that configuration was working as intended.
 
 ---
 
