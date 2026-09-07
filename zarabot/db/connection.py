@@ -8,10 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import aiosqlite
+
+_LOG = logging.getLogger(__name__)
+_TABLE_IN_ERROR = (
+    re.compile(r"no such table: (\S+)"),
+    re.compile(r"UNIQUE constraint failed: (\w+)"),
+    re.compile(r"table (\S+) already exists"),
+)
 
 _connection: aiosqlite.Connection | None = None
 # The transaction lock belongs to the connection, not to the module: a lock
@@ -27,6 +36,15 @@ class DatabaseNotOpenError(Exception):
 
 class DatabaseAlreadyOpenError(Exception):
     """Raised when connect is called while a process connection is already open."""
+
+
+def _table_from_error(exc: BaseException) -> str:
+    text = str(exc)
+    for pattern in _TABLE_IN_ERROR:
+        match = pattern.search(text)
+        if match:
+            return match.group(1).rstrip(".").split(".")[0]
+    return "unknown"
 
 
 async def connect(path: str) -> aiosqlite.Connection:
@@ -89,8 +107,17 @@ async def transaction() -> AsyncIterator[aiosqlite.Connection]:
         token = _depth.set(1)
         try:
             yield conn
-        except BaseException:
+        except BaseException as exc:
             await conn.rollback()
+            if isinstance(exc, aiosqlite.Error):
+                _LOG.error(
+                    "database write failed",
+                    extra={
+                        "event": "db_write_failed",
+                        "table": _table_from_error(exc),
+                        "critical": True,
+                    },
+                )
             raise
         else:
             await conn.commit()

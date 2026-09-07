@@ -243,7 +243,8 @@ the outer transaction and only the outermost exit commits, so
 `broker.reconcile` can call `db.positions` writers from inside its own
 transaction. No other module issues `BEGIN`, `commit` or `rollback` (rule 31),
 and reads take no transaction. Raises `DatabaseNotOpenError` when no connection
-is open.
+is open. On `aiosqlite.Error` during the write, emits `db_write_failed` with
+`table` and `critical` true, then re-raises (v1.61).
 
 **`async disconnect() → None`**
 Closes the process connection and forgets it. Idempotent when already closed.
