@@ -165,6 +165,19 @@ with `mark_run`. Two defects go with that change (#27):
   Restarts are routine — six in one evening during the #45 work — so this is the
   ordinary case, not an edge one.
 
+**Back-off takes the broker's hint when the broker gives one (v1.53).** After a
+failed cycle the delay escalates as rule 1 describes; when the failure was a
+`BrokerRateLimited` carrying `retry_after`, the delay is **the longer of** that
+hint and the escalation, capped by the same maximum. A hint shorter than the
+escalation changes nothing — the escalation already reflects how many cycles
+have failed — and a hint beyond the cap is bounded by it, because this loop
+submits exits and no external number may hold it asleep.
+
+The hint is overwritten on **every** failure, not only on the ones that carry
+it, and cleared by a successful cycle alongside the failure counter. A hint
+remembered from a rate limit two cycles ago would otherwise still be delaying a
+plain outage, which is stale state wearing the shape of a measurement (rule 36).
+
 **Not every latch moves.** `_first_cycle_at` stays process-local and must: it
 means "was *this process* running when the session opened", which is exactly
 what decides whether the day's opening snapshot may be written (step 4).
@@ -209,6 +222,25 @@ From `technical-spec.md` §8. Handle each exactly as written.
 1. **Market data transport failure** → WARNING, exponential backoff, retry on the
    next cycle. After three consecutive failed cycles, alert **once**; keep the
    process alive and keep trying. Never exit.
+
+2. **Broker rate limited** → WARNING, back off **for at least as long as the
+   broker's own hint**, and alert once when it has persisted for three
+   consecutive cycles, naming throttling rather than an outage. Never treat as
+   fatal.
+
+   `BrokerRateLimited.retry_after` carries the hint when the broker sends one.
+   It is the only party that knows when it will accept calls again, so it raises
+   the floor under the escalating back-off of rule 1 and never lowers it: the
+   delay is the longer of the two. It is still bounded by the same ceiling,
+   because this loop is also the **exit** path — no number supplied from outside
+   may keep the bot from closing a position indefinitely.
+
+   Until v1.53 the hint was computed, asserted at the raise site, and read by
+   nothing: the bot backed off on its own schedule while the broker's answer sat
+   unused on the exception. This rule previously said "alert once if sustained
+   beyond five minutes", which named a threshold no code implemented and no test
+   could fail — the alert has always come from rule 1's consecutive-cycle
+   counter. It now says what happens.
 
 21. **Unhandled exception in a background task** → log with traceback, alert,
     restart that task with exponential backoff. One failing task must never
@@ -276,6 +308,20 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - `open_position` raising `PositionStateError` or `DuplicateOrderError` is
   caught and the pass continues (proves both siblings of `OrderRejected` are
   handled, not just the one that had a branch).
+- A `BrokerRateLimited` whose `retry_after` exceeds the escalating back-off
+  delays the next cycle by the **hint** (proves the broker's own number is used
+  at all: it was computed, asserted at the raise site, and read by nothing).
+- A hint **shorter** than the escalation leaves the escalation unchanged (proves
+  the hint raises the floor and never lowers it — a two-second hint must not
+  undo a back-off five failed cycles deep).
+- A hint beyond the maximum back-off is capped at it (proves no number from
+  outside can hold the exit path asleep).
+- A successful cycle clears the hint, so a later failure that carries none is
+  delayed by the escalation alone (proves the same reset discipline the failure
+  counter has; a remembered hint is stale state shaped like a measurement).
+- Three consecutive rate-limited cycles alert **once**, and the alert names
+  throttling rather than a market-data outage (proves the cause reaches the
+  owner, instead of a bad field reading as weather — #6 and #23's complaint).
 - A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
   `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
   is no longer re-fetched once a minute).

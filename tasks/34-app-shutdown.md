@@ -91,6 +91,20 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - `open_position` raising `PositionStateError` or `DuplicateOrderError` is
   caught and the pass continues (proves both siblings of `OrderRejected` are
   handled, not just the one that had a branch).
+- A `BrokerRateLimited` whose `retry_after` exceeds the escalating back-off
+  delays the next cycle by the **hint** (proves the broker's own number is used
+  at all: it was computed, asserted at the raise site, and read by nothing).
+- A hint **shorter** than the escalation leaves the escalation unchanged (proves
+  the hint raises the floor and never lowers it — a two-second hint must not
+  undo a back-off five failed cycles deep).
+- A hint beyond the maximum back-off is capped at it (proves no number from
+  outside can hold the exit path asleep).
+- A successful cycle clears the hint, so a later failure that carries none is
+  delayed by the escalation alone (proves the same reset discipline the failure
+  counter has; a remembered hint is stale state shaped like a measurement).
+- Three consecutive rate-limited cycles alert **once**, and the alert names
+  throttling rather than a market-data outage (proves the cause reaches the
+  owner, instead of a bad field reading as weather — #6 and #23's complaint).
 - A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
   `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
   is no longer re-fetched once a minute).

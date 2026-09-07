@@ -324,8 +324,24 @@ From `technical-spec.md` §8. Handle each exactly as written.
    next cycle. After three consecutive failed cycles, alert **once**; keep the
    process alive and keep trying. Never exit.
 
-2. **Broker rate limited** → WARNING, back off per the broker's hint. Alert once
-   if sustained beyond five minutes. Never treat as fatal.
+2. **Broker rate limited** → WARNING, back off **for at least as long as the
+   broker's own hint**, and alert once when it has persisted for three
+   consecutive cycles, naming throttling rather than an outage. Never treat as
+   fatal.
+
+   `BrokerRateLimited.retry_after` carries the hint when the broker sends one.
+   It is the only party that knows when it will accept calls again, so it raises
+   the floor under the escalating back-off of rule 1 and never lowers it: the
+   delay is the longer of the two. It is still bounded by the same ceiling,
+   because this loop is also the **exit** path — no number supplied from outside
+   may keep the bot from closing a position indefinitely.
+
+   Until v1.53 the hint was computed, asserted at the raise site, and read by
+   nothing: the bot backed off on its own schedule while the broker's answer sat
+   unused on the exception. This rule previously said "alert once if sustained
+   beyond five minutes", which named a threshold no code implemented and no test
+   could fail — the alert has always come from rule 1's consecutive-cycle
+   counter. It now says what happens.
 
 3. **Entry order rejected** → ERROR, record `broker_reason`, alert, open no
    position. **Never retried.**

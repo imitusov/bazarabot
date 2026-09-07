@@ -50,7 +50,7 @@ M = [
  (31,"ops.backup","zarabot/ops/backup.py","`ops.backup`",[],[18],"Nightly database backup. A failure alerts but never stops trading."),
  ("31b","ops.commissions","zarabot/ops/commissions.py",None,["positions"],[12],"Records commissions the broker reported after the fill and corrects the profit figures that depended on them. Without it a trade's cost stays permanently understated."),
  (32,"app.startup","zarabot/app/startup.py","`app.startup`",[],[15,16,17,21,30,32],"Fixed startup ordering: config, logging, connection, migrations, strategies, session, order recovery, reconciliation, halt state, ready alert. 70% coverage."),
- (33,"app.loops","zarabot/app/loops.py","`app.loops` / `app.shutdown`",[],[1,21,29,33],"The trading cycle. Exits run before the halt check, which is what implements halt-blocks-entries-only. 70% coverage."),
+ (33,"app.loops","zarabot/app/loops.py","`app.loops` / `app.shutdown`",[],[1,2,21,29,33],"The trading cycle. Exits run before the halt check, which is what implements halt-blocks-entries-only. 70% coverage."),
  (34,"app.shutdown","zarabot/app/shutdown.py","`app.loops` / `app.shutdown`",[],[21,30],"Graceful shutdown. Never cancels or liquidates positions - restarts must have no financial consequence. 70% coverage."),
  (35,"__main__","zarabot/__main__.py",None,[],[15],"Process entry point so that `python -m zarabot` works. No logic of its own."),
  (36,"sandbox.data","sandbox/",None,[],[],"Historical candle loading for research. Laptop only."),
