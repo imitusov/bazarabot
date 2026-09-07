@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -260,14 +261,26 @@ async def _count(table: str) -> int:
     return int(row[0])
 
 
-async def test_agreement_produces_no_adjustments_and_no_alert(env: _Broker) -> None:
+async def test_agreement_produces_no_adjustments_and_no_alert(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
     await _open_local()
     env.holdings = (_broker_position(),)
-    report = await reconcile(NOW)
+    with caplog.at_level(logging.INFO, logger="zarabot.broker.reconcile"):
+        report = await reconcile(NOW)
     assert report.adjustments == ()
     assert env.alerts == []
     assert "post_market_order" not in env.calls
     assert "cancel_stop_order" not in env.calls
+    events = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "reconciliation"
+    ]
+    assert len(events) == 1
+    assert events[0].levelno == logging.INFO
+    assert events[0].adjustments_count == 0
+    assert events[0].types == []
 
 
 def _operation(
@@ -815,3 +828,44 @@ async def test_access_without_connect_raises(
     monkeypatch.setattr("zarabot.broker.reconcile.get_portfolio", fake_portfolio)
     with pytest.raises(DatabaseNotOpenError):
         await reconcile(NOW)
+
+
+async def test_stop_orphan_emits_stop_order_orphaned(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.holdings = ()
+    env.stops = [_stop(ticker="GAZP", stop_id="orphan")]
+    with caplog.at_level(logging.ERROR, logger="zarabot.broker.reconcile"):
+        await reconcile(NOW)
+    events = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "stop_order_orphaned"
+    ]
+    assert len(events) == 1
+    assert events[0].levelno == logging.ERROR
+    assert events[0].stop_order_id == "orphan"
+    assert events[0].ticker == "GAZP"
+
+
+async def test_exchange_stop_close_emits_stop_order_executed(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An EXCHANGE-protected position gone from the book is an exchange-fired stop."""
+
+    position = await _open_local()
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "stop-key")
+    env.holdings = ()
+    env.operations = [_sold_at(Decimal("94.00"))]
+    with caplog.at_level(logging.INFO, logger="zarabot.broker.reconcile"):
+        await reconcile(NOW)
+    events = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "stop_order_executed"
+    ]
+    assert len(events) == 1
+    assert events[0].position_id == position.id
+    assert events[0].ticker == "SBER"
+    assert events[0].fill_price == Decimal("94.00")
+    assert events[0].gap_vs_stop == Decimal("94.00") - Decimal("95")
