@@ -118,7 +118,7 @@ From `technical-spec.md` §8. Handle each exactly as written.
    or at next startup. **Never resubmit.**
 
 11. **Database write failure on a trading-critical path** (orders, positions,
-    halt state) → hard error: halt trading, alert, stop opening anything. The bot
+    halt state, **cooldowns** — v1.63) → hard error: halt trading, alert, stop opening anything. The bot
     must never trade what it cannot record.
 
 12. **Database write failure on a non-critical path** (signals, snapshots,
