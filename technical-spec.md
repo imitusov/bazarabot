@@ -417,8 +417,15 @@ it proves.
 - A read path takes no transaction: reads succeed while another task holds one.
 - A write that fails with `aiosqlite.Error` inside `transaction()` emits
   `db_write_failed` with `table` (the SQLite object name when the error names
-  one, otherwise `unknown`) and `critical` true, then the exception still
-  propagates (v1.61). Repositories do not emit this event.
+  one, otherwise `unknown`), then the exception still propagates (v1.61).
+- A failed write to `positions` reports `critical` true; a failed write to
+  `daily_snapshots` reports `critical` false; a failure naming no table reports
+  `critical` true (v1.62; proves the field distinguishes rule 11 from rule 12
+  rather than asserting the same thing every time, and that an unclassified
+  table fails loud).
+- A rule-12 repository whose write fails produces **exactly one**
+  `db_write_failed` record (proves `db.connection` is the single owner and the
+  repository adds none of its own).
 
 **`db.positions`**
 - Opening a position then reading open positions returns it (happy path).
@@ -1592,9 +1599,31 @@ inherit whichever file the previous importer happened to open.
 - A read needs no transaction and must not take one.
 - **On `aiosqlite.Error` during a write, emit `db_write_failed` (v1.61)** with
   `table` (the object name when the error names one, otherwise `unknown`) and
-  `critical` true, then re-raise. This is the single owner of that event;
+  `critical`, then re-raise. This is the single owner of that event;
   repositories that swallow a rule-12 failure still go through this path so the
   event is not optional.
+- **`critical` is derived from the table, not hardcoded (v1.62).** It is `true`
+  for the trading-critical tables of rule 11 — `positions`, `orders`,
+  `stop_orders`, `halt_state`, `position_events` — and `false` for the
+  non-critical tables of rule 12: `signals`, `daily_snapshots`, `instruments`.
+  Until v1.62 the contract said `critical` true unconditionally, so a failed
+  analytics write announced itself as trading-critical. The field is what an
+  operator filters on to find writes that actually stopped trading; always-true
+  made that filter return every hiccup, which is the same as having no field.
+- **An unrecognised or `unknown` table is `critical` true.** The safe default in
+  a module that records money is to overstate rather than understate, and a
+  table this list does not name is a table nobody has classified.
+- This module cannot ask its caller: `transaction()` takes no argument saying
+  which path it serves, and adding one would touch every call site to encode
+  what the table already tells us. Rules 11 and 12 are defined by table, so the
+  table is the honest source.
+- **`cooldowns` is deliberately absent from both lists (v1.62).** Rule 11 names
+  orders, positions and halt state; rule 12 names signals, snapshots and the
+  instruments cache. Neither names cooldowns, and `db.cooldowns` currently
+  swallows its write failures as though rule 12 covered it. A lost cooldown row
+  lets the bot re-enter a ticker it just exited, which is a trading consequence,
+  not an analytics one. Until an amendment assigns it, it falls to the unknown
+  default above and is reported `critical` true.
 
 **`async disconnect() → None`**
 - Closes the process connection and forgets it. Idempotent when already closed.
