@@ -16,20 +16,15 @@ it reaching the trading loop.
 **Do not:** infer criticality from table-name regex. The owner of the write
 already knows which rule it is on.
 
-**Callers (after v1.63):**
-- Rule 11, including `db.cooldowns`: omit the argument or pass `critical=True`.
-  A lost cooldown row lets the bot re-enter a ticker it just exited.
+**Adopted:** spec v1.64 (`091f2a8`, #83) — `transaction(*, critical: bool = True)`.
+Keep this file: it is why v1.62 (table regex) was wrong.
+
+**Callers (v1.63+):**
+- Rule 11, including `db.cooldowns`: default `critical=True`.
 - Rule 12 (`db.signals`, `db.snapshots`; instruments cache when it writes):
-  pass `critical=False`.
+  `critical=False`.
 
-**Test contract:** `transaction(critical=False)` plus an `aiosqlite.Error` that
-names no table still emits `critical` false. Default / `critical=True` emits
-true. A rule-12 repository failure still produces exactly one `db_write_failed`.
+**Modules:** #76 rebases onto v1.64 (done). Signals/snapshots pass `False` there.
 
-**Modules to re-run:** `5b-db-connection` (#76 rebase onto v1.64), then
-`db.signals` and `db.snapshots` (`critical=False`). `db.cooldowns` stays
-default-true; do not pass `False`.
-
-**Sequencing:** v1.62 already landed. #76 currently implements v1.62; **hold
-#76 until v1.64** replaces table-derivation with this argument, then rebase.
-Do not merge #76 against v1.62.
+**Sequencing:** v1.62 (#77) landed and was superseded by v1.64. Do not implement
+against table-derivation.

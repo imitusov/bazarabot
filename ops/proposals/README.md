@@ -11,9 +11,9 @@ re-running.
 
 Delete a proposal once its amendment is merged.
 
-Open: `76-db-write-failed-critical.md` — `critical` is `transaction(*, critical=)`,
-not a table regex. Hold #76 until v1.64; v1.62 already landed and is the wrong
-mechanism.
+Open: `76-db-write-failed-critical.md` — adopted as v1.64; kept as the record
+of why table-derivation failed. `79-broker-unavailable-backoff.md` — adopted as
+v1.65; hold is over.
 
 ## Open GitHub issues grouped by theme (2026-09-07, after `c94e3c7`)
 
