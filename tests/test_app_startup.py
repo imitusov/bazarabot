@@ -6,13 +6,14 @@ import os
 import subprocess
 import sys
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from zarabot.db.connection import connect, disconnect, shared
 from zarabot.db.migrations import apply
-from zarabot.models import HaltReason, ReconciliationReport
+from zarabot.models import HaltReason, Instrument, ReconciliationReport
 from zarabot.state.halt import halt, is_halted
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
@@ -25,6 +26,28 @@ REQUIRED_ENV = {
     "ALLOCATED_CAPITAL": "100000",
     "WATCHLIST": "SBER",
 }
+# Step 8a reads a lot size and a last price per watchlist ticker. Every value
+# below is the one measured on the live account on 2026-09-07, so the
+# affordability arithmetic in these tests is the arithmetic the bot will do.
+LOTS = {"SBER": 1, "GAZP": 10, "MGNT": 1, "LKOH": 1}
+PRICES = {
+    "SBER": Decimal("279.83"),
+    "GAZP": Decimal("90.40"),
+    "MGNT": Decimal("1632"),
+    "LKOH": Decimal("5003"),
+}
+
+
+def _instrument_of(ticker: str) -> Instrument:
+    return Instrument(
+        figi=f"FIGI-{ticker}",
+        ticker=ticker,
+        lot=LOTS[ticker],
+        min_price_increment=Decimal("0.01"),
+        currency="RUB",
+        trading_status="NORMAL_TRADING",
+        refreshed_at=NOW,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +79,14 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     async def _alert(text: str, urgent: bool = False) -> None:
         calls.append(f"alert:{text}")
 
+    async def _instrument(ticker: str) -> Instrument:
+        return _instrument_of(ticker)
+
+    async def _last_price(figi: str) -> Decimal:
+        return PRICES[figi.removeprefix("FIGI-")]
+
+    monkeypatch.setattr("zarabot.app.startup.get_instrument", _instrument)
+    monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
     monkeypatch.setattr("zarabot.app.startup.refresh", _refresh)
     monkeypatch.setattr("zarabot.app.startup.resolve_unfinished", _resolve)
     monkeypatch.setattr("zarabot.app.startup.reconcile", _reconcile)
@@ -771,3 +802,143 @@ async def test_allow_foreign_holdings_starts_observe_only(
     assert ready, [item for item in env if item.startswith("alert:")]
     assert "LKOH" in ready[0]
     assert traded == []
+
+
+# --- Step 8a: a position budget that cannot buy one lot (v1.46, rule 36) ------
+#
+# On 2026-08-28 the bot produced 307 signals and rejected all 307 as ZERO_LOTS,
+# every one of them MGNT against a 1000 RUB budget, and said nothing about it
+# for eleven days. risk.gate was right to reject; nothing was there to tell the
+# owner their budget could not reach the instrument that kept signalling.
+
+
+async def test_budget_below_every_lot_cost_alerts_and_still_completes(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blackout case — and, the half that matters, startup still finishes.
+
+    Refusing to start would abandon every open position: no exit evaluation, no
+    stop management, no MAX_AGE. An unaffordable budget stops new entries only,
+    so the failure direction that protects money is to keep running and say so.
+    """
+    from zarabot.app.startup import start
+
+    monkeypatch.setenv("WATCHLIST", "MGNT,LKOH")
+    monkeypatch.setenv("ALLOCATED_CAPITAL", "10000")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "10")
+
+    ctx = await start()
+
+    assert ctx.config.watchlist == ("MGNT", "LKOH")
+    alerts = [item.removeprefix("alert:") for item in env if item.startswith("alert:")]
+    blackout = [
+        text for text in alerts if "MGNT" in text and "running" not in text.lower()
+    ]
+    assert blackout, alerts
+    # The budget and the cheapest lot cost, so the owner can see the gap
+    # without going to look it up: 1000 against MGNT's 1632.
+    assert "1000" in blackout[0]
+    assert "1632" in blackout[0]
+    assert [text for text in alerts if "running" in text.lower()], alerts
+
+
+async def test_partly_affordable_watchlist_names_names_but_does_not_escalate(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A price rising through the budget is normal, not a fault.
+
+    Escalating it would put a recurring alert in a channel whose whole premise
+    is that silence means healthy, which is how an owner is trained to ignore
+    the one message that matters.
+    """
+    from zarabot.app.startup import start
+
+    monkeypatch.setenv("WATCHLIST", "SBER,MGNT")
+    monkeypatch.setenv("ALLOCATED_CAPITAL", "10000")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "10")
+
+    await start()
+
+    alerts = [item.removeprefix("alert:") for item in env if item.startswith("alert:")]
+    ready = [text for text in alerts if "running" in text.lower()]
+    assert ready, alerts
+    assert "MGNT" in ready[0]
+    assert "SBER" not in ready[0]
+    # Nothing but the ready alert may mention it.
+    assert [text for text in alerts if "MGNT" in text] == ready
+
+
+async def test_unreadable_price_is_counted_as_neither_answer(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing data is not evidence of affordability, nor of a blackout."""
+    from zarabot.app.startup import start
+
+    monkeypatch.setenv("WATCHLIST", "SBER,MGNT")
+    monkeypatch.setenv("ALLOCATED_CAPITAL", "10000")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "10")
+
+    async def _last_price(figi: str) -> Decimal:
+        if figi == "FIGI-MGNT":
+            raise RuntimeError("no price")
+        return PRICES[figi.removeprefix("FIGI-")]
+
+    monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
+
+    await start()
+
+    alerts = [item.removeprefix("alert:") for item in env if item.startswith("alert:")]
+    ready = [text for text in alerts if "running" in text.lower()]
+    assert ready, alerts
+    # Named, and named as unknown rather than folded into either count.
+    assert "MGNT" in ready[0]
+    assert "unknown" in ready[0].lower()
+    assert "unaffordable=MGNT" not in ready[0]
+    assert not [
+        text for text in alerts if "running" not in text.lower() and "MGNT" in text
+    ]
+
+
+async def test_no_readable_price_reports_inconclusive_not_a_blackout(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broker outage must not manufacture the finding the check exists for.
+
+    Failure register rule 5: a defensive fallback that turns a loud failure into
+    a plausible-sounding quiet one. Reporting "nothing is affordable" off zero
+    observations would be exactly that, and the owner would act on it.
+    """
+    from zarabot.app.startup import start
+
+    monkeypatch.setenv("WATCHLIST", "SBER,MGNT")
+
+    async def _last_price(figi: str) -> Decimal:
+        raise RuntimeError("broker unreachable")
+
+    monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
+
+    await start()
+
+    alerts = [item.removeprefix("alert:") for item in env if item.startswith("alert:")]
+    ready = [text for text in alerts if "running" in text.lower()]
+    assert ready, alerts
+    assert "inconclusive" in ready[0].lower()
+    # Neither silent nor crying blackout.
+    assert "cannot open a position" not in " ".join(alerts).lower()
+
+
+async def test_broker_failure_in_step_8a_does_not_raise_startup_error(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A diagnostic must never be the reason the bot is not running."""
+    from zarabot.app.startup import start
+
+    async def _instrument(ticker: str) -> Instrument:
+        raise RuntimeError("broker unreachable")
+
+    monkeypatch.setattr("zarabot.app.startup.get_instrument", _instrument)
+
+    ctx = await start()
+
+    assert ctx.config.trading_mode == "live"
+    assert [item for item in env if item.startswith("alert:") and "running" in item]
