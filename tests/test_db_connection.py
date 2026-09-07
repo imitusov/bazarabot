@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -295,3 +296,41 @@ async def test_reads_do_not_need_a_transaction(tmp_path: Path) -> None:
         )
         cursor = await shared().execute("SELECT COUNT(*) FROM cooldowns")
         assert (await cursor.fetchone())[0] == 1
+
+
+async def test_aiosqlite_error_inside_transaction_emits_db_write_failed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.61: a write failure is a structured event, then still raises."""
+
+    path = tmp_path / "zarabot.db"
+    await connect(str(path))
+    caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
+    with pytest.raises(aiosqlite.Error):
+        async with transaction() as txn:
+            await txn.execute("INSERT INTO nosuch (id) VALUES (1)")
+    records = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "db_write_failed"
+    ]
+    assert len(records) == 1
+    assert records[0].table == "nosuch"
+    assert records[0].critical is True
+
+
+async def test_non_sqlite_error_inside_transaction_does_not_emit_db_write_failed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A programming error is not a write failure."""
+
+    path = tmp_path / "zarabot.db"
+    await connect(str(path))
+    caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
+    with pytest.raises(RuntimeError, match="injected"):
+        async with transaction() as txn:
+            await txn.execute("SELECT 1")
+            raise RuntimeError("injected")
+    assert not any(
+        getattr(rec, "event", None) == "db_write_failed" for rec in caplog.records
+    )
