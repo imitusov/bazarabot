@@ -53,8 +53,22 @@ Module **22** of 40 in `dependency-order.md`. Everything before it is complete a
   `session_open` when the first day of the fetched window is a trading session,
   with `trade_date`, `opens_at`, `closes_at` from that `SessionInfo`.
   `session_closed` when that day is not a trading session, with the same three
-  fields (`opens_at` / `closes_at` may be null). This is a log, not a Telegram
-  alert — the brief deliberately does not alert session open/close.
+  fields. This is a log, not a Telegram alert — the brief deliberately does not
+  alert session open/close.
+- **`trade_date` on `session_closed` comes from `clock`, not from the
+  `SessionInfo` (v1.67).** `broker.client.get_trading_schedule` returns
+  `SessionInfo(start=None, end=None, is_trading_day=False)` for every
+  non-trading day, so a closed day carries no instant to derive a date from.
+  v1.61 asked for the three fields "from that `SessionInfo`" and allowed nulls
+  for `opens_at` and `closes_at` only, which required a `trade_date` the
+  `SessionInfo` cannot supply. Emit `clock.moscow_date(now)` instead, where
+  `now` is the refresh instant.
+- **`opens_at` and `closes_at` are null on `session_closed`, and that is the
+  whole point of the event.** A closed day has no open and no close; what the
+  record must still answer is *which day*. A `session_closed` whose `trade_date`
+  is also null says only that some unspecified day was shut, which is no more
+  useful than silence — and §7.1 calls a record missing a required field a
+  defect.
 
 **`is_open(now: datetime) → bool`**
 - True when `now` falls within a main session, inclusive of the open instant and
@@ -198,6 +212,17 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A successful refresh of a trading day emits `session_open` with `trade_date`,
   `opens_at`, `closes_at`; a successful refresh of a holiday emits
   `session_closed` (v1.61).
+- The holiday case is built from the shape the broker actually returns —
+  `SessionInfo(start=None, end=None, is_trading_day=False)` — and the emitted
+  record still carries a non-null `trade_date`, with `opens_at` and `closes_at`
+  null (v1.67; proves the event names the day it is talking about. A fixture
+  that gives a closed day session times cannot come from
+  `get_trading_schedule`, and a test built on one passes while every production
+  record is unanswerable).
+- `session_open` for a session starting late in the UTC day — 21:30 UTC, which
+  is the following date in Moscow — reports the **Moscow** `trade_date` (v1.67;
+  proves the conversion is real. A fixture whose UTC and Moscow dates coincide
+  is satisfied by `.date()` and pins nothing).
 
 ## Expected output
 
