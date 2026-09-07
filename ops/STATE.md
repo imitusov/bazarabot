@@ -3,7 +3,7 @@
 Where the project is, for a session starting cold. Read this, then
 `ops/WORK-ORDER.md` and `ops/RUNBOOK.md`.
 
-Updated: 2026-08-29 · spec v1.50 · brief v1.11 · 15 open issues
+Updated: 2026-09-07 · spec v1.53 · brief v1.11 · 14 open issues
 
 ## What this is
 
@@ -61,8 +61,13 @@ cannot falsify it.
 ## Still true
 
 **The bot has never traded.** The database exists at schema version 2 with zero
-positions, zero orders, zero signals, zero snapshots. The verification suite
-(V1–V11, `make verify`) has never run.
+positions, zero orders, zero signals, zero snapshots.
+
+*(Corrected 2026-09-07: this paragraph also said the verification suite had
+never run. It ran green on 2026-08-27 — see the section two above, which this
+one contradicted for eleven days. A state document that disagrees with itself
+is worse than one that is merely out of date, because both halves read as
+current.)*
 
 So all but one of the 28 open issues was found by *reading* code, or by a
 critic pass over code that had already been read. The exception is #39, found in
@@ -137,15 +142,17 @@ green on all six gates, coverage 90.57%. The critic pass on task 32 was not
 clean; its two findings are filed as #35 and #36, which is what the runbook
 requires before a batch closes.
 
-**#23 was in this batch's title and is not fixed.** Batch 1 gave it the type
-distinction — `PriceRejected` is no longer conflated with `BrokerUnavailable` —
-but both problems the issue actually specifies are untouched:
-`client.py:122` still turns every non-SDK exception into `BrokerUnavailable`
-with `from None`, and `market/data.py:37` is still `except Exception: continue`.
-It belongs to batch 6 with #10 and #18, where the work order already had it —
-error typing and channel reuse are one change to the same wrapper. Scope
-recorded on the issue so the next agent does not inherit the assumption that it
-landed here.
+**#23 was in this batch's title and was not fixed here.** Batch 1 gave it the
+type distinction — `PriceRejected` is no longer conflated with
+`BrokerUnavailable` — but neither problem the issue actually specifies.
+
+*(Corrected 2026-09-07. The rest of this paragraph said both halves were still
+open, and it was wrong about the first for twelve days: `broker.client`'s
+narrowing landed in `70b2214`, spec v1.27, and is what made #39 diagnosable.
+The `market.data` half is closed as of today. **#23 is closed.** The issue's own
+comments carried the accurate split the whole time, which is the lesson: when
+this file and an issue thread disagree, the thread was written while looking at
+the code.)*
 
 ## Opened by the critic on task 32
 
@@ -546,18 +553,93 @@ strategies over ~400 days of real candles: a healthy signal count there beside
 an empty `signals` table means the bot is not reaching its strategies at all,
 and zero there is a strategy finding rather than a plumbing one.
 
-Two things this session could not do, and they bound the answer: this container
-has no broker token and no route to MOEX, and the weekly health export has
+Two things that session could not do, and they bound the answer: the container
+had no broker token and no route to MOEX, and the weekly health export has
 **never pushed** — the `ops/health` branch does not exist on the remote, so the
 one mechanism designed to show rejection reasons has produced nothing in five
 weeks of uptime. Whatever the funnel says, that timer needs checking too.
+
+## #23 closed — and the silence it named had a second half nobody had written down
+
+2026-09-07, spec v1.51 → v1.53, deployed. The bot still has not traded; what
+changed is that it can no longer fail to trade *quietly*.
+
+**The fix as filed (v1.51).** `market.data` counts consecutive failures per
+ticker and alerts once on the third, naming the ticker and the failure; a
+success clears the count and the latch together. The catch narrowed from
+`Exception` to `(BrokerUnavailable, BrokerRateLimited, InstrumentNotFound)`, so
+an `AttributeError` from a renamed SDK field now reaches `_supervise` instead of
+being filed as a missing instrument. Rule 36 generalises it: *a degraded state
+that persists must alert; only a transient one may be logged* — threshold, one
+alert, reset on recovery, and each of the three named with the issue its absence
+already cost (#23, #32/#48, #8).
+
+**The half that was not filed (v1.52), and it is the more interesting one.** A
+fetch that *succeeds* and returns nothing — or fewer candles than the lookback
+asked for — reset the failure counter and read as health to everything. The
+ticker was then skipped by `_evaluate_entries` or evaluated to `None` by every
+strategy, on every cycle, with no counter, no log and no alert. Same blindness,
+opposite disguise. It is one counter with the failures, deliberately: with a
+counter each, a ticker alternating between a failed fetch and a short one resets
+both every call and crosses no threshold ever, which is a worse silence than the
+one being fixed.
+
+**A value carried and thrown away (v1.53).** The critic pass on the finished
+work turned up `BrokerRateLimited.retry_after`: computed in `broker.client`,
+asserted at the raise site, and read by no caller, while rule 2 said "back off
+per the broker's hint" and `_trading_loop` backed off on a guess. The delay is
+now the longer of the hint and the escalation, capped by the same ceiling —
+capped because this loop also submits exits, and no number from outside may hold
+it asleep. Rule 2 also promised an alert "if sustained beyond five minutes",
+a threshold no code implemented and no test could fail; it now says what
+happens, and the message names throttling instead of reporting a rate limit as
+a market-data outage.
+
+**Three lessons from the shape of the work.**
+
+1. **The issue thread was more accurate than this file.** #23's comments
+   recorded the exact split — client half done in v1.27, `market.data` half open
+   — while the batch-1 section here said both were open. Twelve days of a stale
+   claim in the document a cold session reads first.
+2. **The seam guard earned its keep, and I checked that it did.** `market.data`
+   importing `alert` is exactly what `test_the_seam_table_covers_every_module_that_alerts`
+   exists to catch; removing the row it needed fails with
+   `assert not {'zarabot.market.data'}`. Verifying a guard fires costs a minute
+   and is the difference between a guard and a decoration (#49's whole lesson).
+3. **The second half came from asking what the fix's own downstream looked
+   like.** Nothing in the audit named the empty-response case; it fell out of
+   reading `_evaluate_entries` immediately after making `market.data` honest.
+   Worth doing routinely: after closing a silence, look one call further down
+   for the same silence wearing different clothes.
+
+## The deploy path is proven as far as the registry
+
+`main` at `d1700b8`, Package run 56 green: the full check suite on a clean
+checkout from `requirements.lock`, then the image built and pushed as
+`ghcr.io/imitusov/bazarabot:d1700b8…` and `:candidate`.
+
+What is **not** yet observed is everything after the registry. `update.sh` runs
+from an hourly timer but refuses outside 02:00–05:00 MSK and refuses with any
+order in flight, then waits 90s for `startup_ok` and rolls back if it does not
+see it. None of that has ever been watched running. The startup alert in
+Telegram is the evidence that it worked; silence means the rollback did its job
+and the bot is still on the 2026-08-29 image.
+
+**The question that started all this is still open.** Zero trades, cause
+unknown. What exists now that did not: an alert when a ticker goes dark for
+three cycles, an alert when its history comes back empty or short, and
+`scripts/diagnose/entry_funnel.py` to name the stage on demand. Run the funnel
+**inside a session** — most of its stages are meaningless with the market shut —
+and it answers in one run what five weeks of uptime could not.
 
 ## Not yet done
 
 - A sandbox session on **real** candles — the tool exists now (#12), the run
   does not
-- CI workflows exist but **have never executed on GitHub**
-- The VPS deploy path (`scripts/deploy/`) is written and untested
+- The VPS deploy path (`scripts/deploy/`) beyond the registry: `update.sh`,
+  its window, its in-flight check and its rollback have still never been
+  observed running. The half above them is proven — 56 Package runs, the last
+  on today's `main`
 - `#30`: `broker.client` 74.9% and `pnl` 69.6%, on ratchet floors
 - `#44`: no verification check exercises `get_operations`, which now carries
   every external close's price, time and commission
