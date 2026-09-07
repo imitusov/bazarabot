@@ -9,6 +9,22 @@ from zarabot.models import Instrument
 _HUNDRED = Decimal("100")
 
 
+def position_budget(allocated: Decimal, size_pct: Decimal) -> Decimal:
+    """Return ``size_pct%`` of ``allocated`` — the intended cost of one position.
+
+    This is the budget before headroom and the cash reserve narrow it further.
+    It exists so the formula has **one** definition: :func:`size_position`
+    computes it to bound an order, and ``app.startup`` compares it against a lot
+    cost to decide whether any order is possible at all. Two copies on the money
+    path is a drift hazard, and the second copy would sit in an orchestration
+    module carrying a 70% coverage floor rather than this module's 95%.
+
+    Never negative. ``allocated <= 0`` is refused by ``config.load()`` and is
+    not this function's concern.
+    """
+    return allocated * size_pct / _HUNDRED
+
+
 def size_position(
     price: Decimal,
     instrument: Instrument,
@@ -22,8 +38,8 @@ def size_position(
 
     The smallest of the three bounds wins:
 
-    * **budget** — ``size_pct%`` of ``allocated``, the intended size of one
-      position;
+    * **budget** — :func:`position_budget`, the intended size of one position,
+      obtained from that function and never recomputed here;
     * **headroom** — ``allocated - open_cost``, so the summed cost of the
       portfolio never exceeds the allocated capital (#16);
     * **spendable** — ``cash`` less ``reserve_pct%``, a buying-power reserve.
@@ -38,7 +54,7 @@ def size_position(
     lot_cost = Decimal(instrument.lot) * price
     if lot_cost <= 0:
         return 0
-    budget = allocated * size_pct / _HUNDRED
+    budget = position_budget(allocated, size_pct)
     headroom = allocated - open_cost
     spendable = cash * (_HUNDRED - reserve_pct) / _HUNDRED
     affordable = min(budget, headroom, spendable)

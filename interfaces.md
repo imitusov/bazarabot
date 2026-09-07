@@ -485,10 +485,19 @@ Access before `connect` or after `disconnect` raises `DatabaseNotOpenError`
 
 Pure. No I/O. 95% coverage required.
 
+**`position_budget(allocated: Decimal, size_pct: Decimal) → Decimal`**
+`size_pct% × allocated` — the intended cost of one position, before headroom and
+the cash reserve narrow it further. The budget's single definition:
+`size_position` bounds an order with it and `app.startup` compares it against a
+lot cost to decide whether any order is possible at all (rule 36). Callers use
+this rather than recomputing the formula — a second copy on the money path is a
+drift hazard, and it would live in a module carrying a 70% coverage floor.
+Never negative; `allocated ≤ 0` is refused by `config.load()`.
+
 **`size_position(price: Decimal, instrument: Instrument, allocated: Decimal, cash: Decimal, size_pct: Decimal, open_cost: Decimal, reserve_pct: Decimal) → int`**
 Whole lots to buy, rounded down (truncating division, so no quotient rounded at
 the context precision can return a lot the money cannot pay for).
-`min(size_pct% × allocated, allocated − open_cost, cash × (100 − reserve_pct)%)
+`min(position_budget(allocated, size_pct), allocated − open_cost, cash × (100 − reserve_pct)%)
 / (lot × price)`. Returns 0 when one lot exceeds the smallest of those three,
 when headroom is negative, or when lot cost is not positive. Never negative.
 Satisfies `lots × lot × price ≤ allocated − open_cost` and `≤ cash` for every
