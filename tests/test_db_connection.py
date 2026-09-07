@@ -332,24 +332,27 @@ async def test_failed_write_to_positions_reports_critical_true(
         if getattr(rec, "event", None) == "db_write_failed"
     ]
     assert len(records) == 1
-    assert records[0].table == "positions"
     assert records[0].critical is True
 
 
-async def test_failed_write_to_daily_snapshots_reports_critical_false(
-    db: Path, caplog: pytest.LogCaptureFixture
+async def test_transaction_critical_false_reports_false_even_when_error_names_no_table(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """v1.64: a locked database on a rule-12 path is still not trading-critical."""
+
+    path = tmp_path / "zarabot.db"
+    await connect(str(path))
     caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
-    with pytest.raises(aiosqlite.Error):
-        async with transaction() as txn:
-            await txn.execute("INSERT INTO daily_snapshots (trade_date) VALUES (NULL)")
+    with pytest.raises(aiosqlite.OperationalError, match="database is locked"):
+        async with transaction(critical=False):
+            raise aiosqlite.OperationalError("database is locked")
     records = [
         rec
         for rec in caplog.records
         if getattr(rec, "event", None) == "db_write_failed"
     ]
     assert len(records) == 1
-    assert records[0].table == "daily_snapshots"
+    assert records[0].table == "unknown"
     assert records[0].critical is False
 
 

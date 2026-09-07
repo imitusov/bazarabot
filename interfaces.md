@@ -244,8 +244,9 @@ the outer transaction and only the outermost exit commits, so
 transaction. No other module issues `BEGIN`, `commit` or `rollback` (rule 31),
 and reads take no transaction. Raises `DatabaseNotOpenError` when no connection
 is open. On `aiosqlite.Error` during the write, emits `db_write_failed` with
-`table` and `critical` derived from the table (true for rule 11 and unknown,
-false for `signals`, `daily_snapshots`, `instruments`), then re-raises (v1.62).
+`table` (from the error text, or `unknown`) and `critical` from the keyword
+argument `transaction(*, critical: bool = True)` (v1.64). Rule-12 callers pass
+`critical=False`. Then re-raises.
 
 **`async disconnect() → None`**
 Closes the process connection and forgets it. Idempotent when already closed.

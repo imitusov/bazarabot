@@ -21,7 +21,6 @@ _TABLE_IN_ERROR = (
     re.compile(r"constraint failed: (\w+)"),
     re.compile(r"table (\S+) already exists"),
 )
-_RULE_12_TABLES = frozenset({"signals", "daily_snapshots", "instruments"})
 
 _connection: aiosqlite.Connection | None = None
 # The transaction lock belongs to the connection, not to the module: a lock
@@ -46,11 +45,6 @@ def _table_from_error(exc: BaseException) -> str:
         if match:
             return match.group(1).rstrip(".").split(".")[0]
     return "unknown"
-
-
-def _critical(table: str) -> bool:
-    """False only for rule-12 tables; everything else, including unknown, is true."""
-    return table not in _RULE_12_TABLES
 
 
 async def connect(path: str) -> aiosqlite.Connection:
@@ -92,12 +86,13 @@ async def disconnect() -> None:
 
 
 @asynccontextmanager
-async def transaction() -> AsyncIterator[aiosqlite.Connection]:
+async def transaction(*, critical: bool = True) -> AsyncIterator[aiosqlite.Connection]:
     """The sole transaction owner. Every write runs inside this (rule 31).
 
     Reentrant: a nested acquisition on the same task joins the outer
     transaction, because `broker.reconcile` calls `db.positions` writers while
-    doing work of its own. Only the outermost exit commits.
+    doing work of its own. Only the outermost exit commits. Nested calls ignore
+    their own ``critical`` flag; the outermost argument is the one logged.
     """
     if _depth.get() > 0:
         yield shared()
@@ -116,13 +111,12 @@ async def transaction() -> AsyncIterator[aiosqlite.Connection]:
         except BaseException as exc:
             await conn.rollback()
             if isinstance(exc, aiosqlite.Error):
-                table = _table_from_error(exc)
                 _LOG.error(
                     "database write failed",
                     extra={
                         "event": "db_write_failed",
-                        "table": table,
-                        "critical": _critical(table),
+                        "table": _table_from_error(exc),
+                        "critical": critical,
                     },
                 )
             raise

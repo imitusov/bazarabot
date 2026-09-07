@@ -66,7 +66,7 @@ def _money(value: Decimal | None) -> str | None:
 async def write_daily(snapshot: DailySnapshot) -> None:
     """Upsert on the Moscow trade date. Write failures are not propagated."""
     try:
-        async with transaction() as conn:
+        async with transaction(critical=False) as conn:
             await conn.execute(
                 """
                 INSERT INTO daily_snapshots (
