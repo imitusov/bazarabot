@@ -892,7 +892,34 @@ async def test_raising_broker_unavailable_emits_broker_unavailable_with_method(
     assert record.levelno == logging.WARNING
     assert record.method == "get_last_price"
     assert record.consecutive_failures == 1
-    assert record.backoff_seconds == 0
+    assert getattr(record, "backoff_seconds", None) is None
+
+
+async def test_consecutive_failures_reset_after_success(
+    capture: _Capture, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.65: the count is per incident, not for the life of the process."""
+
+    down = AioRequestError(StatusCode.UNAVAILABLE, "down", None)
+    capture.fail = down
+    with (
+        caplog.at_level(logging.WARNING, logger="zarabot.broker.client"),
+        pytest.raises(BrokerUnavailable),
+    ):
+        await get_last_price("BBG000000001")
+    with pytest.raises(BrokerUnavailable):
+        await get_last_price("BBG000000001")
+    capture.fail = None
+    await get_last_price("BBG000000001")
+    capture.fail = down
+    with pytest.raises(BrokerUnavailable):
+        await get_last_price("BBG000000001")
+    counts = [
+        record.consecutive_failures
+        for record in caplog.records
+        if getattr(record, "event", None) == "broker_unavailable"
+    ]
+    assert counts == [1, 2, 1]
 
 
 async def test_raising_broker_rate_limited_emits_rate_limited_with_retry_after_seconds(

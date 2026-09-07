@@ -108,8 +108,7 @@ _RUB_PREFIX = "RUB"
 _last_accepted: dict[str, Decimal] = {}
 
 # Process-local consecutive `BrokerUnavailable` counts, keyed by public method
-# name. Cleared when that method succeeds. `backoff_seconds` is always 0 here:
-# delay lives in `app.loops`.
+# name. Cleared when that method succeeds.
 _consecutive_failures: dict[str, int] = {}
 _log = logging.getLogger(__name__)
 
@@ -248,7 +247,6 @@ def _raise_unavailable(
             "event": "broker_unavailable",
             "method": method,
             "consecutive_failures": count,
-            "backoff_seconds": 0,
         },
     )
     if cause is None:

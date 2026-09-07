@@ -643,12 +643,12 @@ caller's not-found type where one exists. **Every other gRPC status —
 retry on `BrokerUnavailable` must therefore expect a defect to surface rather
 than loop forever. `from None` is never used.
 
-**Observability (v1.61).** Raising `BrokerUnavailable` emits WARNING
+**Observability (v1.65).** Raising `BrokerUnavailable` emits WARNING
 `broker_unavailable` with `extra={"event": "broker_unavailable", "method": ...,
-"consecutive_failures": ..., "backoff_seconds": 0}`. `consecutive_failures` is
-process-local per public method, incremented on each `BrokerUnavailable` for
-that method and cleared when that method succeeds. `backoff_seconds` is always
-`0` in this module — delay is owned by `app.loops`. Raising `BrokerRateLimited`
+"consecutive_failures": ...}`. `consecutive_failures` is process-local per
+public method, incremented on each `BrokerUnavailable` for that method and
+cleared when that method succeeds. `backoff_seconds` is not a field of this
+event — delay is owned by `app.loops`. Raising `BrokerRateLimited`
 emits WARNING `rate_limited` with `extra={"event": "rate_limited", "method": ...,
 "retry_after_seconds": ...}` (`Decimal | None`, the broker hint). Tokens are
 never logged.
