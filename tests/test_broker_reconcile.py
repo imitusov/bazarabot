@@ -612,6 +612,61 @@ async def test_mispriced_and_orphan_and_adoptable_stops(env: _Broker) -> None:
     assert any(item["type"] == "STOP_ORPHAN" for item in report.adjustments)
 
 
+async def test_stop_snapped_to_the_price_increment_is_not_mispriced(
+    env: _Broker,
+) -> None:
+    """The broker rounds a posted stop to the tick; that is not a discrepancy.
+
+    GMKN 125.44 against a stored 125.457, on every restart, cancelled and
+    re-posted a stop the broker had placed exactly as asked (spec v1.55).
+    """
+    await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("94.995"))]
+    report = await reconcile(NOW)
+    assert not any(item["type"] == "STOP_MISPRICED" for item in report.adjustments)
+
+
+async def test_stop_a_full_increment_away_is_still_mispriced(env: _Broker) -> None:
+    await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("94.99"))]
+    report = await reconcile(NOW)
+    assert any(item["type"] == "STOP_MISPRICED" for item in report.adjustments)
+
+
+async def test_tolerated_stop_on_a_local_position_is_adoptable(env: _Broker) -> None:
+    await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("94.995"))]
+    report = await reconcile(NOW)
+    assert any(item["type"] == "STOP_ADOPTABLE" for item in report.adjustments)
+
+
+async def test_unreadable_increment_reports_no_misprice_and_alerts(
+    env: _Broker,
+) -> None:
+    """An unmeasurable difference must not become a cancel-and-re-post."""
+    position = await _open_local()
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "ex-stop")
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("90")), _stop(stop_id="other", price=Decimal("90"))]
+
+    async def _unavailable(ticker: str) -> Instrument:
+        raise BrokerUnavailable("instrument metadata down")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("zarabot.broker.reconcile.get_instrument", _unavailable)
+    try:
+        report = await reconcile(NOW)
+    finally:
+        monkeypatch.undo()
+    types = [item["type"] for item in report.adjustments]
+    assert "STOP_MISPRICED" not in types
+    assert "STOP_DUPLICATE" in types
+    assert any("increment" in text or "SBER" in text for text in env.alerts)
+
+
 async def test_external_close_writes_no_order_row(env: _Broker) -> None:
     await _open_local()
     env.holdings = ()

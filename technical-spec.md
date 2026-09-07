@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.54
+**Version:** 1.55
 **Date:** 2026-09-07
 **Implements:** `business-brief.md` v1.11
 
@@ -598,6 +598,18 @@ it proves.
   to re-derive the rule).
 - With no `stop_order_key` recorded, `keep` is the oldest stop by `created_at`
   (proves the documented tie-break).
+- A stop the broker holds one **half** increment below the position's stop price
+  reports **no** `STOP_MISPRICED` (proves the tick-snapped price the broker
+  actually holds is not read as a discrepancy — the finding that cancelled and
+  re-posted all three live stops on every restart).
+- A stop a **full** increment away is still reported `STOP_MISPRICED` (proves the
+  tolerance is one increment and not an open-ended blur).
+- A stop within the increment on a `LOCAL` position is reported `STOP_ADOPTABLE`
+  (proves the tolerated stop takes the adoption path, not the replacement one).
+- When `get_instrument` fails for the position's ticker, no `STOP_MISPRICED` is
+  reported, the failure is alerted, and reconciliation still returns its other
+  findings (proves an unmeasurable discrepancy does not become a cancel-and-
+  re-post).
 - A lot-count mismatch adopts the broker's count and alerts (proves quantity
   reconciliation).
 - Reconciliation applies each **corrective write** at most once: running it twice
@@ -2239,6 +2251,30 @@ was one of the eight sites opening its own connection.
   anywhere, including read-only diagnostics, without financial side effects.
 - On restart an existing stop is **adopted** rather than replaced — two stops on
   one position would sell it twice.
+- **A stop is mispriced only when it differs from the position's stop by a full
+  price increment or more (v1.55).** The broker snaps a posted stop to the
+  instrument's `min_price_increment`, so the price it holds is almost never the
+  price the bot computed: on 2026-09-07 the account held GMKN at 125.44 against
+  a stored 125.457, SBER at 265.89 against 265.8955 and MTSS at 179.05 against
+  179.075. An exact inequality called all three mispriced on every startup, and
+  the caller's remedy — cancel then re-post — left three live positions
+  momentarily unprotected once per restart, wrote a fresh `stop_orders` row each
+  time, and did it for stops the broker had placed exactly as asked. The
+  comparison is therefore `abs(broker − local) < min_price_increment`, read from
+  `broker.client.get_instrument(ticker)` for the position's ticker. Nothing is
+  rounded anywhere: the bot does not know which way the broker rounds, and
+  writing a guessed rounded price into `positions` or `stop_orders` would put an
+  invented number in the record, which rule 33 forbids. A tolerance costs
+  nothing here because the bot never moves a stop after entry — a genuinely
+  wrong stop is wrong by the distance between two different prices, not by less
+  than one tick.
+- **A stop whose increment cannot be read is not judged (v1.55).** When
+  `get_instrument` fails for the position's ticker, no `STOP_MISPRICED` is
+  reported for it; the failure is alerted and reconciliation continues, and the
+  other findings for that position (`STOP_DUPLICATE`, `STOP_ADOPTABLE`) are
+  unaffected. Reporting it would spend the remedy — cancel and re-post — on a
+  discrepancy the module cannot currently measure, and that remedy is the one
+  that unprotects the position (error rule 38).
 - **More than one live stop on a position is reported as `STOP_DUPLICATE`**, and
   is the most serious discrepancy this module can find: it is the double-sell
   condition the ownership design exists to prevent, actually present. The remedy
@@ -4067,6 +4103,17 @@ Applies across all modules. Every external failure mode has exactly one rule.
     budget only partly reaches is a normal operating state, not a fault: on
     2026-08-28 MGNT and LKOH were out of reach while SBER and GAZP were buyable,
     and that configuration was working as intended.
+
+38. **A protective stop's price cannot be compared to the increment it was
+    snapped to** → report no discrepancy for it, alert, continue. The broker
+    rounds every posted stop to the instrument's `min_price_increment`, so
+    `broker.reconcile` judges a stop mispriced only at a difference of a full
+    increment or more, reading the increment from `get_instrument`. When that
+    read fails the comparison is not attempted. The remedy for `STOP_MISPRICED`
+    is cancel-then-re-post, which leaves a live position unprotected for the gap
+    between the two calls; spending it on a difference the bot cannot measure is
+    a worse trade than leaving a possibly-stale stop standing, which at least
+    still protects. Every other finding about that stop still stands.
 
 ---
 
