@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -667,7 +668,57 @@ async def test_unreadable_increment_reports_no_misprice_and_alerts(
     types = [item["type"] for item in report.adjustments]
     assert "STOP_MISPRICED" not in types
     assert "STOP_DUPLICATE" in types
-    assert any("increment" in text or "SBER" in text for text in env.alerts)
+    assert any("increment" in text for text in env.alerts)
+
+
+async def test_unreadable_increment_reports_no_adoptable_stop(env: _Broker) -> None:
+    """The price comparison guards adoption, not only replacement.
+
+    Suppressing the misprice finding alone routed an unjudged stop into the
+    branch beneath it, and `adopt_existing_stop` would have made the exchange
+    the position's sole protection at a price nobody could verify — while
+    `lifecycle.exits` stopped firing STOP_LOSS for it (spec v1.56).
+    """
+    position = await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("90"))]
+
+    async def _unavailable(ticker: str) -> Instrument:
+        raise BrokerUnavailable("instrument metadata down")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("zarabot.broker.reconcile.get_instrument", _unavailable)
+    try:
+        report = await reconcile(NOW)
+    finally:
+        monkeypatch.undo()
+    types = [item["type"] for item in report.adjustments]
+    assert "STOP_ADOPTABLE" not in types
+    assert "STOP_MISPRICED" not in types
+    reloaded = await get(position.id)
+    assert reloaded is not None
+    assert reloaded.stop_protection is StopProtection.LOCAL
+
+
+async def test_zero_increment_is_treated_as_unreadable(env: _Broker) -> None:
+    await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("90"))]
+
+    async def _zero(ticker: str) -> Instrument:
+        instrument = _instrument(ticker=ticker)
+        return replace(instrument, min_price_increment=Decimal("0"))
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("zarabot.broker.reconcile.get_instrument", _zero)
+    try:
+        report = await reconcile(NOW)
+    finally:
+        monkeypatch.undo()
+    types = [item["type"] for item in report.adjustments]
+    assert "STOP_MISPRICED" not in types
+    assert "STOP_ADOPTABLE" not in types
+    assert any("increment" in text for text in env.alerts)
 
 
 async def test_external_close_writes_no_order_row(env: _Broker) -> None:
