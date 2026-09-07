@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -375,9 +376,7 @@ async def test_ssl_verify_false_alerts_before_broker_call_without_token(
     alerts_before_broker: list[list[str]] = []
 
     async def _refresh(days: int) -> None:
-        alerts_before_broker.append(
-            [item for item in env if item.startswith("alert:")]
-        )
+        alerts_before_broker.append([item for item in env if item.startswith("alert:")])
         env.append("refresh")
 
     monkeypatch.setattr("zarabot.app.startup.refresh", _refresh)
@@ -437,6 +436,36 @@ async def test_start_connects_before_apply_and_apply_receives_shared(
     await start()
     assert order[:2] == ["connect", "apply"]
     assert applied_on[0] is shared()
+
+
+async def test_start_emits_the_startup_ok_log_event(
+    env: list[str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The deploy health gate greps the container's logs for this event.
+
+    `scripts/deploy/update.sh` waits for `startup_ok` and rolls the deploy back
+    without it. It was specified in §7.1 from the first version and emitted by
+    nothing (spec v1.58).
+    """
+    from zarabot.app.startup import start
+
+    # `configure` strips every root handler, caplog's included, so the record
+    # would be emitted into a logger nothing is listening to.
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+    with caplog.at_level(logging.INFO, logger="zarabot.app.startup"):
+        await start()
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "startup_ok"
+    ]
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.INFO
+    assert isinstance(record.version, str) and record.version
+    assert record.mode == "live"
+    assert record.halted is False
+    assert record.adjustments_count == 0
 
 
 def test_importing_app_startup_opens_no_database_file(tmp_path: Path) -> None:
