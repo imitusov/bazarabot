@@ -66,6 +66,10 @@ One handler per command in the brief's command table.
   many entries were omitted.
 - No handler mutates a risk limit.
 - `/halt` and `/resume` delegate to `state.halt` and to nothing else.
+- **`/halt` passes `daily_loss_pct` (v1.69).** It calls
+  `pnl.daily_loss_pct(clock.now())` and hands the result to `state.halt.halt`,
+  so a manual halt's record still carries the day's position. This module
+  already imports `zarabot.pnl`, so it adds no dependency.
 
 ## Relevant error handling rules
 
