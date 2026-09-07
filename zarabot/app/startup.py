@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal
@@ -36,6 +37,7 @@ from zarabot.strategies.registry import enabled
 from zarabot.telegram.commands import set_report_builder
 from zarabot.telegram.notifier import alert
 
+_LOG = logging.getLogger(__name__)
 _VERSION = "0.1.0"
 _SSL_DISABLED_TEXT = (
     "zarabot starting with SSL_TBANK_VERIFY=false: certificate verification "
@@ -414,6 +416,19 @@ async def start() -> AppContext:
         await _report_reachability(reach)
         set_report_builder(build_report)
         await alert(_ready_text(cfg, halt, report, reach))
+        # The same four facts as the alert, for a reader that cannot read
+        # Telegram: `scripts/deploy/update.sh` waits for this event and rolls
+        # the deploy back without it (§7.1, spec v1.50).
+        _LOG.info(
+            "startup complete",
+            extra={
+                "event": "startup_ok",
+                "version": _VERSION,
+                "mode": cfg.trading_mode,
+                "halted": halt is not None and halt.halted,
+                "adjustments_count": len(report.adjustments),
+            },
+        )
         return AppContext(
             config=cfg,
             strategies=strategies,

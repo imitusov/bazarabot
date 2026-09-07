@@ -117,7 +117,16 @@ Fixed ordering; each step completes before the next begins:
    and it must never be the reason the bot is not running.
 
 9. Alert the owner that the bot is running, reporting version, mode, halt state
-   and any reconciliation adjustments.
+   and any reconciliation adjustments, **and emit the `startup_ok` log event of
+   §7.1 carrying the same four facts** — `version`, `mode`, `halted`,
+   `adjustments_count` (v1.50). The event is stated here, in the contract of the
+   module that owes it, because §7.1 is a table of formats and a module never
+   reads it as a work item: `startup_ok` was specified there from the first
+   version and emitted by nothing, while `scripts/deploy/update.sh` greps the
+   container's logs for it as its health gate and would have rolled back every
+   deploy it ever ran. The Telegram alert and this event are deliberately
+   redundant: one is for a person who may be asleep, the other for a deployer
+   that cannot read Telegram.
 
 - Raises `StartupError` on any failure, having alerted if Telegram credentials
   were valid. No entry may be attempted before step 9 completes.
@@ -214,6 +223,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   manufacture the very finding it exists to detect out of a broker outage).
 - A broker failure in step 8a does not raise `StartupError` (proves a diagnostic
   cannot become the reason the bot is down).
+- A successful start emits one `startup_ok` log record whose fields are
+  `version`, `mode`, `halted` and `adjustments_count`, matching what the ready
+  alert reports (proves the deploy health gate has something to observe — it
+  greps for exactly this event, and nothing emitted it).
 
 ## Expected output
 
