@@ -2309,7 +2309,7 @@ was one of the eight sites opening its own connection.
   gap. Demotion would arm the bot's own seller while the exchange's stop is
   still live, which is the double-sell condition the ownership rule exists to
   prevent — a worse failure than an unverified stop that is, after all, still
-  standing at the exchange. This is the same trade rule 37 makes about
+  standing at the exchange. This is the same trade rule 38 makes about
   `STOP_MISPRICED`, and it is stated here because "the unjudged case protects
   itself" is true of one entrance to this branch and not the other (v1.57).
 

@@ -109,8 +109,6 @@ From `technical-spec.md` §8. Handle each exactly as written.
     look for the asymmetry. That check is mechanical, it takes a minute, and it
     is the only thing that has ever caught this class.
 
----
-
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.

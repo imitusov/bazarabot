@@ -119,7 +119,7 @@ Fixed ordering; each step completes before the next begins:
 9. Alert the owner that the bot is running, reporting version, mode, halt state
    and any reconciliation adjustments, **and emit the `startup_ok` log event of
    §7.1 carrying the same four facts** — `version`, `mode`, `halted`,
-   `adjustments_count` (v1.50). The event is stated here, in the contract of the
+   `adjustments_count` (v1.58). The event is stated here, in the contract of the
    module that owes it, because §7.1 is a table of formats and a module never
    reads it as a work item: `startup_ok` was specified there from the first
    version and emitted by nothing, while `scripts/deploy/update.sh` greps the

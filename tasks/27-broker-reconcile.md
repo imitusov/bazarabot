@@ -194,7 +194,7 @@ was one of the eight sites opening its own connection.
 - On restart an existing stop is **adopted** rather than replaced — two stops on
   one position would sell it twice.
 - **A stop is mispriced only when it differs from the position's stop by a full
-  price increment or more (v1.47).** The broker snaps a posted stop to the
+  price increment or more (v1.55).** The broker snaps a posted stop to the
   instrument's `min_price_increment`, so the price it holds is almost never the
   price the bot computed: on 2026-09-07 the account held GMKN at 125.44 against
   a stored 125.457, SBER at 265.89 against 265.8955 and MTSS at 179.05 against
@@ -211,7 +211,7 @@ was one of the eight sites opening its own connection.
   wrong stop is wrong by the distance between two different prices, not by less
   than one tick.
 - **A stop whose price cannot be compared is neither mispriced nor adoptable
-  (v1.48).** When `get_instrument` fails for the position's ticker, or reports a
+  (v1.56).** When `get_instrument` fails for the position's ticker, or reports a
   `min_price_increment` of zero or less, that position's stop price is not
   judged: **no `STOP_MISPRICED` and no `STOP_ADOPTABLE`** are reported for it.
   The failure is alerted and reconciliation continues; `STOP_DUPLICATE` and
@@ -238,9 +238,9 @@ was one of the eight sites opening its own connection.
   gap. Demotion would arm the bot's own seller while the exchange's stop is
   still live, which is the double-sell condition the ownership rule exists to
   prevent — a worse failure than an unverified stop that is, after all, still
-  standing at the exchange. This is the same trade rule 37 makes about
+  standing at the exchange. This is the same trade rule 38 makes about
   `STOP_MISPRICED`, and it is stated here because "the unjudged case protects
-  itself" is true of one entrance to this branch and not the other (v1.49).
+  itself" is true of one entrance to this branch and not the other (v1.57).
 
   Either way the next reconciliation with readable metadata judges the stop
   properly and adopts it, reports it mispriced, or leaves it alone. Neither

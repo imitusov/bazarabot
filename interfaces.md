@@ -939,13 +939,13 @@ one). Lot mismatch →
 acted on. `STOP_MISPRICED` is reported only when the broker's stop differs from
 the position's by a full `min_price_increment` or more, read from
 `get_instrument(ticker)` — the broker snaps every posted stop to the tick, and
-an exact inequality re-posted all live stops on every restart (v1.47). Nothing
+an exact inequality re-posted all live stops on every restart (v1.55). Nothing
 is rounded: no guessed rounded price is written to `positions` or `stop_orders`.
 When the increment cannot be read, or is zero or less, that position's stop
 price is not judged at all: **neither `STOP_MISPRICED` nor `STOP_ADOPTABLE`** is
 reported for it, the failure is alerted, and it stays `LOCAL` so
 `lifecycle.exits` keeps watching its own stop. `STOP_DUPLICATE` and
-`STOP_ORPHAN` do not depend on the price and still stand (rule 37, v1.48). `STOP_DUPLICATE` carries `keep` (the stop matching the position's
+`STOP_ORPHAN` do not depend on the price and still stand (rule 38, v1.56). `STOP_DUPLICATE` carries `keep` (the stop matching the position's
 `stop_order_key`, else the oldest by `created_at`) and `cancel` (every other
 identifier); an identifier is `stop_order_id` when known, else the stop's key.
 Idempotent against an unchanged broker. Raises `ValueError` on naive `now`.

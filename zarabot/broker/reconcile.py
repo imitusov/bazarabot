@@ -297,7 +297,7 @@ def _is_mispriced(
 
     Only called with an increment the broker actually reported: a stop whose
     increment is unknown is not judged at all, here or in the branch beneath
-    this one (rule 37).
+    this one (rule 38).
     """
     return abs(broker_price - local_price) >= increment
 
@@ -307,13 +307,13 @@ async def _price_increments(tickers: set[str]) -> dict[str, Decimal]:
 
     A ticker whose metadata cannot be read is absent from the result, and its
     stop's price is then not judged at all — neither mispriced nor adoptable
-    (rule 37). Both remedies act on the price: one cancels and re-posts, the
+    (rule 38). Both remedies act on the price: one cancels and re-posts, the
     other makes the exchange the sole protection at that price. Neither is spent
     on a number this module could not check.
 
     An increment of zero or less is treated as unread rather than as a licence
     to compare exactly, and takes the same alert: one entrance to the blind
-    path, not one alerted and one silent (v1.48).
+    path, not one alerted and one silent (v1.56).
     """
     increments: dict[str, Decimal] = {}
     for ticker in sorted(tickers):
@@ -371,7 +371,7 @@ def _stop_adjustments(
             if increment is None:
                 # Neither price-based finding is reported: the price comparison
                 # is the guard on adoption as much as on replacement, and it is
-                # the price that could not be read (rule 37). The position stays
+                # the price that could not be read (rule 38). The position stays
                 # LOCAL and lifecycle.exits keeps watching its own stop.
                 pass
             elif _is_mispriced(kept.stop_price, position.stop_price, increment):

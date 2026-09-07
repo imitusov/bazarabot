@@ -418,7 +418,7 @@ async def start() -> AppContext:
         await alert(_ready_text(cfg, halt, report, reach))
         # The same four facts as the alert, for a reader that cannot read
         # Telegram: `scripts/deploy/update.sh` waits for this event and rolls
-        # the deploy back without it (§7.1, spec v1.50).
+        # the deploy back without it (§7.1, spec v1.58).
         _LOG.info(
             "startup complete",
             extra={
