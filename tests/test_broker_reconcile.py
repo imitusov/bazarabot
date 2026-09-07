@@ -869,3 +869,92 @@ async def test_exchange_stop_close_emits_stop_order_executed(
     assert events[0].ticker == "SBER"
     assert events[0].fill_price == Decimal("94.00")
     assert events[0].gap_vs_stop == Decimal("94.00") - Decimal("95")
+
+
+def _reconciliation_events(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "reconciliation"
+    ]
+
+
+async def test_reconciliation_event_names_distinct_types_and_counts(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A constant {count: 0, types: []} would pass the agreement-only case."""
+
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(ticker="GAZP", stop_id="orphan")]
+    with caplog.at_level(logging.INFO, logger="zarabot.broker.reconcile"):
+        report = await reconcile(NOW)
+    names = [str(item["type"]) for item in report.adjustments]
+    assert "FOREIGN_HOLDING" in names
+    assert "STOP_ORPHAN" in names
+    events = _reconciliation_events(caplog)
+    assert len(events) == 1
+    assert events[0].adjustments_count == len(report.adjustments)
+    assert sorted(events[0].types) == sorted(set(names))
+
+
+async def test_reconciliation_event_dedupes_repeated_types(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.holdings = ()
+    env.stops = [
+        _stop(ticker="GAZP", stop_id="orphan-a"),
+        _stop(ticker="VTBR", stop_id="orphan-b"),
+    ]
+    with caplog.at_level(logging.INFO, logger="zarabot.broker.reconcile"):
+        report = await reconcile(NOW)
+    assert len(report.adjustments) == 2
+    assert all(item["type"] == "STOP_ORPHAN" for item in report.adjustments)
+    events = _reconciliation_events(caplog)
+    assert events[0].adjustments_count == 2
+    assert events[0].types == ["STOP_ORPHAN"]
+
+
+async def test_reconciliation_event_is_not_emitted_when_persist_fails(
+    env: _Broker,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def _boom(moment: datetime, adjustments: list[dict[str, object]]) -> None:
+        raise RuntimeError("persist failed")
+
+    monkeypatch.setattr("zarabot.broker.reconcile._persist", _boom)
+    env.holdings = (_broker_position(),)
+    with (
+        caplog.at_level(logging.INFO, logger="zarabot.broker.reconcile"),
+        pytest.raises(RuntimeError, match="persist failed"),
+    ):
+        await reconcile(NOW)
+    assert _reconciliation_events(caplog) == []
+
+
+async def test_stop_order_orphaned_uses_key_when_broker_id_is_missing(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.holdings = ()
+    env.stops = [
+        StopOrderRecord(
+            key="local-key",
+            stop_order_id=None,
+            position_id=0,
+            ticker="GAZP",
+            lots=2,
+            stop_price=Decimal("95"),
+            status=StopOrderStatus.ACTIVE,
+            created_at=NOW,
+            settled_at=None,
+        )
+    ]
+    with caplog.at_level(logging.ERROR, logger="zarabot.broker.reconcile"):
+        await reconcile(NOW)
+    events = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "stop_order_orphaned"
+    ]
+    assert len(events) == 1
+    assert events[0].stop_order_id == "local-key"

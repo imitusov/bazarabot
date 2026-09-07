@@ -434,7 +434,7 @@ def _stop_adjustments(
             "stop_order_orphaned",
             extra={
                 "event": "stop_order_orphaned",
-                "stop_order_id": stop.stop_order_id,
+                "stop_order_id": _identifier(stop),
                 "ticker": stop.ticker,
             },
         )

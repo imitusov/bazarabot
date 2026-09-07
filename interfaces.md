@@ -978,7 +978,8 @@ Idempotent against an unchanged broker. Raises `ValueError` on naive `now`.
 After persist, emits `reconciliation` (INFO) with `adjustments_count` and
 distinct `types` (empty agreement still emits, count 0). Emits
 `stop_order_executed` when an EXCHANGE-protected position is booked as an
-external close, and `stop_order_orphaned` on each `STOP_ORPHAN` (v1.61).
+external close, and `stop_order_orphaned` on each `STOP_ORPHAN` (v1.61). The
+orphaned event names `stop_order_id` when known, else the stop's key.
 
 ## `zarabot.telegram.notifier`
 
