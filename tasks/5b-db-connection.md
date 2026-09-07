@@ -76,22 +76,30 @@ inherit whichever file the previous importer happened to open.
   `critical`, then re-raise. This is the single owner of that event;
   repositories that swallow a rule-12 failure still go through this path so the
   event is not optional.
-- **`critical` is derived from the table, not hardcoded (v1.62).** It is `true`
-  for the trading-critical tables of rule 11 — `positions`, `orders`,
-  `stop_orders`, `halt_state`, `position_events`, `cooldowns` (v1.63) — and
-  `false` for the non-critical tables of rule 12: `signals`, `daily_snapshots`,
-  `instruments`.
-  Until v1.62 the contract said `critical` true unconditionally, so a failed
-  analytics write announced itself as trading-critical. The field is what an
-  operator filters on to find writes that actually stopped trading; always-true
-  made that filter return every hiccup, which is the same as having no field.
-- **An unrecognised or `unknown` table is `critical` true.** The safe default in
-  a module that records money is to overstate rather than understate, and a
-  table this list does not name is a table nobody has classified.
-- This module cannot ask its caller: `transaction()` takes no argument saying
-  which path it serves, and adding one would touch every call site to encode
-  what the table already tells us. Rules 11 and 12 are defined by table, so the
-  table is the honest source.
+- **`critical` is passed by the caller (v1.64):
+  `transaction(*, critical: bool = True)`.** The default is `true`, so a caller
+  that says nothing is treated as trading-critical. Rule-12 callers —
+  `db.signals`, `db.snapshots`, and the instruments cache when it writes through
+  `transaction()` — pass `critical=False`. `db.cooldowns` passes `critical=True`
+  (rule 11, v1.63). The exception still propagates out of `transaction()`; the
+  repository's own catch is what stops it reaching the trading loop.
+- **This replaces the table-derivation of v1.62, which did not work.** v1.61
+  said `critical` true unconditionally; v1.62 tried to derive it by parsing the
+  table out of the SQLite error text. Measured against real errors on a rule-12
+  table, a UNIQUE or NOT NULL violation names the table and derives correctly,
+  but `no such column` and `datatype mismatch` do not — and the failures that
+  actually occur in production, disk full, `database is locked` and disk I/O
+  error, name no table at all. Every one of those falls to `unknown` and reports
+  `critical` true, which is the defect v1.62 was written to remove, surviving in
+  exactly the cases most likely to happen. The derivation worked for errors a
+  test constructs and failed for errors a disk produces.
+- **The owner of a write knows which rule it is on; the error text only
+  sometimes does.** That is why the value is passed rather than inferred. The
+  cost is a keyword argument at the rule-12 call sites, which is small against a
+  field an operator filters on to find writes that actually stopped trading.
+- `table` is still derived from the error message, and is still `unknown` when
+  the message names none. That was never in dispute — it is a label for a human
+  reading the log, not a value anything branches on.
 - **`cooldowns` is rule 11 (v1.63).** A lost cooldown row lets the bot re-enter
   a ticker it just exited, which is a trading consequence, not an analytics one.
   v1.62 left it unassigned pending this decision; it is now named in rule 11
@@ -167,11 +175,15 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A write that fails with `aiosqlite.Error` inside `transaction()` emits
   `db_write_failed` with `table` (the SQLite object name when the error names
   one, otherwise `unknown`), then the exception still propagates (v1.61).
-- A failed write to `positions` reports `critical` true; a failed write to
-  `daily_snapshots` reports `critical` false; a failure naming no table reports
-  `critical` true (v1.62; proves the field distinguishes rule 11 from rule 12
-  rather than asserting the same thing every time, and that an unclassified
-  table fails loud).
+- A failed write inside `transaction(critical=False)` reports `critical` false
+  and still raises into the caller's `except aiosqlite.Error`; a failed write
+  inside a default `transaction()` reports `critical` true (v1.64; proves the
+  field distinguishes rule 11 from rule 12 rather than asserting the same thing
+  every time).
+- A rule-12 write failing with an error that names no table — `database is
+  locked`, disk full — still reports `critical` false (v1.64; proves the flag
+  follows the caller's declared rule and not the wording of the error, which is
+  where v1.62's table-derivation failed).
 - A rule-12 repository whose write fails produces **exactly one**
   `db_write_failed` record (proves `db.connection` is the single owner and the
   repository adds none of its own).

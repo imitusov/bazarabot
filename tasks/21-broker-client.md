@@ -52,10 +52,24 @@ touching the filesystem to stat `ML_MODEL_PATH` — on the latency-critical path
 (#18). Configuration is read through `config.get()`, the memoised accessor, not
 `config.load()`.
 - **Emits `broker_unavailable` (WARNING) on each `BrokerUnavailable` with
-  `method`, `consecutive_failures`, `backoff_seconds`, and `rate_limited`
-  (WARNING) on each `BrokerRateLimited` with `method`, `retry_after_seconds`
-  (v1.61).** This module is the only one that sees those exceptions at the
-  source; callers must not re-emit them.
+  `method` and `consecutive_failures`, and `rate_limited` (WARNING) on each
+  `BrokerRateLimited` with `method`, `retry_after_seconds` (v1.61).** This
+  module is the only one that sees those exceptions at the source; callers must
+  not re-emit them.
+- **`backoff_seconds` is not a field of this event (v1.65).** v1.61 required it
+  here, but this module does not back off and cannot know the number: the
+  escalating delay, its cap and the broker's `retry_after` hint all belong to
+  `app.loops`, whose §3.2 cases pin them. An emitter that cannot know a value
+  can only send a constant, and a constant `backoff_seconds: 0` tells an
+  operator that no back-off is in effect while `app.loops` may be five cycles
+  deep in one — worse than the field's absence.
+- `consecutive_failures` **is** knowable here and stays: it is this module's own
+  count of consecutive `BrokerUnavailable` raises for that method, reset when
+  the method next succeeds. A count that is never reset is a latch, and this one
+  must be cleared on the success path.
+- If a back-off figure is wanted in the log, it belongs to an event owned by
+  `app.loops`, which computes it. Assigning one is a separate amendment; this
+  one only stops requiring a field at a site that cannot supply it.
 
 **`async close() → None`**
 - Closes the process client and forgets it. Idempotent. Called only by
@@ -426,9 +440,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   `PriceRejected` (proves a renamed SDK field surfaces as the integration break
   it is, rather than as every quote in every cycle looking like bad broker data
   — the state in which no `LOCAL` stop-loss can fire).
-- Raising `BrokerUnavailable` emits `broker_unavailable` with `method`
-  (v1.61). Raising `BrokerRateLimited` emits `rate_limited` with
-  `retry_after_seconds`.
+- Raising `BrokerUnavailable` emits `broker_unavailable` with `method` and
+  `consecutive_failures` (v1.61). Raising `BrokerRateLimited` emits
+  `rate_limited` with `retry_after_seconds`.
+- A method that fails twice then succeeds reports `consecutive_failures` 1 then
+  2, and a later failure reports 1 again (v1.65; proves the count is cleared on
+  the success path rather than ratcheting for the life of the process).
 - A zero-valued quote raises `PriceRejected`, not `BrokerUnavailable` and not
   `Decimal(0)` (proves the mass-liquidation path is closed at its source, and
   that bad data is distinguishable from an outage).
