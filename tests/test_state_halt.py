@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -294,3 +295,73 @@ async def test_access_without_connect_raises(
         await halt(HaltReason.MANUAL, "x", NOW)
     with pytest.raises(DatabaseNotOpenError):
         await resume("owner", NOW)
+
+
+def _halt_events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == event
+    ]
+
+
+async def test_daily_loss_halt_emits_halt_triggered_with_caller_pct(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    loss = Decimal("5.25")
+    with caplog.at_level(logging.CRITICAL, logger="zarabot.state.halt"):
+        await halt(
+            HaltReason.DAILY_LOSS_LIMIT,
+            "daily loss 5.25% reached limit 5%",
+            NOW,
+            daily_loss_pct=loss,
+        )
+    events = _halt_events(caplog, "halt_triggered")
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.CRITICAL
+    assert record.reason == HaltReason.DAILY_LOSS_LIMIT.value
+    assert record.detail == "daily loss 5.25% reached limit 5%"
+    assert record.daily_loss_pct == loss
+
+
+async def test_halt_without_daily_loss_pct_omits_the_field(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.CRITICAL, logger="zarabot.state.halt"):
+        await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
+    events = _halt_events(caplog, "halt_triggered")
+    assert len(events) == 1
+    record = events[0]
+    assert record.reason == HaltReason.MANUAL.value
+    assert record.detail == "owner pressed halt"
+    assert not hasattr(record, "daily_loss_pct")
+
+
+async def test_weaker_rehalt_emits_no_halt_triggered(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    await halt(HaltReason.DAILY_LOSS_LIMIT, "daily loss breached", NOW)
+    with caplog.at_level(logging.CRITICAL, logger="zarabot.state.halt"):
+        await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
+    assert _halt_events(caplog, "halt_triggered") == []
+
+
+async def test_resume_emits_halt_cleared_with_actor(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    await halt(HaltReason.MANUAL, "stop", NOW)
+    with caplog.at_level(logging.INFO, logger="zarabot.state.halt"):
+        assert await resume("owner", NOW) is True
+    events = _halt_events(caplog, "halt_cleared")
+    assert len(events) == 1
+    assert events[0].levelno == logging.INFO
+    assert events[0].actor == "owner"
+
+
+async def test_noop_resume_emits_no_halt_cleared(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger="zarabot.state.halt"):
+        assert await resume("owner", NOW) is False
+    assert _halt_events(caplog, "halt_cleared") == []
