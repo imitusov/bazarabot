@@ -34,6 +34,7 @@ run **one module per session**, test-first, two commits, never edit the spec.
 |---|---|
 | #52 F-52 `_remember` swallows `Exception` | **amender** then implementer — see `52-market-session-remember.md` |
 | #51 F-51 closed days collapse | **amender**: `SessionInfo` needs a date — see `51-models-sessioninfo-trade-date.md` |
+| #63 O-09 `session_closed.trade_date` | **amender** then #85 — closed days have no `start`; see `63-market-session-closed-trade-date.md` |
 
 ### Theme C — Execution / process identity
 
