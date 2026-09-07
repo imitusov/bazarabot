@@ -2559,8 +2559,17 @@ was one of the eight sites opening its own connection.
   non-trading day, so a closed day carries no instant to derive a date from.
   v1.61 asked for the three fields "from that `SessionInfo`" and allowed nulls
   for `opens_at` and `closes_at` only, which required a `trade_date` the
-  `SessionInfo` cannot supply. Emit `clock.moscow_date(now)` instead, where
-  `now` is the refresh instant.
+  `SessionInfo` cannot supply. Emit **`clock.moscow_date(clock.now())`**
+  instead.
+- **`refresh` takes no `now` parameter, and calls `clock` itself (v1.68).**
+  v1.67 said "where `now` is the refresh instant" while the signature above is
+  `refresh(days: int) → None`, so `now` was unbound in the contract — an
+  implementer had to invent either a parameter that does not exist or a call the
+  contract had not named. `clock` is the sole owner of "now" (§Global
+  conventions), and this module already does I/O, so calling `clock.now()` here
+  is allowed and is the intended reading. The signature does not change: adding
+  a `now` argument would push the decision onto every caller for no gain, and
+  `app.startup` and `app.loops` both call `refresh` without one.
 - **`opens_at` and `closes_at` are null on `session_closed`, and that is the
   whole point of the event.** A closed day has no open and no close; what the
   record must still answer is *which day*. A `session_closed` whose `trade_date`
