@@ -76,6 +76,58 @@ def test_record_containing_no_secret_passes_through_byte_identical(
     plain_body = json.loads(plain.strip().splitlines()[-1])
     redacting_body.pop("timestamp", None)
     plain_body.pop("timestamp", None)
+    redacting_body.pop("moscow_time", None)
+    plain_body.pop("moscow_time", None)
     assert redacting_body == plain_body
     assert message.encode() in redacting.encode()
     assert message.encode() in plain.encode()
+
+
+def _last_payload(capsys: pytest.CaptureFixture[str]) -> dict:
+    out = capsys.readouterr().out
+    return json.loads(out.strip().splitlines()[-1])
+
+
+def test_every_record_includes_utc_timestamp_and_moscow_time(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    configure("INFO", [])
+    _logger().info("heartbeat ok")
+    payload = _last_payload(capsys)
+    assert "timestamp" in payload
+    assert "moscow_time" in payload
+    assert payload["level"] == "INFO"
+    assert payload["logger"] == LOGGER_NAME
+    assert payload["message"] == "heartbeat ok"
+    utc = datetime.fromisoformat(payload["timestamp"])
+    moscow = datetime.fromisoformat(payload["moscow_time"])
+    assert utc.tzinfo is not None
+    assert moscow.tzinfo is not None
+    assert moscow.tzinfo.utcoffset(moscow) == ZoneInfo("Europe/Moscow").utcoffset(
+        moscow
+    )
+    assert moscow == utc.astimezone(ZoneInfo("Europe/Moscow"))
+
+
+def test_event_extra_field_round_trips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure("INFO", [])
+    _logger().info("cycle", extra={"event": "heartbeat"})
+    payload = _last_payload(capsys)
+    assert payload["event"] == "heartbeat"
+
+
+def test_event_field_is_redacted_when_it_contains_a_secret(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure("INFO", [TOKEN])
+    _logger().info("leak", extra={"event": f"startup_{TOKEN}"})
+    out = capsys.readouterr().out
+    assert TOKEN not in out
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert TOKEN not in payload["event"]
+    assert MASK in payload["event"]
