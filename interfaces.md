@@ -764,10 +764,15 @@ Daily candles per ticker, oldest-first. A ticker whose fetch raises
 logged at WARNING; the rest of the batch returns. Never pads. Raises
 `ValueError` on naive `now`.
 
-Consecutive failures are counted per ticker (rule 9): the third in a row alerts
-**once**, naming the ticker and the failure, and nothing further is sent for it
-until a fetch succeeds — a success clears both its count and its alerted flag.
-Tickers crossing in the same call share one alert. The counters are
+A call is **degraded** for a ticker when the fetch fails, or when it returns
+fewer than `lookback` candles — none at all included. A short series is still
+returned; only a failed fetch omits a ticker.
+
+Degraded calls are counted per ticker on one counter (rule 9): the third in a
+row alerts **once**, naming the ticker and the reason — the failure, or the
+candles returned against the candles required — and nothing further is sent for
+it until a call is not degraded, which clears both its count and its alerted
+flag. Tickers crossing in the same call share one alert. The counters are
 process-local module state, `_failures` and `_alerted`, cleared by
 `sandbox.backtest` between runs the way `market.session`'s cache is.
 
