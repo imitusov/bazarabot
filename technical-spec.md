@@ -962,6 +962,10 @@ Additionally, `strategies.ml_model`:
   down, and that the recovery path — not a guess — is what resolves it).
 - A `SUBMITTED` entry with **zero** lots filled is not cancelled (proves a merely
   pending market order is not converted into a missed entry).
+- A cooldown write failing with `aiosqlite.Error` during `close_position` leaves
+  the position `CLOSED`, returns it, and halts trading with an alert rather than
+  raising (v1.63; proves a completed exit is never reported as failed, which
+  would retry a sell the account cannot cover).
 - `close_position` submits exactly one sell order and, when the broker reports a
   partial, raises `ExitFailed` having submitted nothing further (proves the
   slicing loop is gone, and with it the unbounded submission it allowed).
@@ -1604,8 +1608,9 @@ inherit whichever file the previous importer happened to open.
   event is not optional.
 - **`critical` is derived from the table, not hardcoded (v1.62).** It is `true`
   for the trading-critical tables of rule 11 — `positions`, `orders`,
-  `stop_orders`, `halt_state`, `position_events` — and `false` for the
-  non-critical tables of rule 12: `signals`, `daily_snapshots`, `instruments`.
+  `stop_orders`, `halt_state`, `position_events`, `cooldowns` (v1.63) — and
+  `false` for the non-critical tables of rule 12: `signals`, `daily_snapshots`,
+  `instruments`.
   Until v1.62 the contract said `critical` true unconditionally, so a failed
   analytics write announced itself as trading-critical. The field is what an
   operator filters on to find writes that actually stopped trading; always-true
@@ -1617,13 +1622,10 @@ inherit whichever file the previous importer happened to open.
   which path it serves, and adding one would touch every call site to encode
   what the table already tells us. Rules 11 and 12 are defined by table, so the
   table is the honest source.
-- **`cooldowns` is deliberately absent from both lists (v1.62).** Rule 11 names
-  orders, positions and halt state; rule 12 names signals, snapshots and the
-  instruments cache. Neither names cooldowns, and `db.cooldowns` currently
-  swallows its write failures as though rule 12 covered it. A lost cooldown row
-  lets the bot re-enter a ticker it just exited, which is a trading consequence,
-  not an analytics one. Until an amendment assigns it, it falls to the unknown
-  default above and is reported `critical` true.
+- **`cooldowns` is rule 11 (v1.63).** A lost cooldown row lets the bot re-enter
+  a ticker it just exited, which is a trading consequence, not an analytics one.
+  v1.62 left it unassigned pending this decision; it is now named in rule 11
+  rather than reaching `critical` true by the unknown default.
 
 **`async disconnect() → None`**
 - Closes the process connection and forgets it. Idempotent when already closed.
@@ -1958,6 +1960,13 @@ never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
 its own (rule 31).
 
 **`async start(ticker: str, at: datetime) → None`** — records or overwrites with the newer instant.
+- **A write failure propagates (v1.63).** This module catches no
+  `aiosqlite.Error` and logs no failure of its own: cooldowns are rule 11, and
+  `db.connection` already emits `db_write_failed` with `critical` true before
+  re-raising. Until v1.63 the implementation swallowed the error and logged an
+  unstructured line, which was behaviour the contract never granted — a lost
+  cooldown then looked like a successful one and the bot could re-enter a ticker
+  it had just exited.
 
 **`async is_active(ticker: str, now: datetime, minutes: int) → bool`**
 - True while `now - started_at < minutes`. Exactly at the boundary returns False.
@@ -2861,6 +2870,19 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
   cancel; submits the market sell directly.
+- **A failed cooldown write halts but does not fail the exit (v1.63).** The
+  cooldown is written after the sell has executed and after the position row is
+  already `CLOSED`, so raising out of `close_position` would report a completed
+  exit as failed and the caller would retry a sell that already happened —
+  selling a quantity the account no longer holds. Cooldowns are rule 11, so the
+  failure takes the existing rule-11 remedy instead: alert and halt, through the
+  same path as any other trading-critical write failure. `close_position` then
+  returns the closed position, because it did close.
+- **Halting is the remedy that fits, not a lesser one.** What a lost cooldown
+  endangers is re-entry into the ticker just exited; halting stops the bot
+  opening anything at all, which covers that and more. `db.connection` has
+  already emitted `db_write_failed` with `critical` true by this point, so the
+  event is on the record whatever the caller does next.
 - Submits exactly **one** sell order, for the position's whole lot count. Until
   v1.34 it looped until the position was flat, one order per slice, and then
   booked the close from the *last* slice alone — every earlier slice's price and
@@ -4236,7 +4258,7 @@ Applies across all modules. Every external failure mode has exactly one rule.
     unavailable, not a valid schedule: treating it as success stores a cache
     that makes `is_open` false forever with no error anywhere.
 11. **Database write failure on a trading-critical path** (orders, positions,
-    halt state) → hard error: halt trading, alert, stop opening anything. The bot
+    halt state, **cooldowns** — v1.63) → hard error: halt trading, alert, stop opening anything. The bot
     must never trade what it cannot record.
 12. **Database write failure on a non-critical path** (signals, snapshots,
     instruments cache) → ERROR to stdout only, never propagated. Losing an

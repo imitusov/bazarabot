@@ -184,6 +184,19 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
   cancel; submits the market sell directly.
+- **A failed cooldown write halts but does not fail the exit (v1.63).** The
+  cooldown is written after the sell has executed and after the position row is
+  already `CLOSED`, so raising out of `close_position` would report a completed
+  exit as failed and the caller would retry a sell that already happened —
+  selling a quantity the account no longer holds. Cooldowns are rule 11, so the
+  failure takes the existing rule-11 remedy instead: alert and halt, through the
+  same path as any other trading-critical write failure. `close_position` then
+  returns the closed position, because it did close.
+- **Halting is the remedy that fits, not a lesser one.** What a lost cooldown
+  endangers is re-entry into the ticker just exited; halting stops the bot
+  opening anything at all, which covers that and more. `db.connection` has
+  already emitted `db_write_failed` with `critical` true by this point, so the
+  event is on the record whatever the caller does next.
 - Submits exactly **one** sell order, for the position's whole lot count. Until
   v1.34 it looped until the position was flat, one order per slice, and then
   booked the close from the *last* slice alone — every earlier slice's price and
@@ -351,7 +364,7 @@ From `technical-spec.md` §8. Handle each exactly as written.
    or at next startup. **Never resubmit.**
 
 11. **Database write failure on a trading-critical path** (orders, positions,
-    halt state) → hard error: halt trading, alert, stop opening anything. The bot
+    halt state, **cooldowns** — v1.63) → hard error: halt trading, alert, stop opening anything. The bot
     must never trade what it cannot record.
 
 23. **Protective stop order rejected or unplaceable** → retry three times, then

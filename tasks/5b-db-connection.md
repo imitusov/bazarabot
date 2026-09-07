@@ -78,8 +78,9 @@ inherit whichever file the previous importer happened to open.
   event is not optional.
 - **`critical` is derived from the table, not hardcoded (v1.62).** It is `true`
   for the trading-critical tables of rule 11 — `positions`, `orders`,
-  `stop_orders`, `halt_state`, `position_events` — and `false` for the
-  non-critical tables of rule 12: `signals`, `daily_snapshots`, `instruments`.
+  `stop_orders`, `halt_state`, `position_events`, `cooldowns` (v1.63) — and
+  `false` for the non-critical tables of rule 12: `signals`, `daily_snapshots`,
+  `instruments`.
   Until v1.62 the contract said `critical` true unconditionally, so a failed
   analytics write announced itself as trading-critical. The field is what an
   operator filters on to find writes that actually stopped trading; always-true
@@ -91,13 +92,10 @@ inherit whichever file the previous importer happened to open.
   which path it serves, and adding one would touch every call site to encode
   what the table already tells us. Rules 11 and 12 are defined by table, so the
   table is the honest source.
-- **`cooldowns` is deliberately absent from both lists (v1.62).** Rule 11 names
-  orders, positions and halt state; rule 12 names signals, snapshots and the
-  instruments cache. Neither names cooldowns, and `db.cooldowns` currently
-  swallows its write failures as though rule 12 covered it. A lost cooldown row
-  lets the bot re-enter a ticker it just exited, which is a trading consequence,
-  not an analytics one. Until an amendment assigns it, it falls to the unknown
-  default above and is reported `critical` true.
+- **`cooldowns` is rule 11 (v1.63).** A lost cooldown row lets the bot re-enter
+  a ticker it just exited, which is a trading consequence, not an analytics one.
+  v1.62 left it unassigned pending this decision; it is now named in rule 11
+  rather than reaching `critical` true by the unknown default.
 
 **`async disconnect() → None`**
 - Closes the process connection and forgets it. Idempotent when already closed.
@@ -120,7 +118,7 @@ moment in the project's life to do it.
 From `technical-spec.md` §8. Handle each exactly as written.
 
 11. **Database write failure on a trading-critical path** (orders, positions,
-    halt state) → hard error: halt trading, alert, stop opening anything. The bot
+    halt state, **cooldowns** — v1.63) → hard error: halt trading, alert, stop opening anything. The bot
     must never trade what it cannot record.
 
 30. **Database accessed before `db.connection.connect`, or after

@@ -34,6 +34,13 @@ never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
 its own (rule 31).
 
 **`async start(ticker: str, at: datetime) → None`** — records or overwrites with the newer instant.
+- **A write failure propagates (v1.63).** This module catches no
+  `aiosqlite.Error` and logs no failure of its own: cooldowns are rule 11, and
+  `db.connection` already emits `db_write_failed` with `critical` true before
+  re-raising. Until v1.63 the implementation swallowed the error and logged an
+  unstructured line, which was behaviour the contract never granted — a lost
+  cooldown then looked like a successful one and the bot could re-enter a ticker
+  it had just exited.
 
 **`async is_active(ticker: str, now: datetime, minutes: int) → bool`**
 - True while `now - started_at < minutes`. Exactly at the boundary returns False.
