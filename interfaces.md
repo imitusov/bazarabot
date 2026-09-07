@@ -754,6 +754,9 @@ success path, so "once" is per incident rather than per process (#32). A failed
 history write (`aiosqlite.Error`) is logged and does not propagate — degraded
 age counting must not stop the bot trading. Other exceptions from that write
 path propagate (F-52 / v1.59). Does not raise on an unavailable broker schedule.
+On a successful refresh, emits `session_open` or `session_closed` (INFO) for the
+first day of the fetched window, with `trade_date`, `opens_at`, `closes_at`
+(v1.61). Not a Telegram alert.
 
 **`calendar() → TradingCalendar`**
 Recorded history plus the live window, oldest first, one entry per day. Empty
