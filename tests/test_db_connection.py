@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import subprocess
 import sys
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -257,7 +259,6 @@ async def test_write_does_not_survive_rollback_despite_another_module_writing(
     connection made another module's in-flight rows permanent, so its own
     `rollback()` undid nothing.
     """
-    from datetime import UTC, datetime
 
     from zarabot.models import HaltReason
     from zarabot.state.halt import halt
@@ -295,3 +296,110 @@ async def test_reads_do_not_need_a_transaction(tmp_path: Path) -> None:
         )
         cursor = await shared().execute("SELECT COUNT(*) FROM cooldowns")
         assert (await cursor.fetchone())[0] == 1
+
+
+async def test_aiosqlite_error_inside_transaction_emits_db_write_failed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.61: a write failure is a structured event, then still raises."""
+
+    path = tmp_path / "zarabot.db"
+    await connect(str(path))
+    caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
+    with pytest.raises(aiosqlite.Error):
+        async with transaction() as txn:
+            await txn.execute("INSERT INTO nosuch (id) VALUES (1)")
+    records = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "db_write_failed"
+    ]
+    assert len(records) == 1
+    assert records[0].table == "nosuch"
+    assert records[0].critical is True
+
+
+async def test_failed_write_to_positions_reports_critical_true(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
+    with pytest.raises(aiosqlite.Error):
+        async with transaction() as txn:
+            await txn.execute("INSERT INTO positions (id) VALUES (1)")
+    records = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "db_write_failed"
+    ]
+    assert len(records) == 1
+    assert records[0].critical is True
+
+
+async def test_transaction_critical_false_reports_false_even_when_error_names_no_table(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.64: a locked database on a rule-12 path is still not trading-critical."""
+
+    path = tmp_path / "zarabot.db"
+    await connect(str(path))
+    caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
+    with pytest.raises(aiosqlite.OperationalError, match="database is locked"):
+        async with transaction(critical=False):
+            raise aiosqlite.OperationalError("database is locked")
+    records = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "db_write_failed"
+    ]
+    assert len(records) == 1
+    assert records[0].table == "unknown"
+    assert records[0].critical is False
+
+
+async def test_rule_12_repository_write_failure_emits_exactly_one_event(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """db.connection owns the event; snapshots must not emit a second one."""
+
+    from zarabot.db.snapshots import DailySnapshot, write_daily
+
+    caplog.set_level(logging.ERROR)
+    await shared().execute("DROP TABLE daily_snapshots")
+    await write_daily(
+        DailySnapshot(
+            trade_date=date(2026, 3, 16),
+            opening_equity=Decimal("1"),
+            closing_equity=None,
+            cash=Decimal("1"),
+            realised_pnl=Decimal("0"),
+            unrealised_pnl=Decimal("0"),
+            open_positions=0,
+            orders_placed=0,
+            benchmark_value=None,
+        )
+    )
+    records = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "db_write_failed"
+    ]
+    assert len(records) == 1
+    assert records[0].table == "daily_snapshots"
+    assert records[0].critical is False
+
+
+async def test_non_sqlite_error_inside_transaction_does_not_emit_db_write_failed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A programming error is not a write failure."""
+
+    path = tmp_path / "zarabot.db"
+    await connect(str(path))
+    caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
+    with pytest.raises(RuntimeError, match="injected"):
+        async with transaction() as txn:
+            await txn.execute("SELECT 1")
+            raise RuntimeError("injected")
+    assert not any(
+        getattr(rec, "event", None) == "db_write_failed" for rec in caplog.records
+    )

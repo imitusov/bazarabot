@@ -235,7 +235,7 @@ apply migrations.
 Returns the open process connection. Raises `DatabaseNotOpenError` when none is
 open. Must never open a connection as a side effect.
 
-**`transaction() → async context manager yielding aiosqlite.Connection`**
+**`transaction(*, critical: bool = True) → async context manager yielding aiosqlite.Connection`**
 The sole transaction owner: `async with transaction() as conn:`. Holds one
 process-wide lock, issues `BEGIN IMMEDIATE`, commits on clean exit and rolls
 back on exception. **Reentrant** — a nested acquisition on the same task joins
@@ -243,7 +243,10 @@ the outer transaction and only the outermost exit commits, so
 `broker.reconcile` can call `db.positions` writers from inside its own
 transaction. No other module issues `BEGIN`, `commit` or `rollback` (rule 31),
 and reads take no transaction. Raises `DatabaseNotOpenError` when no connection
-is open.
+is open. On `aiosqlite.Error` during the write, emits `db_write_failed` with
+`table` (from the error text, or `unknown`) and `critical` from the keyword
+argument `transaction(*, critical: bool = True)` (v1.64). Rule-12 callers pass
+`critical=False`. Then re-raises.
 
 **`async disconnect() → None`**
 Closes the process connection and forgets it. Idempotent when already closed.

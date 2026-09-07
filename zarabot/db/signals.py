@@ -64,7 +64,7 @@ async def record(signal: Signal, decision: RiskDecision) -> None:
             None,
         )
     try:
-        async with transaction() as conn:
+        async with transaction(critical=False) as conn:
             await conn.execute(
                 """
                 INSERT INTO signals (
