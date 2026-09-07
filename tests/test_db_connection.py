@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import sys
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -258,7 +259,6 @@ async def test_write_does_not_survive_rollback_despite_another_module_writing(
     connection made another module's in-flight rows permanent, so its own
     `rollback()` undid nothing.
     """
-    from datetime import UTC, datetime
 
     from zarabot.models import HaltReason
     from zarabot.state.halt import halt
@@ -317,6 +317,72 @@ async def test_aiosqlite_error_inside_transaction_emits_db_write_failed(
     assert len(records) == 1
     assert records[0].table == "nosuch"
     assert records[0].critical is True
+
+
+async def test_failed_write_to_positions_reports_critical_true(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
+    with pytest.raises(aiosqlite.Error):
+        async with transaction() as txn:
+            await txn.execute("INSERT INTO positions (id) VALUES (1)")
+    records = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "db_write_failed"
+    ]
+    assert len(records) == 1
+    assert records[0].table == "positions"
+    assert records[0].critical is True
+
+
+async def test_failed_write_to_daily_snapshots_reports_critical_false(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.ERROR, logger="zarabot.db.connection")
+    with pytest.raises(aiosqlite.Error):
+        async with transaction() as txn:
+            await txn.execute("INSERT INTO daily_snapshots (trade_date) VALUES (NULL)")
+    records = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "db_write_failed"
+    ]
+    assert len(records) == 1
+    assert records[0].table == "daily_snapshots"
+    assert records[0].critical is False
+
+
+async def test_rule_12_repository_write_failure_emits_exactly_one_event(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """db.connection owns the event; snapshots must not emit a second one."""
+
+    from zarabot.db.snapshots import DailySnapshot, write_daily
+
+    caplog.set_level(logging.ERROR)
+    await shared().execute("DROP TABLE daily_snapshots")
+    await write_daily(
+        DailySnapshot(
+            trade_date=date(2026, 3, 16),
+            opening_equity=Decimal("1"),
+            closing_equity=None,
+            cash=Decimal("1"),
+            realised_pnl=Decimal("0"),
+            unrealised_pnl=Decimal("0"),
+            open_positions=0,
+            orders_placed=0,
+            benchmark_value=None,
+        )
+    )
+    records = [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "db_write_failed"
+    ]
+    assert len(records) == 1
+    assert records[0].table == "daily_snapshots"
+    assert records[0].critical is False
 
 
 async def test_non_sqlite_error_inside_transaction_does_not_emit_db_write_failed(

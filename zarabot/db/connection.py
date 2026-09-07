@@ -18,9 +18,10 @@ import aiosqlite
 _LOG = logging.getLogger(__name__)
 _TABLE_IN_ERROR = (
     re.compile(r"no such table: (\S+)"),
-    re.compile(r"UNIQUE constraint failed: (\w+)"),
+    re.compile(r"constraint failed: (\w+)"),
     re.compile(r"table (\S+) already exists"),
 )
+_RULE_12_TABLES = frozenset({"signals", "daily_snapshots", "instruments"})
 
 _connection: aiosqlite.Connection | None = None
 # The transaction lock belongs to the connection, not to the module: a lock
@@ -45,6 +46,11 @@ def _table_from_error(exc: BaseException) -> str:
         if match:
             return match.group(1).rstrip(".").split(".")[0]
     return "unknown"
+
+
+def _critical(table: str) -> bool:
+    """False only for rule-12 tables; everything else, including unknown, is true."""
+    return table not in _RULE_12_TABLES
 
 
 async def connect(path: str) -> aiosqlite.Connection:
@@ -110,12 +116,13 @@ async def transaction() -> AsyncIterator[aiosqlite.Connection]:
         except BaseException as exc:
             await conn.rollback()
             if isinstance(exc, aiosqlite.Error):
+                table = _table_from_error(exc)
                 _LOG.error(
                     "database write failed",
                     extra={
                         "event": "db_write_failed",
-                        "table": _table_from_error(exc),
-                        "critical": True,
+                        "table": table,
+                        "critical": _critical(table),
                     },
                 )
             raise
