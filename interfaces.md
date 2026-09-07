@@ -975,6 +975,10 @@ reported for it, the failure is alerted, and it stays `LOCAL` so
 `stop_order_key`, else the oldest by `created_at`) and `cancel` (every other
 identifier); an identifier is `stop_order_id` when known, else the stop's key.
 Idempotent against an unchanged broker. Raises `ValueError` on naive `now`.
+After persist, emits `reconciliation` (INFO) with `adjustments_count` and
+distinct `types` (empty agreement still emits, count 0). Emits
+`stop_order_executed` when an EXCHANGE-protected position is booked as an
+external close, and `stop_order_orphaned` on each `STOP_ORPHAN` (v1.61).
 
 ## `zarabot.telegram.notifier`
 
