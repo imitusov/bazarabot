@@ -7,12 +7,12 @@ from datetime import UTC, date, datetime
 
 import aiosqlite
 
+from zarabot import clock
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
     get_trading_schedule,
 )
-from zarabot.clock import moscow_date
 from zarabot.db.trading_days import earliest, list_since, record_many
 from zarabot.models import SessionInfo, TradingCalendar
 from zarabot.telegram.notifier import alert
@@ -69,17 +69,28 @@ def _emit_session_state(first: SessionInfo) -> None:
     """Log whether the first day of a successful fetch is a trading session.
 
     A log, not a Telegram alert — the brief does not alert session open/close.
-    `trade_date` is the Moscow calendar date of `start` when the day is dated;
-    a closed day from the broker carries no timestamps, so the date may be null.
+    Closed days from the broker have no timestamps; `trade_date` then comes from
+    `clock.now()` (v1.67 / v1.68). `opens_at` / `closes_at` are null on close.
     """
-    event = "session_open" if first.is_trading_day else "session_closed"
+    if first.is_trading_day:
+        event = "session_open"
+        trade_date = (
+            clock.moscow_date(first.start)
+            if first.start is not None
+            else clock.moscow_date(clock.now())
+        )
+        opens_at, closes_at = first.start, first.end
+    else:
+        event = "session_closed"
+        trade_date = clock.moscow_date(clock.now())
+        opens_at, closes_at = None, None
     _LOG.info(
         event,
         extra={
             "event": event,
-            "trade_date": moscow_date(first.start) if first.start is not None else None,
-            "opens_at": first.start,
-            "closes_at": first.end,
+            "trade_date": trade_date,
+            "opens_at": opens_at,
+            "closes_at": closes_at,
         },
     )
 

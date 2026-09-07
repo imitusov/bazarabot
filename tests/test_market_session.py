@@ -430,16 +430,16 @@ async def test_successful_refresh_of_a_holiday_emits_session_closed(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """v1.61: first day of the window is not a trading session → session_closed.
+    """v1.67: closed days have no timestamps; trade_date still comes from clock."""
 
-    The window still contains a later trading day so the fetch is a success,
-    not rule-10 unavailability (no trading sessions at all).
-    """
+    closed = SessionInfo(start=None, end=None, is_trading_day=False)
+    refresh_at = datetime(2026, 3, 9, 10, 0, tzinfo=UTC)
 
     async def _fetch(days: int) -> list[SessionInfo]:
-        return [_holiday(), _weekday()]
+        return [closed, _weekday()]
 
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    monkeypatch.setattr("zarabot.clock.now", lambda: refresh_at)
     with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
         await refresh(7)
 
@@ -449,8 +449,34 @@ async def test_successful_refresh_of_a_holiday_emits_session_closed(
     assert record.event == "session_closed"
     assert record.levelno == logging.INFO
     assert record.trade_date == date(2026, 3, 9)
-    assert record.opens_at == _holiday().start
-    assert record.closes_at == _holiday().end
+    assert record.opens_at is None
+    assert record.closes_at is None
+
+
+async def test_session_open_trade_date_is_moscow_not_utc(
+    store: list[SessionInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """v1.67: 21:30 UTC is the next calendar date in Moscow."""
+
+    start = datetime(2026, 3, 16, 21, 30, tzinfo=UTC)
+    end = datetime(2026, 3, 17, 6, 40, tzinfo=UTC)
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [SessionInfo(start=start, end=end, is_trading_day=True)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
+        await refresh(7)
+
+    events = _session_events(caplog)
+    assert len(events) == 1
+    record = events[0]
+    assert record.event == "session_open"
+    assert record.trade_date == date(2026, 3, 17)
+    assert record.opens_at == start
+    assert record.closes_at == end
 
 
 async def test_unavailable_refresh_does_not_emit_session_events(
