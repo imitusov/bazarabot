@@ -42,7 +42,7 @@ obligation.
 
 **`async is_halted() → bool`** · **`async current() → HaltState | None`**
 
-**`async halt(reason: HaltReason, detail: str, at: datetime, daily_loss_pct: Decimal) → None`**
+**`async halt(reason: HaltReason, detail: str, at: datetime, daily_loss_pct: Decimal | None = None) → None`**
 - Persists the halt so it survives a restart. Idempotent when already halted
   **for the same or a more severe reason**.
 - **Severity order: `DAILY_LOSS_LIMIT` > `RECONCILIATION_MISMATCH` > `MANUAL`.**
@@ -53,10 +53,34 @@ obligation.
 - Suspends **entries only**. Never affects `lifecycle.exits` or
   `execution.orders.close_position`.
 - **Emits `halt_triggered` (CRITICAL) after a halt is persisted or upgraded,
-  with `reason`, `detail`, and `daily_loss_pct` (v1.61).** `daily_loss_pct` is
-  a required argument of `halt` (`Decimal`); callers that already computed the
-  day's loss pass it, and `/halt` passes the current figure from `pnl`.
-  `risk.gate` stays pure and emits nothing.
+  with `reason`, `detail`, and — when the caller supplied one — `daily_loss_pct`
+  (v1.61, amended v1.69).** `risk.gate` stays pure and emits nothing.
+- **`daily_loss_pct` is optional, and absent rather than zero when unknown
+  (v1.69).** v1.61 made it a required `Decimal`, which no caller could satisfy:
+  a `MANUAL` or `RECONCILIATION_MISMATCH` halt has no daily-loss figure, and one
+  of the three call sites cannot obtain one at all (below). A required argument
+  nobody can supply is not a contract, and `Decimal("0")` in its place would
+  read as "no loss today" on the record of a halt — the worst available lie in
+  this event. When the caller passes nothing, the field is **omitted from the
+  record**, not set to null or zero.
+- **Who passes it, by call site (v1.69).** Stated here so a later agent does not
+  "fix" the one that abstains:
+  - `app.loops` **passes it.** At the daily-loss check it already holds
+    `loss = await daily_loss_pct(moment)` as a `Decimal` in scope, one line
+    above the `halt` call. This is the `DAILY_LOSS_LIMIT` halt and the only site
+    where the figure is both meaningful and free.
+  - `telegram.commands` `/halt` **passes `await pnl.daily_loss_pct(now())`.**
+    The module already imports `zarabot.pnl`, so this adds no dependency. A
+    manual halt is worth annotating with the day's position.
+  - `execution.orders._halt_on_db_failure` **passes nothing, deliberately.** It
+    halts *because a database write just failed*, and `pnl.daily_loss_pct` reads
+    that same database. Calling it there would query the thing that is broken,
+    on the path that exists to handle its being broken. The field is absent from
+    this halt's record and that absence is correct.
+- Until v1.69 the spec's signature line carried a fourth argument while
+  `interfaces.md` and `state/halt.py` both had three, and no `halt_triggered`
+  was emitted anywhere. v1.61 amended the signature and never re-ran the
+  callers — failure class 1, amendment scope under-counted.
 
 **`async resume(actor: str, at: datetime) → bool`**
 - Clears the halt, recording who cleared it. Returns `False` when not halted.
@@ -81,6 +105,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
+- A `DAILY_LOSS_LIMIT` halt emits `halt_triggered` carrying the `daily_loss_pct`
+  its caller passed (v1.69; proves the field is the caller's real figure, not a
+  placeholder — a test asserting only that the key exists would pass against a
+  hardcoded zero).
+- A halt whose caller passes no `daily_loss_pct` emits `halt_triggered` with the
+  key **absent** — not null, not `Decimal("0")` (v1.69; proves an unknown loss
+  is reported as unknown. Zero on a halt record reads as "no loss today", which
+  is false precisely when it matters).
+- `resume` emits `halt_cleared` with `actor` (v1.61).
 - Halting then reading state reports halted with its reason (happy path).
 - Halt state survives a simulated restart, where a restart is
   `db.connection.disconnect()` followed by `connect` to the same file — a

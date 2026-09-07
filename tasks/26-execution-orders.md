@@ -184,6 +184,12 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
   cancel; submits the market sell directly.
+- **The database-failure halt passes no `daily_loss_pct` (v1.69).**
+  `_halt_on_db_failure` runs because a database write just failed, and
+  `pnl.daily_loss_pct` reads that same database — calling it there would query
+  the thing that is broken, on the path that exists to handle its being broken.
+  `halt_triggered` for this halt omits the field, and that absence is correct.
+  This module does not import `pnl`, and must not start.
 - **A failed cooldown write halts but does not fail the exit (v1.63).** The
   cooldown is written after the sell has executed and after the position row is
   already `CLOSED`, so raising out of `close_position` would report a completed
