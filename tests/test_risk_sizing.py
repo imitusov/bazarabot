@@ -7,7 +7,7 @@ from decimal import Decimal
 from itertools import product
 
 from zarabot.models import Instrument
-from zarabot.risk.sizing import size_position
+from zarabot.risk.sizing import position_budget, size_position
 
 AWARE = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
 ALLOCATED = Decimal("100000")
@@ -302,3 +302,52 @@ def test_cost_never_exceeds_the_structural_ceiling_for_any_input() -> None:
         cost = Decimal(lots) * Decimal(lot) * price
         assert cost <= allocated * size_pct / HUNDRED
         assert cost <= cash * (HUNDRED - reserve_pct) / HUNDRED
+
+
+def test_position_budget_is_exactly_size_pct_of_allocated_in_decimal() -> None:
+    # Exact, and exact in Decimal. Both values below are chosen because binary
+    # floating point cannot represent the result: 33.033 becomes
+    # 33.032999999999998 the moment the formula is routed through a float, and
+    # the large integer loses its last digits outright. Money never takes that
+    # route (rulebook: Decimal end to end), and this is the assertion that says
+    # so about the one formula two modules now share.
+    budget = position_budget(Decimal("100.10"), Decimal("33"))
+    assert isinstance(budget, Decimal)
+    assert budget == Decimal("33.033")
+
+    big = position_budget(Decimal("1234567890123456789"), Decimal("7"))
+    assert big == Decimal("86419752308641975.23")
+
+    # The ordinary case the operator would recognise from their own .env.
+    assert position_budget(Decimal("20000"), Decimal("10")) == Decimal("2000")
+
+
+def test_size_position_budget_bound_agrees_with_position_budget() -> None:
+    # The seam this extraction exists to close. Asserted on size_position's
+    # own return value rather than on position_budget's — per failure class 6,
+    # a test that re-derives the budget itself would pass against a
+    # size_position that had quietly kept its own copy of the formula.
+    #
+    # Cash is unbounded and nothing is open, so the budget is the binding one
+    # of the three and the lot count is entirely its consequence.
+    unbounded_cash = Decimal("1000000000")
+    for allocated, size_pct, price, lot in product(
+        (Decimal("20000"), Decimal("8.999999999999999999999999999"), Decimal("1")),
+        (Decimal("1"), Decimal("10"), Decimal("33"), HUNDRED),
+        (Decimal("0.07"), Decimal("3"), Decimal("279.83"), Decimal("1632")),
+        (1, 10),
+    ):
+        lots = size_position(
+            price,
+            _instrument(lot),
+            allocated,
+            unbounded_cash,
+            size_pct,
+            NO_OPEN_COST,
+            NO_RESERVE,
+        )
+        lot_cost = Decimal(lot) * price
+        assert lots == int(position_budget(allocated, size_pct) // lot_cost), (
+            f"budget bound disagrees at allocated={allocated} "
+            f"size_pct={size_pct} price={price} lot={lot}"
+        )
