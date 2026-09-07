@@ -117,6 +117,34 @@ the exchange sold the position; the corresponding position must be closed with
 
 Owns order submission, the submission locks, and crash recovery.
 
+**Observability (v1.61).** This module emits the money-path events of §7.1. It
+does not emit `signal_*` (those are `app.loops`; the gate stays pure) and does
+not emit `stop_order_executed` / `stop_order_orphaned` (those are
+`broker.reconcile`). Each event's extra fields match the table exactly:
+
+- `order_submitting` before the broker call, after the intent row exists
+  (`key`, `ticker`, `side`, `intent`, `lots`)
+- `order_filled` after settle records a fill (`key`, `ticker`, `filled_lots`,
+  `filled_price`, `commission`)
+- `order_rejected` on `OrderRejected` (`key`, `ticker`, `intent`, `broker_reason`)
+- `order_unresolved` when recovery finds a still-unknown order (`key`, `ticker`,
+  `age_seconds`)
+- `order_resolved` when recovery settles one (`key`, `resolved_status`, `source`)
+- `position_opened` after the position row exists (`position_id`, `ticker`,
+  `strategy`, `lots`, `entry_price`, `stop_price`, `target_price`)
+- `position_closed` after close (`position_id`, `ticker`, `exit_trigger`,
+  `exit_price`, `realised_pnl`, `gap_vs_stop` — the last only for `STOP_LOSS`)
+- `exit_failed` when an exit submit fails (`position_id`, `ticker`, `attempt`,
+  `error`)
+- `stop_order_placed` when a stop is standing (`position_id`, `ticker`,
+  `stop_price`, `stop_order_id`)
+- `stop_order_cancelled` after a successful cancel (`position_id`,
+  `stop_order_id`, `cause`)
+- `stop_protection_degraded` when three stop-place attempts fail and the
+  position stays `LOCAL` (`position_id`, `ticker`, `attempts`)
+- `partial_fill` when filled lots are below requested (`key`, `ticker`,
+  `intent`, `requested_lots`, `filled_lots`)
+
 **`async open_position(signal: Signal, lots: int, instrument: Instrument) → Position`**
 - Generates an idempotency key, records `SUBMITTING`, submits a market buy,
   settles the order, computes stop and target from the fill price, opens the
@@ -389,6 +417,11 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   the per-ticker lock).
 - The order lock is released when the broker call raises (proves the release
   guarantee under failure, not only on success).
+- A successful entry emits `order_submitting` then `order_filled` then
+  `position_opened` then `stop_order_placed`, each with the §7.1 fields
+  (v1.61).
+- A rejected entry emits `order_rejected` and no `position_opened`.
+- A `LOCAL` degrade after three stop failures emits `stop_protection_degraded`.
 
 **stop-order lifecycle** (`execution.orders`, `broker.reconcile`)
 - Opening a position places exactly one stop order at the computed price

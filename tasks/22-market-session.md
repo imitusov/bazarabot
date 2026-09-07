@@ -49,6 +49,12 @@ Module **22** of 40 in `dependency-order.md`. Everything before it is complete a
 - Does not raise on an unavailable schedule. Aborting startup over a transient
   broker blip is worse than starting and reporting the condition, which
   `cache_exhausted` then keeps visible on every cycle until it is fixed.
+- **On a successful refresh, emit `session_open` or `session_closed` (v1.61).**
+  `session_open` when the first day of the fetched window is a trading session,
+  with `trade_date`, `opens_at`, `closes_at` from that `SessionInfo`.
+  `session_closed` when that day is not a trading session, with the same three
+  fields (`opens_at` / `closes_at` may be null). This is a log, not a Telegram
+  alert — the brief deliberately does not alert session open/close.
 
 **`is_open(now: datetime) → bool`**
 - True when `now` falls within a main session, inclusive of the open instant and
@@ -189,6 +195,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   a good calendar).
 - After a rollover refresh, `cache_exhausted` is False again (proves the cadence
   actually reloads).
+- A successful refresh of a trading day emits `session_open` with `trade_date`,
+  `opens_at`, `closes_at`; a successful refresh of a holiday emits
+  `session_closed` (v1.61).
 
 ## Expected output
 

@@ -259,6 +259,13 @@ was one of the eight sites opening its own connection.
   emitting an undifferentiated list of identifiers forced the caller either to
   re-derive the rule or, as happened, to skip the adjustment entirely (#35).
 - Returns a report enumerating every adjustment; an empty report means agreement.
+- **After persist, emit `reconciliation` (INFO) with `adjustments_count` and
+  `types` (the distinct adjustment type names) (v1.61).** Empty agreement still
+  emits, with count 0 and `types` an empty list — silence here is how a failed
+  reconcile looks like a skip.
+- **Emits `stop_order_executed` when it books an exchange-fired stop close, and
+  `stop_order_orphaned` when it reports `STOP_ORPHAN` (v1.61).** Fields match
+  §7.1.
 - Idempotent.
 - Ordering constraint: runs during `app.startup` after migrations and after
   unresolved-order recovery, and before any entry is permitted.
@@ -305,7 +312,8 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-- Broker and database agreeing produces no adjustments and no alert (happy path).
+- Broker and database agreeing produces no adjustments and no alert (happy path)
+  and still emits `reconciliation` with `adjustments_count` 0 (v1.61).
 - A position open in the database but absent at the broker, whose operations feed
   shows a sale, is closed locally as externally closed and alerted (proves the
   broker is authoritative).

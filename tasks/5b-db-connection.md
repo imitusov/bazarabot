@@ -71,6 +71,11 @@ inherit whichever file the previous importer happened to open.
   module's in-flight rows durable, so its `rollback()` undid nothing. Both were
   reproduced on the money path (#40).
 - A read needs no transaction and must not take one.
+- **On `aiosqlite.Error` during a write, emit `db_write_failed` (v1.61)** with
+  `table` (the object name when the error names one, otherwise `unknown`) and
+  `critical` true, then re-raise. This is the single owner of that event;
+  repositories that swallow a rule-12 failure still go through this path so the
+  event is not optional.
 
 **`async disconnect() → None`**
 - Closes the process connection and forgets it. Idempotent when already closed.
@@ -139,6 +144,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (proves a foreign commit can no longer make half-written rows durable — the
   defect that made `rollback()` meaningless on the money path).
 - A read path takes no transaction: reads succeed while another task holds one.
+- A write that fails with `aiosqlite.Error` inside `transaction()` emits
+  `db_write_failed` with `table` (the SQLite object name when the error names
+  one, otherwise `unknown`) and `critical` true, then the exception still
+  propagates (v1.61). Repositories do not emit this event.
 
 ## Expected output
 

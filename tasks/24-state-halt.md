@@ -42,7 +42,7 @@ obligation.
 
 **`async is_halted() → bool`** · **`async current() → HaltState | None`**
 
-**`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
+**`async halt(reason: HaltReason, detail: str, at: datetime, daily_loss_pct: Decimal) → None`**
 - Persists the halt so it survives a restart. Idempotent when already halted
   **for the same or a more severe reason**.
 - **Severity order: `DAILY_LOSS_LIMIT` > `RECONCILIATION_MISMATCH` > `MANUAL`.**
@@ -52,9 +52,16 @@ obligation.
   cleared a halt whose real cause nobody had been told about (#9).
 - Suspends **entries only**. Never affects `lifecycle.exits` or
   `execution.orders.close_position`.
+- **Emits `halt_triggered` (CRITICAL) after a halt is persisted or upgraded,
+  with `reason`, `detail`, and `daily_loss_pct` (v1.61).** `daily_loss_pct` is
+  a required argument of `halt` (`Decimal`); callers that already computed the
+  day's loss pass it, and `/halt` passes the current figure from `pnl`.
+  `risk.gate` stays pure and emits nothing.
 
 **`async resume(actor: str, at: datetime) → bool`**
 - Clears the halt, recording who cleared it. Returns `False` when not halted.
+- **Emits `halt_cleared` (INFO) with `actor` when a halt was actually cleared
+  (v1.61).** A no-op resume emits nothing.
 
 ## Relevant error handling rules
 
@@ -90,6 +97,8 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A halt does not prevent `lifecycle.exits` from returning triggers, nor
   `execution.orders` from placing an exit (proves the halt-blocks-entries-only
   contract, which is the single most consequential interaction in the system).
+- `halt` emits `halt_triggered` with `reason`, `detail`, `daily_loss_pct`;
+  `resume` of a halted process emits `halt_cleared` with `actor` (v1.61).
 
 ## Expected output
 

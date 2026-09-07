@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.58
+**Version:** 1.61
 **Date:** 2026-09-07
 **Implements:** `business-brief.md` v1.11
 
@@ -69,7 +69,9 @@ calls to the broker. `telegram.notifier` and `telegram.commands` are the only
 modules that make network calls to Telegram. All tests mock at these boundaries.
 
 **Secrets.** No module logs, returns, or includes in an exception message the
-value of `TINVEST_TOKEN` or `TELEGRAM_BOT_TOKEN`. See error rule 19.
+value of `TINVEST_TOKEN`, `TINVEST_ACCOUNT_ID`, their `*_SANDBOX` counterparts,
+or `TELEGRAM_BOT_TOKEN`. An account identifier in a log is as identifying as a
+token. See error rule 19.
 
 **Language.** All owner-facing text — commands, alerts, reports, log messages —
 is written in English inline. There is no localisation layer, no message
@@ -357,6 +359,8 @@ it proves.
   proves the field is producer-set and that this module invents nothing).
 - A token inside the `event` field is redacted (proves redaction reaches the
   field the whole catalogue is keyed on).
+- A log record carrying an account identifier is redacted the same way as a
+  token (v1.61).
 
 **`db.migrations`**
 - Applying migrations to an empty database creates every table **and leaves
@@ -411,6 +415,10 @@ it proves.
   (proves a foreign commit can no longer make half-written rows durable — the
   defect that made `rollback()` meaningless on the money path).
 - A read path takes no transaction: reads succeed while another task holds one.
+- A write that fails with `aiosqlite.Error` inside `transaction()` emits
+  `db_write_failed` with `table` (the SQLite object name when the error names
+  one, otherwise `unknown`) and `critical` true, then the exception still
+  propagates (v1.61). Repositories do not emit this event.
 
 **`db.positions`**
 - Opening a position then reading open positions returns it (happy path).
@@ -538,6 +546,9 @@ it proves.
   `PriceRejected` (proves a renamed SDK field surfaces as the integration break
   it is, rather than as every quote in every cycle looking like bad broker data
   — the state in which no `LOCAL` stop-loss can fire).
+- Raising `BrokerUnavailable` emits `broker_unavailable` with `method`
+  (v1.61). Raising `BrokerRateLimited` emits `rate_limited` with
+  `retry_after_seconds`.
 - A zero-valued quote raises `PriceRejected`, not `BrokerUnavailable` and not
   `Decimal(0)` (proves the mass-liquidation path is closed at its source, and
   that bad data is distinguishable from an outage).
@@ -559,7 +570,8 @@ it proves.
   looks orders up by the key it still has, not the identifier it lost).
 
 **`broker.reconcile`**
-- Broker and database agreeing produces no adjustments and no alert (happy path).
+- Broker and database agreeing produces no adjustments and no alert (happy path)
+  and still emits `reconciliation` with `adjustments_count` 0 (v1.61).
 - A position open in the database but absent at the broker, whose operations feed
   shows a sale, is closed locally as externally closed and alerted (proves the
   broker is authoritative).
@@ -708,6 +720,9 @@ it proves.
   a good calendar).
 - After a rollover refresh, `cache_exhausted` is False again (proves the cadence
   actually reloads).
+- A successful refresh of a trading day emits `session_open` with `trade_date`,
+  `opens_at`, `closes_at`; a successful refresh of a holiday emits
+  `session_closed` (v1.61).
 
 **`market.data`**
 - Candles for a watchlist ticker are returned newest-last, timezone-aware
@@ -743,6 +758,8 @@ it proves.
   omitting the ticker (proves a programming error is not disguised as a missing
   instrument, which is the exposure `broker.client`'s narrowing exists to
   create and this module was swallowing).
+- An omitted ticker emits `candles_failed` with that `ticker` and `error`
+  (v1.61).
 
 **`strategies.*`**
 
@@ -873,6 +890,11 @@ Additionally, `strategies.ml_model`:
   the per-ticker lock).
 - The order lock is released when the broker call raises (proves the release
   guarantee under failure, not only on success).
+- A successful entry emits `order_submitting` then `order_filled` then
+  `position_opened` then `stop_order_placed`, each with the §7.1 fields
+  (v1.61).
+- A rejected entry emits `order_rejected` and no `position_opened`.
+- A `LOCAL` degrade after three stop failures emits `stop_protection_degraded`.
 
 **stop-order lifecycle** (`execution.orders`, `broker.reconcile`)
 - Opening a position places exactly one stop order at the computed price
@@ -994,6 +1016,8 @@ Additionally, on exits booked from an exchange stop:
 - A halt does not prevent `lifecycle.exits` from returning triggers, nor
   `execution.orders` from placing an exit (proves the halt-blocks-entries-only
   contract, which is the single most consequential interaction in the system).
+- `halt` emits `halt_triggered` with `reason`, `detail`, `daily_loss_pct`;
+  `resume` of a halted process emits `halt_cleared` with `actor` (v1.61).
 
 **`pnl`**
 - Realised P&L for a closed position matches the arithmetic including commission
@@ -1019,8 +1043,9 @@ Additionally, on exits booked from an exchange stop:
 **`telegram.commands`**
 - Each command from the authorised chat returns its documented content (happy
   path per command).
-- Any command from an unauthorised chat identifier returns nothing, is logged,
-  and performs no state change (proves the single security boundary).
+- Any command from an unauthorised chat identifier returns nothing, emits
+  `unauthorised_command` with `chat_id` and `command`, and performs no state
+  change (v1.61; proves the single security boundary).
 - `/resume` when not halted replies that nothing was halted (proves the
   no-op path).
 - A response exceeding the message limit is truncated with an explicit note
@@ -1028,8 +1053,10 @@ Additionally, on exits booked from an exchange stop:
 - No command mutates a risk limit (proves the brief's prohibition).
 
 **`telegram.notifier`**
-- A failed send is retried and, if still failing, written to the log without
-  raising (proves Telegram outages never reach trading logic).
+- A failed send is retried and, if still failing, emits `telegram_send_failed`
+  without raising (v1.61; proves Telegram outages never reach trading logic).
+- A body containing a token is dropped, emits `secret_redacted` with `sink`
+  `telegram`, and does not contain the token (v1.61).
 - No alert body contains either token (proves the secret boundary at the last
   point of egress).
 
@@ -1042,12 +1069,14 @@ Additionally, on exits booked from an exchange stop:
   (proves the undefined-metric path).
 - A report exceeding the message limit drops the least important section and
   notes the omission (proves the documented trimming order).
+- A successful send emits `weekly_report_sent` with `period_start` and
+  `period_end` (v1.61).
 
 **`app.startup`**
 - Startup with valid config, a reachable broker and a clean database completes
   and reports ready (happy path).
-- Invalid config aborts before any broker call is made (proves fail-fast
-  ordering).
+- Invalid config aborts before any broker call is made, emits `config_invalid`
+  with `variable`, and does not emit `startup_ok` (v1.61).
 - `SSL_TBANK_VERIFY` is present in the environment before the first broker call
   (proves the TLS root is available when the channel is built — the failure this
   guards against is a handshake error that looks like a network fault rather
@@ -1100,6 +1129,8 @@ Additionally, on exits booked from an exchange stop:
   `version`, `mode`, `halted` and `adjustments_count`, matching what the ready
   alert reports (proves the deploy health gate has something to observe — it
   greps for exactly this event, and nothing emitted it).
+- A `FOREIGN_HOLDING` refusal emits `startup_failed` with `stage` `reconcile`
+  and no `startup_ok` (v1.61).
 
 **`app.loops` / `app.shutdown`**
 - With the session closed, no market data call is made (proves the session guard
@@ -1180,13 +1211,22 @@ Additionally, on exits booked from an exchange stop:
 - `shutdown` calls `db.connection.disconnect()`, and `db.connection.shared()`
   raises `DatabaseNotOpenError` afterwards (proves "closes the database" is that
   one call rather than a repository-level close of a connection nobody owns).
+- An approved signal emits `signal_generated` before the gate; a rejected
+  decision emits `signal_rejected` with `rejection_reason`; `risk.gate` emits
+  neither (v1.61).
+- A successful heartbeat job emits `heartbeat` with `uptime_seconds`,
+  `open_positions`, `halted`.
+- A crashing supervised task emits `task_crashed` with `task` and
+  `restart_in_seconds`.
 
 **`ops.backup`**
 - A backup produces a file that opens as a valid database containing the same
   rows (proves the copy is consistent, not a torn file).
 - Backups older than the retention window are removed and newer ones are kept
   (boundary).
-- A failing backup alerts and does not stop trading (proves the priority order).
+- A failing backup alerts, emits `backup_failed`, and does not stop trading
+  (v1.61).
+- A successful backup emits `backup_ok` with `path` and `bytes`.
 
 **`sandbox.exchange`**
 - A market buy is **priced at the next bar's open**, never at the bar the
@@ -1459,6 +1499,10 @@ Configures structured logging and enforces secret redaction.
   conversion and is the one thing it does use.
 - Called by `app.startup` immediately after `config.load()` and before any other
   module logs anything.
+- **The `secrets` list must include every token and every account identifier the
+  process holds** — `tinvest_token`, `tinvest_account_id`, and any sandbox
+  counterparts that are set (v1.61). `app.startup` is the caller that knows
+  those values; this module only redacts what it is given.
 
 ### `zarabot/db/migrations.py`
 
@@ -1546,6 +1590,11 @@ inherit whichever file the previous importer happened to open.
   module's in-flight rows durable, so its `rollback()` undid nothing. Both were
   reproduced on the money path (#40).
 - A read needs no transaction and must not take one.
+- **On `aiosqlite.Error` during a write, emit `db_write_failed` (v1.61)** with
+  `table` (the object name when the error names one, otherwise `unknown`) and
+  `critical` true, then re-raise. This is the single owner of that event;
+  repositories that swallow a rule-12 failure still go through this path so the
+  event is not optional.
 
 **`async disconnect() → None`**
 - Closes the process connection and forgets it. Idempotent when already closed.
@@ -1937,6 +1986,11 @@ calls, each re-reading every environment variable, re-parsing every `Decimal` an
 touching the filesystem to stat `ML_MODEL_PATH` — on the latency-critical path
 (#18). Configuration is read through `config.get()`, the memoised accessor, not
 `config.load()`.
+- **Emits `broker_unavailable` (WARNING) on each `BrokerUnavailable` with
+  `method`, `consecutive_failures`, `backoff_seconds`, and `rate_limited`
+  (WARNING) on each `BrokerRateLimited` with `method`, `retry_after_seconds`
+  (v1.61).** This module is the only one that sees those exceptions at the
+  source; callers must not re-emit them.
 
 **`async close() → None`**
 - Closes the process client and forgets it. Idempotent. Called only by
@@ -2366,6 +2420,13 @@ was one of the eight sites opening its own connection.
   emitting an undifferentiated list of identifiers forced the caller either to
   re-derive the rule or, as happened, to skip the adjustment entirely (#35).
 - Returns a report enumerating every adjustment; an empty report means agreement.
+- **After persist, emit `reconciliation` (INFO) with `adjustments_count` and
+  `types` (the distinct adjustment type names) (v1.61).** Empty agreement still
+  emits, with count 0 and `types` an empty list — silence here is how a failed
+  reconcile looks like a skip.
+- **Emits `stop_order_executed` when it books an exchange-fired stop close, and
+  `stop_order_orphaned` when it reports `STOP_ORPHAN` (v1.61).** Fields match
+  §7.1.
 - Idempotent.
 - Ordering constraint: runs during `app.startup` after migrations and after
   unresolved-order recovery, and before any entry is permitted.
@@ -2408,6 +2469,12 @@ was one of the eight sites opening its own connection.
 - Does not raise on an unavailable schedule. Aborting startup over a transient
   broker blip is worse than starting and reporting the condition, which
   `cache_exhausted` then keeps visible on every cycle until it is fixed.
+- **On a successful refresh, emit `session_open` or `session_closed` (v1.61).**
+  `session_open` when the first day of the fetched window is a trading session,
+  with `trade_date`, `opens_at`, `closes_at` from that `SessionInfo`.
+  `session_closed` when that day is not a trading session, with the same three
+  fields (`opens_at` / `closes_at` may be null). This is a log, not a Telegram
+  alert — the brief deliberately does not alert session open/close.
 
 **`is_open(now: datetime) → bool`**
 - True when `now` falls within a main session, inclusive of the open instant and
@@ -2527,6 +2594,10 @@ is the failure this cadence exists to prevent.
   as themselves rather than as `BrokerUnavailable`; catching `Exception` here
   put them straight back in the dark, which is the second half of #23.
 - Never pads or interpolates missing candles.
+- **Emits `candles_failed` (WARNING) with `ticker` and `error` whenever a ticker
+  is omitted or counted as degraded (v1.61).** `error` is the exception type
+  name, or `short_history`. This is the structured event; the Telegram alert on
+  the third consecutive degradation is unchanged.
 - The counters are process-local, like `market.session`'s cache: they measure
   consecutive failures of *this* process, and a restart is entitled to start
   over rather than inherit a count it did not observe.
@@ -2693,6 +2764,34 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 ### `zarabot/execution/orders.py`
 
 Owns order submission, the submission locks, and crash recovery.
+
+**Observability (v1.61).** This module emits the money-path events of §7.1. It
+does not emit `signal_*` (those are `app.loops`; the gate stays pure) and does
+not emit `stop_order_executed` / `stop_order_orphaned` (those are
+`broker.reconcile`). Each event's extra fields match the table exactly:
+
+- `order_submitting` before the broker call, after the intent row exists
+  (`key`, `ticker`, `side`, `intent`, `lots`)
+- `order_filled` after settle records a fill (`key`, `ticker`, `filled_lots`,
+  `filled_price`, `commission`)
+- `order_rejected` on `OrderRejected` (`key`, `ticker`, `intent`, `broker_reason`)
+- `order_unresolved` when recovery finds a still-unknown order (`key`, `ticker`,
+  `age_seconds`)
+- `order_resolved` when recovery settles one (`key`, `resolved_status`, `source`)
+- `position_opened` after the position row exists (`position_id`, `ticker`,
+  `strategy`, `lots`, `entry_price`, `stop_price`, `target_price`)
+- `position_closed` after close (`position_id`, `ticker`, `exit_trigger`,
+  `exit_price`, `realised_pnl`, `gap_vs_stop` — the last only for `STOP_LOSS`)
+- `exit_failed` when an exit submit fails (`position_id`, `ticker`, `attempt`,
+  `error`)
+- `stop_order_placed` when a stop is standing (`position_id`, `ticker`,
+  `stop_price`, `stop_order_id`)
+- `stop_order_cancelled` after a successful cancel (`position_id`,
+  `stop_order_id`, `cause`)
+- `stop_protection_degraded` when three stop-place attempts fail and the
+  position stays `LOCAL` (`position_id`, `ticker`, `attempts`)
+- `partial_fill` when filled lots are below requested (`key`, `ticker`,
+  `intent`, `requested_lots`, `filled_lots`)
 
 **`async open_position(signal: Signal, lots: int, instrument: Instrument) → Position`**
 - Generates an idempotency key, records `SUBMITTING`, submits a market buy,
@@ -2898,7 +2997,7 @@ obligation.
 
 **`async is_halted() → bool`** · **`async current() → HaltState | None`**
 
-**`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
+**`async halt(reason: HaltReason, detail: str, at: datetime, daily_loss_pct: Decimal) → None`**
 - Persists the halt so it survives a restart. Idempotent when already halted
   **for the same or a more severe reason**.
 - **Severity order: `DAILY_LOSS_LIMIT` > `RECONCILIATION_MISMATCH` > `MANUAL`.**
@@ -2908,9 +3007,16 @@ obligation.
   cleared a halt whose real cause nobody had been told about (#9).
 - Suspends **entries only**. Never affects `lifecycle.exits` or
   `execution.orders.close_position`.
+- **Emits `halt_triggered` (CRITICAL) after a halt is persisted or upgraded,
+  with `reason`, `detail`, and `daily_loss_pct` (v1.61).** `daily_loss_pct` is
+  a required argument of `halt` (`Decimal`); callers that already computed the
+  day's loss pass it, and `/halt` passes the current figure from `pnl`.
+  `risk.gate` stays pure and emits nothing.
 
 **`async resume(actor: str, at: datetime) → bool`**
 - Clears the halt, recording who cleared it. Returns `False` when not halted.
+- **Emits `halt_cleared` (INFO) with `actor` when a halt was actually cleared
+  (v1.61).** A no-op resume emits nothing.
 
 ### `zarabot/pnl.py`
 
@@ -2972,15 +3078,21 @@ for a reason already recorded stays a no-op, so this adds no alert noise.
 
 **`async alert(text: str, urgent: bool = False) → None`**
 - Sends to the configured chat. Retries on failure, then logs and returns.
-- **Never raises.** Telegram must never be able to interrupt trading.
-- Never includes a token in a message.
+- **After the last failed attempt, emit `telegram_send_failed` (WARNING) with
+  `attempt` and `error` (v1.61).** Never raises.
+- **When a body contains a configured secret, drop it, emit `secret_redacted`
+  (ERROR) with `sink` equal to `telegram` — never the secret, never its length —
+  and send a substitute incident alert without the secret (v1.61, rule 19).**
+- Never includes a token or account identifier in a message.
 
 ### `zarabot/telegram/commands.py`
 
 One handler per command in the brief's command table.
 
 - Every handler first checks the sender against `TELEGRAM_CHAT_ID`; a mismatch
-  logs and returns without replying and without any state change.
+  emits `unauthorised_command` (INFO) with `chat_id` and `command` (v1.61), then
+  returns without replying and without any state change. `chat_id` is not a
+  brokerage secret; it is the field that makes the event answerable.
 - Replies exceeding the platform limit are truncated with an explicit note of how
   many entries were omitted.
 - No handler mutates a risk limit.
@@ -2998,6 +3110,8 @@ One handler per command in the brief's command table.
   distribution, cooldown counts, worst trade — and the omission is noted.
 
 **`async send(now: datetime) → None`** — builds and sends; failure alerts but does not raise.
+- **On a successful send, emit `weekly_report_sent` (INFO) with `period_start`
+  and `period_end` (v1.61).** A failed send emits nothing of this name.
 
 ### `zarabot/app/startup.py`
 
@@ -3005,6 +3119,13 @@ One handler per command in the brief's command table.
 
 Fixed ordering; each step completes before the next begins:
 1. `config.load()` — abort on failure before anything else, including any network call.
+   **When `load()` raises `ConfigError`, this module is still the owner of
+   `config_invalid` (v1.61).** Logging is not configured yet. `start()` therefore
+   calls `logging_setup.configure` with whatever token and account-id values are
+   already in the environment (empty list if none), emits `config_invalid`
+   (CRITICAL) with `variable` from the `ConfigError`, then raises `StartupError`.
+   It never proceeds to a broker call. `config` itself does not emit the event:
+   it has no logger of its own by design.
 1b. Write `SSL_TBANK_VERIFY` into the process environment from
    `config.ssl_tbank_verify`. This must precede every broker call; a channel
    created before it is set fails its TLS handshake.
@@ -3013,7 +3134,8 @@ Fixed ordering; each step completes before the next begins:
    carrying the trading token. `config` logs it; a log line on a server nobody
    is watching is not a security control. The alert must never contain the
    token.
-2. `logging_setup.configure()`.
+2. `logging_setup.configure()`, passing every token and account identifier on
+   the loaded `Config` as `secrets`.
 3. `db.connection.connect(config.db_path)`, then
    `db.migrations.apply(db.connection.shared())`. The connection is opened here —
    not at import, and not inside a repository — and `apply` receives the shared
@@ -3115,6 +3237,11 @@ Fixed ordering; each step completes before the next begins:
 
 - Raises `StartupError` on any failure, having alerted if Telegram credentials
   were valid. No entry may be attempted before step 9 completes.
+- **On any `StartupError` after logging is configured, emit `startup_failed`
+  (CRITICAL) with `stage` (the step name: `config`, `logging`, `database`,
+  `strategies`, `session`, `recovery`, `reconcile`, `halt`, `ready`) and
+  `reason` (v1.61).** No `startup_ok` on that path. `__main__` does not emit
+  either event; it only sleeps and exits.
 
 ### `zarabot/app/loops.py`
 
@@ -3192,6 +3319,17 @@ Fixed ordering; each step completes before the next begins:
 5. If halted, return; entries stop here.
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
+
+   **`signal_generated` / `signal_rejected` are emitted here (v1.61), not in
+   `risk.gate`.** The gate stays pure. Each non-`None` strategy result logs
+   `signal_generated` (`ticker`, `strategy`, `reference_price`) before the gate
+   runs; a rejected decision logs `signal_rejected` (`ticker`, `strategy`,
+   `rejection_reason`). Approved entries that submit are not a second
+   `signal_generated`.
+
+   **After a close that starts a cooldown, emit `cooldown_started` (`ticker`,
+   `active_until`) (v1.61).** `execution.orders` owns the cooldown write;
+   this module owns the event because the gate cannot log.
 
    **A ticker already opened earlier in this same pass is skipped before the
    gate, and recorded as `DUPLICATE_TICKER` (v1.40).** Strategies are looped
@@ -3317,6 +3455,16 @@ run continuously is added to this list in the same change, or it does not run.
 A failure in one task must never terminate another; each is supervised and
 restarted with backoff. A failure in one task must never terminate another.
 
+**Observability of the supervisor (v1.61):**
+- Each heartbeat job emits `heartbeat` (INFO) with `uptime_seconds`,
+  `open_positions`, `halted`.
+- A supervised task that raises emits `task_crashed` (ERROR) with `task`,
+  `error`, `restart_in_seconds` before the backoff sleep.
+- When `clock.now()` is not UTC-aware, emit `clock_drift` (WARNING) with
+  `drift_seconds` 0 and refuse to run the cycle — a naive "now" is a contract
+  violation, not weather (v1.61). Do not call `datetime.now()` here to "check"
+  the clock; that would itself violate the clock-ownership rule.
+
 ### `zarabot/app/shutdown.py`
 
 **`async shutdown(ctx, signal) → None`**
@@ -3354,6 +3502,8 @@ The process entry point, so that `python -m zarabot` is the start command.
   `app.*`; this module exists only to be the thing Python executes.
 - On `StartupError` it sleeps 30 seconds before returning, so the container
   restart policy cannot produce an alert loop (rule 15).
+- **It emits no log event of its own (v1.61).** `startup_failed` / `config_invalid`
+  belong to `app.startup`, which must have emitted them before raising.
 
 ### `zarabot/ops/commissions.py`
 
@@ -3387,6 +3537,9 @@ that depended on them.
 ### `zarabot/ops/backup.py`
 
 **`async run(db_path: Path, backup_dir: Path) → Path`** — produces a consistent copy using SQLite's own backup mechanism, never a raw file copy of a live database.
+- **On success, emit `backup_ok` (INFO) with `path` and `bytes` (v1.61).** On
+  failure, emit `backup_failed` (ERROR) with `error`, alert, and return; it must
+  never stop trading.
 
 **`async prune(backup_dir: Path, retention_days: int) → int`** — removes backups strictly older than the window; returns the count removed.
 
@@ -3975,6 +4128,12 @@ carries the difference between the actual exit price and the stop price. It is
 the field the gap-cost query aggregates, and omitting it makes the true cost of
 overnight holding unmeasurable.
 
+**Host export (v1.61).** `scripts/deploy/export_health.py` groups on `event`.
+A record with no `event` key is library noise and is omitted from domain
+counts — it is not `unknown`. An `event` value that is not in this table is
+`unknown` and the export exits non-zero. Heartbeat uptime uses `heartbeat`
+events only.
+
 ---
 
 ## 8. Error handling rules
@@ -4067,10 +4226,11 @@ Applies across all modules. Every external failure mode has exactly one rule.
     trading a different system than the owner believes.
 18. **Backup failure** → ERROR, alert, trading continues. A missing backup is not
     worth stopping trading over; it is worth knowing about.
-19. **Secret exposure** → no token is ever written to a log, an exception message,
-    or a Telegram message. If the redaction filter detects a secret in an
-    outgoing Telegram message, the message is **dropped**, and an alert reporting
-    the incident without the secret is sent in its place.
+19. **Secret exposure** → no token **and no account identifier** is ever written
+    to a log, an exception message, or a Telegram message. If the redaction
+    filter detects a secret in an outgoing Telegram message, the message is
+    **dropped**, `secret_redacted` is emitted, and an alert reporting the
+    incident without the secret is sent in its place.
 20. **Daily loss limit breached** → halt, persist the halt, alert with the loss
     and the trades that produced it. Exits continue to run.
 21. **Unhandled exception in a background task** → log with traceback, alert,
@@ -4335,7 +4495,10 @@ container.
   compose file, so the deploy is not pinned to one host path.
 - `stop_grace_period: 60s` — long enough for `app.shutdown` to settle an in-flight
   order rather than being killed mid-submission.
-- Log driver with size-based rotation, capped so logs cannot fill the disk.
+- Log driver with size-based rotation: **five files of 10 MB** (`max-size: 10m`,
+  `max-file: "5"`). The brief requires size-based rotation so logs cannot fill
+  the disk; three files was a deploy-compose drift (v1.61). `docker-compose.yml`
+  and `docker-compose.deploy.yml` must match.
 - `TZ=Europe/Moscow`.
 - No published ports. The container listens on nothing.
 
