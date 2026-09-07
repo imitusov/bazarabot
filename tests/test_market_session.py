@@ -201,8 +201,31 @@ async def test_a_failed_history_write_leaves_the_schedule_cached(
     assert is_open(INSIDE) is True
 
 
+async def test_a_programming_error_in_history_write_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rename or type error must not look like an unmeasurable calendar.
+
+    `_remember` used to catch `Exception`, so AttributeError from `record_many`
+    was logged and dropped; `covers()` then returned False and MAX_AGE stayed
+    suppressed (F-52).
+    """
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [_weekday()]
+
+    async def _rename(sessions: list[SessionInfo]) -> int:
+        raise AttributeError("record_many has no attribute 'foo'")
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    monkeypatch.setattr("zarabot.market.session.record_many", _rename)
+
+    with pytest.raises(AttributeError, match="record_many has no attribute"):
+        await refresh(7)
+
+
 @pytest.fixture
-async def schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+async def schedule(store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch) -> None:
     sessions = [_holiday(), _saturday(), _weekday()]
 
     async def _fake(days: int) -> list[SessionInfo]:
@@ -274,6 +297,7 @@ async def test_past_last_cached_session_is_closed_and_cache_exhausted(
 
 
 async def test_rollover_refresh_clears_cache_exhausted(
+    store: list[SessionInfo],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _first(days: int) -> list[SessionInfo]:
@@ -326,6 +350,7 @@ async def test_empty_schedule_alerts_once(
 
 
 async def test_a_second_outage_alerts_again(
+    store: list[SessionInfo],
     _reset_cache: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

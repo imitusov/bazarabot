@@ -732,8 +732,9 @@ Loads `broker.client.get_trading_schedule` and **records the whole window** via
 Unavailable broker, or a response with no trading sessions, leaves the cache
 intact, logs WARNING, and alerts once (rule 10). The latch is cleared on the
 success path, so "once" is per incident rather than per process (#32). A failed
-history write is logged and does not propagate — degraded age counting must not
-stop the bot trading. Does not raise.
+history write (`aiosqlite.Error`) is logged and does not propagate — degraded
+age counting must not stop the bot trading. Other exceptions from that write
+path propagate (F-52 / v1.59). Does not raise on an unavailable broker schedule.
 
 **`calendar() → TradingCalendar`**
 Recorded history plus the live window, oldest first, one entry per day. Empty

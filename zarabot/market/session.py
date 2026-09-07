@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from datetime import UTC, date, datetime
 
+import aiosqlite
+
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
@@ -76,7 +78,7 @@ async def _remember(fetched: list[SessionInfo]) -> None:
         await record_many(fetched)
         _earliest = await earliest()
         _history = await list_since(_earliest) if _earliest is not None else []
-    except Exception:
+    except aiosqlite.Error:
         _LOG.exception("could not record the observed trading calendar")
 
 
