@@ -12,6 +12,7 @@ import pytest
 
 from zarabot.app.startup import AppContext
 from zarabot.broker.client import (
+    BrokerRateLimited,
     BrokerUnavailable,
     InstrumentNotFound,
     OrderRejected,
@@ -2059,3 +2060,138 @@ async def test_unmarkable_equity_writes_no_opening_snapshot(
     assert "daily_loss" not in calls
     assert "candles" not in calls
     assert len(alerts) == 1
+
+
+class _LoopStopped(Exception):
+    """Breaks `_trading_loop` out of its `while True` after one sleep."""
+
+
+async def _one_iteration_delay(monkeypatch: pytest.MonkeyPatch, cycle: object) -> float:
+    """The delay `_trading_loop` actually sleeps after one cycle.
+
+    Driven through the real loop rather than through the helper that computes
+    the number, because the contract is about what the bot waits, not about how
+    the waiting is worked out.
+    """
+    import zarabot.app.loops as loops
+
+    slept: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        slept.append(delay)
+        raise _LoopStopped
+
+    monkeypatch.setattr(loops.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(loops, "trading_cycle", cycle)
+    with pytest.raises(_LoopStopped):
+        await loops._trading_loop(_ctx())
+    return slept[0]
+
+
+def _rate_limited(retry_after: Decimal | None) -> object:
+    async def _cycle(ctx: AppContext) -> None:
+        import zarabot.app.loops as loops
+
+        await loops._note_data_failure(BrokerRateLimited(retry_after))
+
+    return _cycle
+
+
+async def test_the_brokers_hint_delays_the_next_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule 2: back off for at least as long as the broker asked."""
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    loops._retry_after = None
+
+    delay = await _one_iteration_delay(monkeypatch, _rate_limited(Decimal("300")))
+    # One failure escalates 60s to 120s; the broker asked for 300.
+    assert delay == 300
+
+
+async def test_a_hint_shorter_than_the_backoff_does_not_shorten_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hint raises the floor; it never lowers the ceiling."""
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 2
+    loops._market_alerted = True
+    loops._retry_after = None
+
+    delay = await _one_iteration_delay(monkeypatch, _rate_limited(Decimal("2")))
+    # The third consecutive failure escalates 60s to 480s.
+    assert delay == 480
+
+
+async def test_a_hint_beyond_the_maximum_backoff_is_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No number from outside may hold the exit path asleep."""
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    loops._retry_after = None
+
+    delay = await _one_iteration_delay(monkeypatch, _rate_limited(Decimal("999999")))
+    assert delay == loops._MAX_BACKOFF
+
+
+async def test_a_successful_cycle_clears_the_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remembered hint is stale state shaped like a measurement (rule 36)."""
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    loops._retry_after = Decimal("600")
+
+    async def _clean(ctx: AppContext) -> None:
+        loops._note_data_success()
+
+    delay = await _one_iteration_delay(monkeypatch, _clean)
+    assert delay == 60
+
+
+async def test_a_later_failure_does_not_inherit_an_earlier_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every failure overwrites the hint, carrying one or not."""
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    loops._retry_after = Decimal("600")
+
+    async def _plain_outage(ctx: AppContext) -> None:
+        await loops._note_data_failure(BrokerUnavailable("down"))
+
+    delay = await _one_iteration_delay(monkeypatch, _plain_outage)
+    assert delay == 120
+
+
+async def test_sustained_throttling_alerts_once_and_names_the_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rate limit reported as a market-data outage reads as weather (#6, #23)."""
+    import zarabot.app.loops as loops
+
+    loops._market_failures = 0
+    loops._market_alerted = False
+    loops._retry_after = None
+    alerts: list[str] = []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    monkeypatch.setattr(loops, "alert", _alert)
+    for _ in range(4):
+        await loops._note_data_failure(BrokerRateLimited(Decimal("30")))
+
+    assert len(alerts) == 1
+    assert "rate limit" in alerts[0].lower()
