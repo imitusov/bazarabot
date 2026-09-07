@@ -62,7 +62,7 @@ def _note_success(ticker: str) -> None:
     _alerted.discard(ticker)
 
 
-def _note_degraded(ticker: str, reason: str) -> bool:
+def _note_degraded(ticker: str, reason: str, error: str) -> bool:
     """Count one degraded call. True when this one crosses the threshold.
 
     A failed fetch and a short one are counted here together, on one counter,
@@ -73,7 +73,11 @@ def _note_degraded(ticker: str, reason: str) -> bool:
     count = _failures.get(ticker, 0) + 1
     _failures[ticker] = count
     _LOG.warning(
-        "candle data degraded for %s (%s consecutive): %s", ticker, count, reason
+        "candle data degraded for %s (%s consecutive): %s",
+        ticker,
+        count,
+        reason,
+        extra={"event": "candles_failed", "ticker": ticker, "error": error},
     )
     if count < _DEGRADED_BEFORE_ALERT or ticker in _alerted:
         return False
@@ -118,7 +122,7 @@ async def candles_for_watchlist(
             )
         except _ABSORBED as exc:
             failure = f"{type(exc).__name__}: {exc}"
-            if _note_degraded(ticker, failure):
+            if _note_degraded(ticker, failure, type(exc).__name__):
                 degraded.append((ticker, failure))
             continue
         candles = sorted(candles, key=lambda candle: candle.timestamp)
@@ -131,7 +135,7 @@ async def candles_for_watchlist(
         # is degraded whatever was asked for, including a lookback of zero.
         if not candles or len(candles) < lookback:
             shortfall = f"{len(candles)} candles, {lookback} needed"
-            if _note_degraded(ticker, shortfall):
+            if _note_degraded(ticker, shortfall, "short_history"):
                 degraded.append((ticker, shortfall))
             continue
         _note_success(ticker)
