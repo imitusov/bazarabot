@@ -8,6 +8,8 @@ import sys
 from datetime import UTC, datetime
 from typing import Any
 
+from zarabot.clock import to_moscow
+
 MASK = "***"
 _MAX_DEPTH = 10
 
@@ -95,8 +97,10 @@ class _RedactFilter(logging.Filter):
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        created = datetime.fromtimestamp(record.created, tz=UTC)
         payload: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
+            "timestamp": created.isoformat(),
+            "moscow_time": to_moscow(created).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
