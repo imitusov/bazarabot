@@ -26,6 +26,29 @@ Configures structured logging and enforces secret redaction.
   10; deeper structures are replaced wholesale rather than passed through
   unredacted.
 - Must never write to a file, and never to stderr.
+- **Emits the base record schema of §7.1 on every record (v1.60):**
+  `timestamp` (UTC, ISO 8601), `moscow_time` (the same instant as
+  `Europe/Moscow`, via `clock.to_moscow`), `level`, `logger` and `message`.
+  Moscow time is derived here rather than by producers so that no caller can
+  omit it and no caller needs a second timestamp argument.
+- **`event` is producer-set and passes through unaltered (v1.60).** A record
+  logged with `extra={"event": ...}` carries that field; a record logged without
+  one carries no `event` key, and this module never invents a default. §7.1 said
+  "all records carry … `event`", which is unsatisfiable for the records that
+  third-party libraries emit through the same handler — `httpx`, `telegram.ext`
+  and the broker SDK all log here and know nothing of the catalogue. The
+  obligation to name an event belongs to each producing module's own contract,
+  not to this one, and the absence of `event` is what marks a line as library
+  noise rather than a domain event.
+- **This module emits no domain event of its own.** It formats and redacts; it
+  never originates a catalogued event. A `startup_ok` from here would be a
+  fiction.
+- The redaction filter applies to `event` as it does to every other structured
+  field.
+- Timestamps come from the `LogRecord`'s own `created` instant, not from
+  `clock.now()` — this module is below `clock` in the dependency order and must
+  not reach forward to it for the current time. `clock.to_moscow` is a pure
+  conversion and is the one thing it does use.
 - Called by `app.startup` immediately after `config.load()` and before any other
   module logs anything.
 
@@ -48,8 +71,17 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   redaction is not message-only).
 - An exception whose string representation contains the token is redacted when
   logged with a traceback (proves redaction survives exception formatting).
-- A record containing no secret passes through byte-identical (proves redaction
-  does not corrupt ordinary logs).
+- A record containing no secret passes through byte-identical apart from the
+  base schema fields (proves redaction does not corrupt ordinary logs).
+- Every record carries `timestamp`, `moscow_time`, `level`, `logger` and
+  `message`, and `moscow_time` is the same instant as `timestamp` converted to
+  `Europe/Moscow` (v1.60; proves the base schema of §7.1 is emitted here and
+  cannot be forgotten by a producer).
+- A record logged with `extra={"event": "heartbeat"}` carries `event`
+  unaltered, and a record logged without one carries no `event` key (v1.60;
+  proves the field is producer-set and that this module invents nothing).
+- A token inside the `event` field is redacted (proves redaction reaches the
+  field the whole catalogue is keyed on).
 
 ## Expected output
 

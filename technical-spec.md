@@ -346,8 +346,17 @@ it proves.
   redaction is not message-only).
 - An exception whose string representation contains the token is redacted when
   logged with a traceback (proves redaction survives exception formatting).
-- A record containing no secret passes through byte-identical (proves redaction
-  does not corrupt ordinary logs).
+- A record containing no secret passes through byte-identical apart from the
+  base schema fields (proves redaction does not corrupt ordinary logs).
+- Every record carries `timestamp`, `moscow_time`, `level`, `logger` and
+  `message`, and `moscow_time` is the same instant as `timestamp` converted to
+  `Europe/Moscow` (v1.60; proves the base schema of §7.1 is emitted here and
+  cannot be forgotten by a producer).
+- A record logged with `extra={"event": "heartbeat"}` carries `event`
+  unaltered, and a record logged without one carries no `event` key (v1.60;
+  proves the field is producer-set and that this module invents nothing).
+- A token inside the `event` field is redacted (proves redaction reaches the
+  field the whole catalogue is keyed on).
 
 **`db.migrations`**
 - Applying migrations to an empty database creates every table **and leaves
@@ -669,8 +678,12 @@ it proves.
 - `covers()` is `False` for a day before the earliest record and `True` for one
   after (proves an unmeasurable age is detectable, which is the whole difference
   between this and a silent undercount).
-- A failed history write leaves the schedule cached and the bot trading (proves
-  degraded age counting does not stop the market session working).
+- A history write failing with `aiosqlite.Error` leaves the schedule cached and
+  the bot trading (proves degraded age counting does not stop the market session
+  working).
+- A history write failing with `AttributeError` propagates out of `refresh`
+  (v1.59; proves a rename cannot disguise itself as an unmeasurable calendar —
+  the catch is exactly as broad as the rule it serves, not broader).
 - A refresh that fails, then succeeds, then fails again alerts **twice** (proves
   the latch is per incident: it was set once and never cleared, so every outage
   after the first was silent from this module for the life of the process).
@@ -1421,6 +1434,29 @@ Configures structured logging and enforces secret redaction.
   10; deeper structures are replaced wholesale rather than passed through
   unredacted.
 - Must never write to a file, and never to stderr.
+- **Emits the base record schema of §7.1 on every record (v1.60):**
+  `timestamp` (UTC, ISO 8601), `moscow_time` (the same instant as
+  `Europe/Moscow`, via `clock.to_moscow`), `level`, `logger` and `message`.
+  Moscow time is derived here rather than by producers so that no caller can
+  omit it and no caller needs a second timestamp argument.
+- **`event` is producer-set and passes through unaltered (v1.60).** A record
+  logged with `extra={"event": ...}` carries that field; a record logged without
+  one carries no `event` key, and this module never invents a default. §7.1 said
+  "all records carry … `event`", which is unsatisfiable for the records that
+  third-party libraries emit through the same handler — `httpx`, `telegram.ext`
+  and the broker SDK all log here and know nothing of the catalogue. The
+  obligation to name an event belongs to each producing module's own contract,
+  not to this one, and the absence of `event` is what marks a line as library
+  noise rather than a domain event.
+- **This module emits no domain event of its own.** It formats and redacts; it
+  never originates a catalogued event. A `startup_ok` from here would be a
+  fiction.
+- The redaction filter applies to `event` as it does to every other structured
+  field.
+- Timestamps come from the `LogRecord`'s own `created` instant, not from
+  `clock.now()` — this module is below `clock` in the dependency order and must
+  not reach forward to it for the current time. `clock.to_moscow` is a pure
+  conversion and is the one thing it does use.
 - Called by `app.startup` immediately after `config.load()` and before any other
   module logs anything.
 
@@ -2345,9 +2381,18 @@ was one of the eight sites opening its own connection.
   and once per trading day, so this is one broker call and one write a day.
 - Reloads the recorded history into memory afterwards, so `calendar()` stays a
   synchronous read of what is already in hand and costs nothing per cycle.
-- A write failure is logged at ERROR and does not propagate: an unavailable
-  history degrades age counting, which `covers` then reports, and must not stop
-  the bot trading. The schedule itself is already cached by that point.
+- **A write failure is `aiosqlite.Error` from `record_many` or from the history
+  reload, and only that (v1.59).** It is logged at ERROR and does not propagate:
+  an unavailable history degrades age counting, which `covers` then reports, and
+  must not stop the bot trading. The schedule itself is already cached by that
+  point.
+- **Any other exception from that path propagates (v1.59).** Until v1.59 the
+  clause above was unqualified and the code caught `Exception`, so an
+  `AttributeError` from a rename was logged and dropped, `covers()` then returned
+  `False`, and `MAX_AGE` stayed suppressed with nothing raised (#52). A
+  programming error is not a degraded calendar, and a catch as broad as this one
+  turns the loud failure into the silent one. `refresh` still does not raise for
+  an unavailable broker schedule — that is rule 10 and is unchanged.
 - **The unavailability latch is cleared on the success path**, next to the cache
   write (v1.40). It was set on the first failure and never cleared, so a schedule
   that went unavailable, recovered, and went unavailable again produced silence
@@ -3871,49 +3916,59 @@ excluded from the denominator rather than counted as downtime.
 
 ### 7.1 Log events
 
-Every event is one structured JSON record on stdout. All records carry
-`timestamp` (UTC), `moscow_time`, `level` and `event`; the table lists the
-additional fields each event **must** include. A record missing a required field
-is a defect — these fields are what makes the log answerable after the fact.
+Every event is one structured JSON record on stdout. `logging_setup` puts
+`timestamp` (UTC), `moscow_time`, `level`, `logger` and `message` on **every**
+record it formats, including those from third-party libraries; its contract in
+§4 owns that schema. `event` is set by the module emitting it, and the table
+below lists the additional fields each event **must** include. A record missing
+a required field is a defect — these fields are what makes the log answerable
+after the fact.
 
-| Event | Level | Required data fields |
-|---|---|---|
-| `startup_ok` | INFO | `version`, `mode`, `halted`, `adjustments_count` |
-| `startup_failed` | CRITICAL | `stage`, `reason` |
-| `config_invalid` | CRITICAL | `variable` |
-| `session_open` / `session_closed` | INFO | `trade_date`, `opens_at`, `closes_at` |
-| `candles_failed` | WARNING | `ticker`, `error` |
-| `signal_generated` | INFO | `ticker`, `strategy`, `reference_price` |
-| `signal_rejected` | INFO | `ticker`, `strategy`, `rejection_reason` |
-| `order_submitting` | INFO | `key`, `ticker`, `side`, `intent`, `lots` |
-| `order_filled` | INFO | `key`, `ticker`, `filled_lots`, `filled_price`, `commission` |
-| `order_rejected` | ERROR | `key`, `ticker`, `intent`, `broker_reason` |
-| `order_unresolved` | WARNING | `key`, `ticker`, `age_seconds` |
-| `order_resolved` | INFO | `key`, `resolved_status`, `source` |
-| `position_opened` | INFO | `position_id`, `ticker`, `strategy`, `lots`, `entry_price`, `stop_price`, `target_price` |
-| `position_closed` | INFO | `position_id`, `ticker`, `exit_trigger`, `exit_price`, `realised_pnl`, `gap_vs_stop` |
-| `exit_failed` | ERROR | `position_id`, `ticker`, `attempt`, `error` |
-| `stop_order_placed` | INFO | `position_id`, `ticker`, `stop_price`, `stop_order_id` |
-| `stop_order_cancelled` | INFO | `position_id`, `stop_order_id`, `cause` |
-| `stop_order_executed` | INFO | `position_id`, `ticker`, `fill_price`, `gap_vs_stop` |
-| `stop_protection_degraded` | ERROR | `position_id`, `ticker`, `attempts` |
-| `stop_order_orphaned` | ERROR | `stop_order_id`, `ticker` |
-| `partial_fill` | WARNING | `key`, `ticker`, `intent`, `requested_lots`, `filled_lots` |
-| `cooldown_started` | INFO | `ticker`, `active_until` |
-| `halt_triggered` | CRITICAL | `reason`, `detail`, `daily_loss_pct` |
-| `halt_cleared` | INFO | `actor` |
-| `reconciliation` | INFO | `adjustments_count`, `types` |
-| `broker_unavailable` | WARNING | `method`, `consecutive_failures`, `backoff_seconds` |
-| `rate_limited` | WARNING | `method`, `retry_after_seconds` |
-| `db_write_failed` | ERROR | `table`, `critical` |
-| `telegram_send_failed` | WARNING | `attempt`, `error` |
-| `unauthorised_command` | INFO | `chat_id`, `command` |
-| `secret_redacted` | ERROR | `sink` — never the secret, never its length |
-| `backup_ok` / `backup_failed` | INFO / ERROR | `path`, `bytes` / `error` |
-| `task_crashed` | ERROR | `task`, `error`, `restart_in_seconds` |
-| `clock_drift` | WARNING | `drift_seconds` |
-| `heartbeat` | INFO | `uptime_seconds`, `open_positions`, `halted` |
-| `weekly_report_sent` | INFO | `period_start`, `period_end` |
+**Each event is owed by exactly one module, named in the table (v1.60).** Until
+v1.60 this catalogue was the only place most events appeared: the task generator
+cuts by heading, so a module's agent never saw the obligation, and the events
+were never emitted while every test stayed green. An event listed here without a
+sentence in its owning module's §4 contract is a spec defect, not an
+implementation gap.
+
+| Event | Owner | Level | Required data fields |
+|---|---|---|---|
+| `startup_ok` | `app.startup` | INFO | `version`, `mode`, `halted`, `adjustments_count` |
+| `startup_failed` | `app.startup` | CRITICAL | `stage`, `reason` |
+| `config_invalid` | `app.startup` | CRITICAL | `variable` |
+| `session_open` / `session_closed` | `market.session` | INFO | `trade_date`, `opens_at`, `closes_at` |
+| `candles_failed` | `market.data` | WARNING | `ticker`, `error` |
+| `signal_generated` | `app.loops` | INFO | `ticker`, `strategy`, `reference_price` |
+| `signal_rejected` | `app.loops` | INFO | `ticker`, `strategy`, `rejection_reason` |
+| `order_submitting` | `execution.orders` | INFO | `key`, `ticker`, `side`, `intent`, `lots` |
+| `order_filled` | `execution.orders` | INFO | `key`, `ticker`, `filled_lots`, `filled_price`, `commission` |
+| `order_rejected` | `execution.orders` | ERROR | `key`, `ticker`, `intent`, `broker_reason` |
+| `order_unresolved` | `execution.orders` | WARNING | `key`, `ticker`, `age_seconds` |
+| `order_resolved` | `execution.orders` | INFO | `key`, `resolved_status`, `source` |
+| `position_opened` | `execution.orders` | INFO | `position_id`, `ticker`, `strategy`, `lots`, `entry_price`, `stop_price`, `target_price` |
+| `position_closed` | `execution.orders` | INFO | `position_id`, `ticker`, `exit_trigger`, `exit_price`, `realised_pnl`, `gap_vs_stop` |
+| `exit_failed` | `execution.orders` | ERROR | `position_id`, `ticker`, `attempt`, `error` |
+| `stop_order_placed` | `execution.orders` | INFO | `position_id`, `ticker`, `stop_price`, `stop_order_id` |
+| `stop_order_cancelled` | `execution.orders` | INFO | `position_id`, `stop_order_id`, `cause` |
+| `stop_order_executed` | `broker.reconcile` | INFO | `position_id`, `ticker`, `fill_price`, `gap_vs_stop` |
+| `stop_protection_degraded` | `execution.orders` | ERROR | `position_id`, `ticker`, `attempts` |
+| `stop_order_orphaned` | `broker.reconcile` | ERROR | `stop_order_id`, `ticker` |
+| `partial_fill` | `execution.orders` | WARNING | `key`, `ticker`, `intent`, `requested_lots`, `filled_lots` |
+| `cooldown_started` | `app.loops` | INFO | `ticker`, `active_until` |
+| `halt_triggered` | `state.halt` | CRITICAL | `reason`, `detail`, `daily_loss_pct` |
+| `halt_cleared` | `state.halt` | INFO | `actor` |
+| `reconciliation` | `broker.reconcile` | INFO | `adjustments_count`, `types` |
+| `broker_unavailable` | `broker.client` | WARNING | `method`, `consecutive_failures`, `backoff_seconds` |
+| `rate_limited` | `broker.client` | WARNING | `method`, `retry_after_seconds` |
+| `db_write_failed` | `db.connection` | ERROR | `table`, `critical` |
+| `telegram_send_failed` | `telegram.notifier` | WARNING | `attempt`, `error` |
+| `unauthorised_command` | `telegram.commands` | INFO | `chat_id`, `command` |
+| `secret_redacted` | `telegram.notifier` | ERROR | `sink` — never the secret, never its length |
+| `backup_ok` / `backup_failed` | `ops.backup` | INFO / ERROR | `path`, `bytes` / `error` |
+| `task_crashed` | `app.loops` | ERROR | `task`, `error`, `restart_in_seconds` |
+| `clock_drift` | `app.loops` | WARNING | `drift_seconds` |
+| `heartbeat` | `app.loops` | INFO | `uptime_seconds`, `open_positions`, `halted` |
+| `weekly_report_sent` | `reporter.weekly` | INFO | `period_start`, `period_end` |
 
 `gap_vs_stop` on `position_closed` is populated only for `STOP_LOSS` exits and
 carries the difference between the actual exit price and the stop price. It is
