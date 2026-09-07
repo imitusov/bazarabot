@@ -22,9 +22,18 @@ Module **22** of 40 in `dependency-order.md`. Everything before it is complete a
   and once per trading day, so this is one broker call and one write a day.
 - Reloads the recorded history into memory afterwards, so `calendar()` stays a
   synchronous read of what is already in hand and costs nothing per cycle.
-- A write failure is logged at ERROR and does not propagate: an unavailable
-  history degrades age counting, which `covers` then reports, and must not stop
-  the bot trading. The schedule itself is already cached by that point.
+- **A write failure is `aiosqlite.Error` from `record_many` or from the history
+  reload, and only that (v1.59).** It is logged at ERROR and does not propagate:
+  an unavailable history degrades age counting, which `covers` then reports, and
+  must not stop the bot trading. The schedule itself is already cached by that
+  point.
+- **Any other exception from that path propagates (v1.59).** Until v1.59 the
+  clause above was unqualified and the code caught `Exception`, so an
+  `AttributeError` from a rename was logged and dropped, `covers()` then returned
+  `False`, and `MAX_AGE` stayed suppressed with nothing raised (#52). A
+  programming error is not a degraded calendar, and a catch as broad as this one
+  turns the loud failure into the silent one. `refresh` still does not raise for
+  an unavailable broker schedule — that is rule 10 and is unchanged.
 - **The unavailability latch is cleared on the success path**, next to the cache
   write (v1.40). It was set on the first failure and never cleared, so a schedule
   that went unavailable, recovered, and went unavailable again produced silence
@@ -150,8 +159,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - `covers()` is `False` for a day before the earliest record and `True` for one
   after (proves an unmeasurable age is detectable, which is the whole difference
   between this and a silent undercount).
-- A failed history write leaves the schedule cached and the bot trading (proves
-  degraded age counting does not stop the market session working).
+- A history write failing with `aiosqlite.Error` leaves the schedule cached and
+  the bot trading (proves degraded age counting does not stop the market session
+  working).
+- A history write failing with `AttributeError` propagates out of `refresh`
+  (v1.59; proves a rename cannot disguise itself as an unmeasurable calendar —
+  the catch is exactly as broad as the rule it serves, not broader).
 - A refresh that fails, then succeeds, then fails again alerts **twice** (proves
   the latch is per incident: it was set once and never cleared, so every outage
   after the first was silent from this module for the life of the process).
