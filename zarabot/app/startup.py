@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import NoReturn
 
-from zarabot.broker.client import get_instrument, list_stop_orders
+from zarabot.broker.client import (
+    get_instrument,
+    get_last_price,
+    list_stop_orders,
+)
 from zarabot.broker.reconcile import reconcile
 from zarabot.clock import now
 from zarabot.config import Config, ConfigError, load
@@ -24,6 +29,7 @@ from zarabot.logging_setup import configure
 from zarabot.market.session import refresh
 from zarabot.models import HaltState, ReconciliationReport, StopOrderRecord
 from zarabot.reporter.weekly import build as build_report
+from zarabot.risk.sizing import position_budget
 from zarabot.state.halt import current
 from zarabot.strategies.base import Strategy
 from zarabot.strategies.registry import enabled
@@ -208,6 +214,102 @@ async def _apply_remedies(report: ReconciliationReport) -> None:
             await _resolve_duplicate(item, stops)
 
 
+@dataclass(frozen=True)
+class _Reachability:
+    """What one position budget can and cannot buy on the watchlist.
+
+    `unknown` is deliberately a third bucket rather than a default into either
+    of the other two. A ticker whose price could not be read is not evidence
+    that the budget reaches it, and it is not evidence that the budget does
+    not.
+    """
+
+    budget: Decimal
+    affordable: tuple[str, ...]
+    unaffordable: tuple[str, ...]
+    unknown: tuple[str, ...]
+    cheapest: Decimal | None
+    cheapest_ticker: str | None
+
+    @property
+    def inconclusive(self) -> bool:
+        """No price was readable, so the check observed nothing at all."""
+        return not self.affordable and not self.unaffordable
+
+    @property
+    def blackout(self) -> bool:
+        """Nothing on the watchlist can be bought, and that was observed."""
+        return not self.affordable and bool(self.unaffordable)
+
+
+async def _reachability(cfg: Config) -> _Reachability:
+    """Step 8a: compare each watchlist lot cost against one position budget.
+
+    Every read is guarded individually. A ticker that cannot be priced joins
+    `unknown` and the rest of the watchlist is still judged, because a single
+    unreadable instrument is not a reason to give up the diagnostic for the
+    other nine.
+    """
+    budget = position_budget(cfg.allocated_capital, cfg.position_size_pct)
+    affordable: list[str] = []
+    unaffordable: list[str] = []
+    unknown: list[str] = []
+    cheapest: Decimal | None = None
+    cheapest_ticker: str | None = None
+    for ticker in cfg.watchlist:
+        try:
+            instrument = await get_instrument(ticker)
+            price = await get_last_price(instrument.figi)
+            lot_cost = Decimal(instrument.lot) * price
+        except Exception:
+            unknown.append(ticker)
+            continue
+        if lot_cost <= 0:
+            unknown.append(ticker)
+            continue
+        if cheapest is None or lot_cost < cheapest:
+            cheapest = lot_cost
+            cheapest_ticker = ticker
+        (affordable if lot_cost <= budget else unaffordable).append(ticker)
+    return _Reachability(
+        budget=budget,
+        affordable=tuple(affordable),
+        unaffordable=tuple(unaffordable),
+        unknown=tuple(unknown),
+        cheapest=cheapest,
+        cheapest_ticker=cheapest_ticker,
+    )
+
+
+async def _report_reachability(reach: _Reachability) -> None:
+    """Rule 36. Alert only on the total blackout; never raise.
+
+    The partial case is folded into the ready alert by `_ready_text` instead:
+    an instrument's price rising through the budget is a normal operating
+    condition, and escalating it would put a recurring message into a channel
+    whose premise is that silence means healthy.
+
+    Reported once per start rather than per cycle or per signal. At one poll a
+    minute the per-signal alternative is several hundred identical messages a
+    day, and an alert that repeats forever is equivalent to no alert.
+    """
+    if not reach.blackout:
+        return
+    # The cheapest name as well as the cheapest cost: the owner's next question
+    # after "nothing is affordable" is "what is the closest thing to it".
+    cheapest = "unknown"
+    if reach.cheapest is not None:
+        cheapest = f"{reach.cheapest} ({reach.cheapest_ticker})"
+    await alert(
+        "zarabot cannot open a position in anything it is watching: one "
+        f"position budget is {reach.budget} and the cheapest lot on the "
+        f"watchlist costs {cheapest}. Every signal will be rejected ZERO_LOTS "
+        "until the budget rises or the watchlist changes. The bot stays up "
+        "and keeps managing what it already holds.",
+        urgent=True,
+    )
+
+
 def _foreign_tickers(report: ReconciliationReport) -> list[str]:
     """Every ticker the broker holds that the bot has no record of."""
     seen: list[str] = []
@@ -243,8 +345,27 @@ async def _enforce_account_exclusivity(
     )
 
 
+def _reachability_text(reach: _Reachability) -> str:
+    """The ready alert's account of step 8a.
+
+    Silence here would be indistinguishable from a confirmed-healthy check, so
+    an inconclusive result says so rather than saying nothing.
+    """
+    parts = []
+    if reach.inconclusive:
+        parts.append(" budget_check=inconclusive (no price could be read)")
+    elif reach.unaffordable:
+        parts.append(f" unaffordable={','.join(reach.unaffordable)}")
+    if reach.unknown and not reach.inconclusive:
+        parts.append(f" unknown={','.join(reach.unknown)}")
+    return "".join(parts)
+
+
 def _ready_text(
-    cfg: Config, halt: HaltState | None, report: ReconciliationReport
+    cfg: Config,
+    halt: HaltState | None,
+    report: ReconciliationReport,
+    reach: _Reachability,
 ) -> str:
     halted = halt is not None and halt.halted
     reason = ""
@@ -258,6 +379,7 @@ def _ready_text(
     return (
         f"zarabot {_VERSION} running mode={cfg.trading_mode} "
         f"halted={halted}{reason} adjustments={n_adj}{holdings}"
+        f"{_reachability_text(reach)}"
     )
 
 
@@ -284,8 +406,14 @@ async def start() -> AppContext:
         await _apply_remedies(report)
         await _enforce_account_exclusivity(cfg, report)
         halt = await current()
+        # 8a. Never raises, never prevents startup: an unaffordable budget
+        # stops new entries only, and refusing to start would additionally
+        # abandon every open position. A diagnostic must not become the reason
+        # the bot is down.
+        reach = await _reachability(cfg)
+        await _report_reachability(reach)
         set_report_builder(build_report)
-        await alert(_ready_text(cfg, halt, report))
+        await alert(_ready_text(cfg, halt, report, reach))
         return AppContext(
             config=cfg,
             strategies=strategies,

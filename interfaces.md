@@ -1041,7 +1041,7 @@ disabled, before any broker call and carrying no token → `logging_setup.config
 `db.migrations.apply(db.connection.shared())` → `strategies.registry.enabled` →
 `market.session.refresh` → `execution.orders.resolve_unfinished` →
 `broker.reconcile.reconcile` plus stop remedies → refuse to start on a foreign
-holding → restore halt → ready `alert`.
+holding → restore halt → watchlist budget reachability → ready `alert`.
 The connection is opened here, not at import. The TLS env write precedes every
 broker call. Remedies: `STOP_MISSING` → `place_protective_stop`, `STOP_MISPRICED`
 → `replace_stop`, `STOP_ADOPTABLE` → `adopt_existing_stop`, `STOP_ORPHAN` →
@@ -1053,6 +1053,18 @@ handled set alerts urgently. A `FOREIGN_HOLDING` adjustment raises
 `config.allow_foreign_holdings` is true (rule 32); when it is, the ready alert
 names the holdings and they are never traded — reconciliation writes no position
 row, so no stop is placed, no exit evaluated and no sale made.
+
+Step 8a compares `instrument.lot × get_last_price(figi)` against
+`risk.sizing.position_budget(allocated_capital, position_size_pct)` for every
+watchlist ticker (rule 36). No instrument affordable → urgent `alert` naming the
+budget and the cheapest lot cost and ticker; some affordable → the unaffordable
+ones are named in the ready alert and nothing is escalated; a ticker whose
+instrument or price cannot be read, or that prices at zero, is `unknown` and
+counted as neither; no readable price at all reports `budget_check=inconclusive`
+rather than a blackout it did not observe. **The step never raises
+`StartupError`.** An unaffordable budget stops new entries only, and refusing to
+start would abandon every open position — no exits, no stop management, no
+`MAX_AGE`.
 
 ## `zarabot.app.loops`
 

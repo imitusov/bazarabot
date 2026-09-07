@@ -831,9 +831,9 @@ async def test_budget_below_every_lot_cost_alerts_and_still_completes(
 
     assert ctx.config.watchlist == ("MGNT", "LKOH")
     alerts = [item.removeprefix("alert:") for item in env if item.startswith("alert:")]
-    blackout = [
-        text for text in alerts if "MGNT" in text and "running" not in text.lower()
-    ]
+    # "mode=" is the ready alert's own marker; anything else mentioning MGNT
+    # is the blackout message.
+    blackout = [text for text in alerts if "MGNT" in text and "mode=" not in text]
     assert blackout, alerts
     # The budget and the cheapest lot cost, so the owner can see the gap
     # without going to look it up: 1000 against MGNT's 1632.
@@ -894,9 +894,7 @@ async def test_unreadable_price_is_counted_as_neither_answer(
     assert "MGNT" in ready[0]
     assert "unknown" in ready[0].lower()
     assert "unaffordable=MGNT" not in ready[0]
-    assert not [
-        text for text in alerts if "running" not in text.lower() and "MGNT" in text
-    ]
+    assert not [text for text in alerts if "mode=" not in text and "MGNT" in text]
 
 
 async def test_no_readable_price_reports_inconclusive_not_a_blackout(
@@ -942,3 +940,39 @@ async def test_broker_failure_in_step_8a_does_not_raise_startup_error(
 
     assert ctx.config.trading_mode == "live"
     assert [item for item in env if item.startswith("alert:") and "running" in item]
+
+
+async def test_zero_price_is_unknown_rather_than_affordable(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lot costing nothing is a bad read, not a bargain.
+
+    Written after the implementation, when coverage showed the branch bare —
+    and it earns its place: without it a zero price satisfies `lot_cost <=
+    budget` and the ticker is counted affordable, which is the check reporting
+    health off a broken read. The other direction of the same rule the
+    inconclusive case exists for.
+    """
+    from zarabot.app.startup import start
+
+    monkeypatch.setenv("WATCHLIST", "SBER,MGNT")
+    monkeypatch.setenv("ALLOCATED_CAPITAL", "10000")
+    monkeypatch.setenv("POSITION_SIZE_PCT", "10")
+
+    async def _last_price(figi: str) -> Decimal:
+        if figi == "FIGI-SBER":
+            return Decimal("0")
+        return PRICES[figi.removeprefix("FIGI-")]
+
+    monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
+
+    await start()
+
+    alerts = [item.removeprefix("alert:") for item in env if item.startswith("alert:")]
+    ready = [text for text in alerts if "mode=" in text]
+    assert ready, alerts
+    assert "unknown=SBER" in ready[0]
+    # MGNT is the only observation, and it is unaffordable — but with one real
+    # observation the check is not inconclusive, and SBER is not affordable.
+    assert "unaffordable=MGNT" in ready[0]
+    assert "inconclusive" not in ready[0]
