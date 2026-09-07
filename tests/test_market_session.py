@@ -202,7 +202,7 @@ async def test_a_failed_history_write_leaves_the_schedule_cached(
 
 
 @pytest.fixture
-async def schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+async def schedule(store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch) -> None:
     sessions = [_holiday(), _saturday(), _weekday()]
 
     async def _fake(days: int) -> list[SessionInfo]:
@@ -274,6 +274,7 @@ async def test_past_last_cached_session_is_closed_and_cache_exhausted(
 
 
 async def test_rollover_refresh_clears_cache_exhausted(
+    store: list[SessionInfo],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _first(days: int) -> list[SessionInfo]:
@@ -326,6 +327,7 @@ async def test_empty_schedule_alerts_once(
 
 
 async def test_a_second_outage_alerts_again(
+    store: list[SessionInfo],
     _reset_cache: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
