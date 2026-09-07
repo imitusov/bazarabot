@@ -11,6 +11,7 @@ from decimal import Decimal
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
+    InstrumentNotFound,
     get_instrument,
     get_operations,
     get_portfolio,
@@ -275,8 +276,60 @@ def _keep_stop(
     return min(ticker_stops, key=lambda stop: stop.created_at)
 
 
+def _is_mispriced(
+    broker_price: Decimal, local_price: Decimal, increment: Decimal | None
+) -> bool:
+    """Whether a live stop sits at a different price, not merely a snapped one.
+
+    The broker rounds every posted stop to the instrument's
+    `min_price_increment`, so the price it holds is almost never the price the
+    bot computed: on 2026-09-07 it held GMKN at 125.44 against a stored 125.457.
+    An exact inequality called that mispriced on every startup, and the caller's
+    remedy — cancel then re-post — unprotected a live position each time for a
+    stop the broker had placed exactly as asked.
+
+    Nothing is rounded here or anywhere else: which way the broker rounds has
+    not been checked against a live account, and writing a guessed rounded
+    price into the record would be a number this project invented (rule 33). A
+    tolerance costs nothing because the bot never moves a stop after entry — a
+    genuinely wrong stop is wrong by the distance between two prices, not by
+    less than one tick.
+
+    An unknown increment is not a licence to judge exactly (rule 37): the caller
+    treats `False` here as "no discrepancy to report".
+    """
+    if increment is None or increment <= 0:
+        return False
+    return abs(broker_price - local_price) >= increment
+
+
+async def _price_increments(tickers: set[str]) -> dict[str, Decimal]:
+    """Tick sizes for the tickers whose stops are about to be judged.
+
+    A ticker whose metadata cannot be read is absent from the result, and its
+    stop's price is then not compared at all (rule 37). The remedy for a
+    misprice is the one that unprotects the position; it is not spent on a
+    difference this module cannot measure.
+    """
+    increments: dict[str, Decimal] = {}
+    for ticker in sorted(tickers):
+        try:
+            instrument = await get_instrument(ticker)
+        except (InstrumentNotFound, BrokerUnavailable, BrokerRateLimited) as exc:
+            _LOG.warning("price increment unavailable for %s: %s", ticker, exc)
+            await alert(
+                f"price increment unavailable for {ticker} ({exc}); "
+                f"its stop price was not compared"
+            )
+            continue
+        increments[ticker] = instrument.min_price_increment
+    return increments
+
+
 def _stop_adjustments(
-    opened: list[Position], stops: list[StopOrderRecord]
+    opened: list[Position],
+    stops: list[StopOrderRecord],
+    increments: dict[str, Decimal],
 ) -> list[dict[str, object]]:
     adjustments: list[dict[str, object]] = []
     claimed: set[str] = set()
@@ -301,7 +354,11 @@ def _stop_adjustments(
                 )
             for stop in ticker_stops:
                 claimed.add(_identifier(stop))
-            if kept.stop_price != position.stop_price:
+            if _is_mispriced(
+                kept.stop_price,
+                position.stop_price,
+                increments.get(position.ticker),
+            ):
                 adjustments.append(
                     {
                         "type": "STOP_MISPRICED",
@@ -388,7 +445,15 @@ async def reconcile(now: datetime) -> ReconciliationReport:
 
     remaining_open = await list_open()
     broker_stops = await list_stop_orders()
-    adjustments.extend(_stop_adjustments(remaining_open, broker_stops))
+    stopped_tickers = {stop.ticker for stop in broker_stops}
+    increments = await _price_increments(
+        {
+            position.ticker
+            for position in remaining_open
+            if position.ticker in stopped_tickers
+        }
+    )
+    adjustments.extend(_stop_adjustments(remaining_open, broker_stops, increments))
 
     await _persist(now, adjustments)
     return ReconciliationReport(ran_at=now, adjustments=tuple(adjustments))

@@ -650,7 +650,10 @@ async def test_unreadable_increment_reports_no_misprice_and_alerts(
     position = await _open_local()
     await set_stop_protection(position.id, StopProtection.EXCHANGE, "ex-stop")
     env.holdings = (_broker_position(),)
-    env.stops = [_stop(price=Decimal("90")), _stop(stop_id="other", price=Decimal("90"))]
+    env.stops = [
+        _stop(price=Decimal("90")),
+        _stop(stop_id="other", price=Decimal("90")),
+    ]
 
     async def _unavailable(ticker: str) -> Instrument:
         raise BrokerUnavailable("instrument metadata down")

@@ -936,7 +936,13 @@ order's key as `open_order_key` (oldest by `created_at` if somehow more than
 one). Lot mismatch →
 `positions.update_lots`. Stop discrepancies are reported (`STOP_MISSING`,
 `STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_ADOPTABLE`, `STOP_DUPLICATE`) and not
-acted on. `STOP_DUPLICATE` carries `keep` (the stop matching the position's
+acted on. `STOP_MISPRICED` is reported only when the broker's stop differs from
+the position's by a full `min_price_increment` or more, read from
+`get_instrument(ticker)` — the broker snaps every posted stop to the tick, and
+an exact inequality re-posted all live stops on every restart (v1.47). Nothing
+is rounded: no guessed rounded price is written to `positions` or `stop_orders`.
+When the increment cannot be read the stop's price is not compared at all; the
+failure is alerted and the position's other stop findings still stand (rule 37). `STOP_DUPLICATE` carries `keep` (the stop matching the position's
 `stop_order_key`, else the oldest by `created_at`) and `cancel` (every other
 identifier); an identifier is `stop_order_id` when known, else the stop's key.
 Idempotent against an unchanged broker. Raises `ValueError` on naive `now`.
