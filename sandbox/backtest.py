@@ -181,6 +181,7 @@ def _reset_loop_state() -> None:
 
     loops._market_failures = 0
     loops._market_alerted = False
+    loops._retry_after = None
     loops._price_rejected_alerted = False
     loops._stop_discrepancy_alerted = False
     loops._loss_unmeasurable_alerted = False

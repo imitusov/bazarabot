@@ -70,10 +70,16 @@ _SCHEDULE_DAYS = 14
 _BACKUP_RETENTION_DAYS = 30
 _BACKFILL_LOOKBACK = timedelta(days=7)
 _MAX_BACKOFF = 3600
+_FAILURES_BEFORE_ALERT = 3
 _WEEKLY_HOUR_MSK = 12
 
 _market_failures = 0
 _market_alerted = False
+# The broker's own back-off hint from the last failure, when it carried one
+# (rule 2). Overwritten by every failure and cleared by every success, so a
+# hint from a rate limit two cycles ago cannot still be delaying a plain
+# outage: that would be stale state wearing the shape of a measurement.
+_retry_after: Decimal | None = None
 _price_rejected_alerted = False
 _stop_discrepancy_alerted = False
 _loss_unmeasurable_alerted = False
@@ -97,22 +103,39 @@ def _poll_seconds(ctx: AppContext) -> float:
 
 
 async def _note_data_failure(exc: BaseException) -> None:
-    global _market_failures, _market_alerted
+    global _market_failures, _market_alerted, _retry_after
     _market_failures += 1
+    # Read off the type rather than probed for with getattr: a rename should be
+    # an AttributeError naming the field, not a hint silently reading as absent
+    # and the back-off silently reverting to a guess (#33's failure class).
+    _retry_after = exc.retry_after if isinstance(exc, BrokerRateLimited) else None
     _LOG.warning(
         "market data failed (%s consecutive): %s",
         _market_failures,
         exc,
     )
-    if _market_failures >= 3 and not _market_alerted:
+    if _market_failures >= _FAILURES_BEFORE_ALERT and not _market_alerted:
         _market_alerted = True
-        await alert("Market data failed for three consecutive cycles; still retrying.")
+        await alert(_outage_alert(exc))
+
+
+def _outage_alert(exc: BaseException) -> str:
+    """Name the cause. A rate limit reported as an outage reads as weather."""
+    if not isinstance(exc, BrokerRateLimited):
+        return "Market data failed for three consecutive cycles; still retrying."
+    hint = (
+        f" The broker asked for {exc.retry_after}s and that is being honoured."
+        if exc.retry_after is not None
+        else ""
+    )
+    return f"Broker rate limit hit on three consecutive cycles; still retrying.{hint}"
 
 
 def _note_data_success() -> None:
-    global _market_failures, _market_alerted
+    global _market_failures, _market_alerted, _retry_after
     _market_failures = 0
     _market_alerted = False
+    _retry_after = None
 
 
 async def _prices_for(positions: list[Position]) -> dict[str, Decimal]:
@@ -497,13 +520,31 @@ async def trading_cycle(ctx: AppContext) -> None:
     _note_data_success()
 
 
+def _next_delay(ctx: AppContext) -> float:
+    """How long to wait before the next cycle.
+
+    The escalation belongs to rule 1 and the hint to rule 2, and the longer of
+    the two wins. Longer, not the hint alone: a two-second hint must not undo a
+    back-off five failed cycles deep, and the escalation already reflects how
+    many cycles have failed. Longer, not the escalation alone: the broker is
+    the only party that knows when it will accept calls again, and until v1.53
+    it was telling us and nothing listened.
+
+    `_MAX_BACKOFF` bounds the hint as well as our own escalation. This loop
+    submits exits, so no number supplied from outside may hold it asleep.
+    """
+    delay = float(_poll_seconds(ctx))
+    if _market_failures:
+        delay *= 2 ** min(_market_failures, 5)
+    if _retry_after is not None:
+        delay = max(delay, float(_retry_after))
+    return min(delay, _MAX_BACKOFF)
+
+
 async def _trading_loop(ctx: AppContext) -> None:
     while True:
         await trading_cycle(ctx)
-        delay = _poll_seconds(ctx)
-        if _market_failures:
-            delay = min(delay * (2 ** min(_market_failures, 5)), _MAX_BACKOFF)
-        await asyncio.sleep(delay)
+        await asyncio.sleep(_next_delay(ctx))
 
 
 async def _rollover_loop(ctx: AppContext) -> None:

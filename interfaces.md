@@ -1078,6 +1078,14 @@ same pass is skipped before the gate and recorded `DUPLICATE_TICKER`, and
 `OrderRejected`, `PositionStateError` and `DuplicateOrderError` from
 `open_position` are all ordinary outcomes that continue the pass (#24).
 
+Between cycles the loop waits the **longer** of its own escalation
+(`poll × 2 ** consecutive failures`) and the broker's `retry_after` hint when
+the last failure was a `BrokerRateLimited` carrying one — bounded either way by
+`_MAX_BACKOFF`, because this loop also submits exits (rule 2). The hint is
+overwritten by every failure and cleared by every success, alongside the
+failure counter. Three consecutive rate-limited cycles alert once and the alert
+names throttling, not a market-data outage.
+
 **`async run(ctx: AppContext) → None`**
 Sole owner of composition. Starts the trading cycle, daily rollover, trading-
 schedule `refresh`, commission `backfill` (after rollover, and immediately
