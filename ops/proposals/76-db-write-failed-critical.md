@@ -1,28 +1,35 @@
-# Proposal: `db_write_failed.critical` must follow error rule 12
+# Proposal: `db_write_failed.critical` is a caller argument, not a regex
 
-**Kind:** spec defect. v1.61 assigned `db_write_failed` to `db.connection` and
-said `critical` is always true. Rule 12 names a non-critical write class
-(signals, snapshots, instruments cache, and in code also cooldowns) that uses
-the same `transaction()` and then swallows `aiosqlite.Error`. Those writes
-would log `critical: true` and then continue trading — the field an operator
-filters on for “this write stopped trading” would be a lie.
+**Kind:** spec defect. v1.61 hardcoded `critical` true. v1.62 (#77) derived it
+from the table name in the SQLite error. That still fails for the errors that
+happen in production: disk full, `database is locked`, I/O error, and
+`no such column` / datatype mismatch name **no table**, so they become
+`unknown` and report `critical` true — including on rule-12 writes. The regex
+works for UNIQUE/NOT NULL that tests construct and fails for a disk.
 
-**Should say (in §4 `db.connection.transaction()`):** emit `db_write_failed`
-with `table` as today, and `critical` taken from an argument
-`transaction(*, critical: bool = True)`. Default remains true (orders,
-positions, stops). Rule-12 callers pass `critical=False`. The exception still
-propagates out of `transaction()`; the repository’s existing catch is what
-stops it reaching the trading loop.
+**Should say (in §4 `db.connection.transaction()`):** `transaction(*, critical:
+bool = True)`. Emit `db_write_failed` with `table` still parsed from the error
+(`unknown` when unnamed) and `critical` from **that argument**. Default true.
+The exception still leaves `transaction()`; the repository catch is what stops
+it reaching the trading loop.
 
-**Do not:** infer criticality from table-name regex in `db.connection`. The
-owner of the write already knows which rule it is on.
+**Do not:** infer criticality from table-name regex. The owner of the write
+already knows which rule it is on.
 
-**Test contract:** a failed insert with `critical=False` emits the event with
-that flag and still raises into the caller’s `except aiosqlite.Error`. A
-failed insert with the default emits `critical` true.
+**Callers (after v1.63):**
+- Rule 11, including `db.cooldowns`: omit the argument or pass `critical=True`.
+  A lost cooldown row lets the bot re-enter a ticker it just exited.
+- Rule 12 (`db.signals`, `db.snapshots`; instruments cache when it writes):
+  pass `critical=False`.
 
-**Modules to re-run after amendment:** `5b-db-connection` (this PR #76,
-rebase), then `db.signals`, `db.snapshots`, `db.cooldowns` (pass
-`critical=False`). Instruments cache if/when it writes through `transaction()`.
+**Test contract:** `transaction(critical=False)` plus an `aiosqlite.Error` that
+names no table still emits `critical` false. Default / `critical=True` emits
+true. A rule-12 repository failure still produces exactly one `db_write_failed`.
 
-**Do not merge #76 until this amendment lands.**
+**Modules to re-run:** `5b-db-connection` (#76 rebase onto v1.64), then
+`db.signals` and `db.snapshots` (`critical=False`). `db.cooldowns` stays
+default-true; do not pass `False`.
+
+**Sequencing:** v1.62 already landed. #76 currently implements v1.62; **hold
+#76 until v1.64** replaces table-derivation with this argument, then rebase.
+Do not merge #76 against v1.62.

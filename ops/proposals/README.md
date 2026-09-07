@@ -11,8 +11,9 @@ re-running.
 
 Delete a proposal once its amendment is merged.
 
-Open: `76-db-write-failed-critical.md` — `db_write_failed.critical` vs rule 12.
-Hold PR #76 until that amendment lands.
+Open: `76-db-write-failed-critical.md` — `critical` is `transaction(*, critical=)`,
+not a table regex. Hold #76 until v1.64; v1.62 already landed and is the wrong
+mechanism.
 
 ## Open GitHub issues grouped by theme (2026-09-07, after `c94e3c7`)
 
