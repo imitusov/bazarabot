@@ -21,12 +21,27 @@ Module **23** of 40 in `dependency-order.md`. Everything before it is complete a
 - A ticker whose fetch fails with a **broker** failure is omitted from the
   result and logged at WARNING; the batch still returns. One unavailable
   instrument must never blind the bot to the rest.
-- **Consecutive failures are counted per ticker, and a persistent one alerts.**
-  On the third consecutive failed call for a ticker the owner is alerted once,
-  naming the ticker and the failure; nothing further is sent for that ticker
-  until it succeeds. A success clears both its count and its alerted flag, so a
-  later degradation alerts again. Tickers crossing the threshold in the same
-  call share one alert. This is rule 9, and rule 36 is the shape it belongs to.
+- **A call is degraded for a ticker when the fetch fails, or when it succeeds
+  with fewer than `lookback` candles** — no candles at all included. The second
+  half is not a lesser case of the first: a fetch that returns nothing looks
+  like success to every counter, and the ticker is then skipped by
+  `app.loops._evaluate_entries`, or evaluated to `None` by every strategy whose
+  lookback exceeds what came back, on every cycle, in silence. That is the same
+  blindness #23 names, one layer downstream of it.
+- **Consecutive degraded calls are counted per ticker, and a persistent one
+  alerts.** On the third consecutive degraded call for a ticker the owner is
+  alerted once, naming the ticker and the reason — the failure, or the candle
+  count against the count required; nothing further is sent for that ticker
+  until a call is not degraded. A good call clears both its count and its
+  alerted flag, so a later degradation alerts again. Tickers crossing the
+  threshold in the same call share one alert. **A failure and a shortfall share
+  one counter**, or a ticker alternating between them would never cross a
+  threshold at all. This is rule 9, and rule 36 is the shape it belongs to.
+- **A short series is still returned.** Reporting insufficiency must not become
+  dropping the ticker: `lookback` is the longest lookback among the enabled
+  strategies, so a series too short for that one may still satisfy a shorter
+  one, and the caller decides. Only a failed fetch omits a ticker from the
+  result.
 - **Only the broker's own failures are caught** — `BrokerUnavailable`,
   `BrokerRateLimited` and `InstrumentNotFound`. Every other exception
   propagates: an `AttributeError` from a renamed SDK field or a `ValueError`
@@ -47,17 +62,25 @@ From `technical-spec.md` §8. Handle each exactly as written.
    next cycle. After three consecutive failed cycles, alert **once**; keep the
    process alive and keep trying. Never exit.
 
-9. **Candle fetch fails for one ticker** → omit it, WARNING, continue the batch.
-   Failures are counted **per ticker, consecutively**: on the **third**
-   consecutive failed call for a ticker, alert **once**, naming the ticker and
-   the failure, and send nothing further for it until it succeeds. A success
-   clears both the count and the alerted flag. Tickers crossing the threshold in
-   the same call share one alert. Only `BrokerUnavailable`, `BrokerRateLimited`
-   and `InstrumentNotFound` are handled this way; every other exception
-   propagates under rule 21. A ticker that fails forever is a delisting, a
-   rename or a wrong class code — not weather — and before this rule it was
-   dropped from every batch in silence, so the watchlist could shrink to nothing
-   while the bot reported itself healthy (#23).
+9. **Candle fetch fails for one ticker, or returns too little history** → omit a
+   failed ticker, WARNING, continue the batch. Both are **degraded calls** and
+   both count on **one** per-ticker consecutive counter: on the **third**
+   consecutive degraded call, alert **once**, naming the ticker and the reason —
+   the failure, or the candles returned against the candles required — and send
+   nothing further for it until a call is not degraded. A good call clears both
+   the count and the alerted flag. Tickers crossing the threshold in the same
+   call share one alert. Only `BrokerUnavailable`, `BrokerRateLimited` and
+   `InstrumentNotFound` are handled as failures; every other exception
+   propagates under rule 21.
+
+   A ticker that fails forever is a delisting, a rename or a wrong class code —
+   not weather — and before this rule it was dropped from every batch in
+   silence, so the watchlist could shrink to nothing while the bot reported
+   itself healthy (#23). **A fetch that succeeds and returns nothing is the same
+   blindness wearing the opposite disguise**: it looks like success to every
+   counter, while the ticker is skipped or evaluated to `None` on every cycle.
+   The two must share a counter, or a ticker alternating between them crosses no
+   threshold ever.
 9b. **A quote is rejected as non-positive, stale, or an implausible move** →
     WARNING, omit that instrument for the cycle, alert once per cycle with the
     count. It is **not** a broker outage: it must not increment the consecutive
@@ -97,6 +120,20 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - Fewer candles available than the longest strategy lookback returns what exists
   and the caller can detect insufficiency (proves partial history is visible, not
   silently padded).
+- A ticker returning **no** candles is counted as a degraded call and alerts on
+  the third, exactly as a failed fetch does (proves an empty success is not
+  mistaken for health — it is the one result that guarantees no strategy can
+  evaluate the ticker).
+- A ticker returning fewer candles than the requested `lookback` alerts on the
+  third consecutive call, and the alert names both numbers (proves a short
+  history is reported rather than tolerated forever in silence).
+- The short series is still returned to the caller (proves reporting
+  insufficiency did not become dropping the ticker: a strategy whose own
+  lookback the series does satisfy must still see it).
+- Two failed calls followed by a short one alert on the third (proves a failure
+  and a shortfall share **one** counter — they are one degradation of one
+  ticker, and counting them separately would let a ticker alternate between
+  them forever without ever crossing a threshold).
 - A ticker whose fetch raises a **broker** failure while others succeed does not
   fail the batch (proves one bad instrument cannot blind the bot to the rest).
 - A ticker failing three consecutive calls alerts exactly once, and a fourth
