@@ -39,7 +39,7 @@ M = [
  (20,"risk.gate","zarabot/risk/gate.py","`risk.gate`",[],[],"Pure. Every entry check, with a fixed rejection priority so the recorded reason is deterministic. 95% coverage."),
  (21,"broker.client","zarabot/broker/client.py","`broker.client`",[],[1,2,3,4,5,19,28,33],"The ONLY module that talks to the broker. Wraps t_tech.invest.AsyncClient and returns domain types. Run the verification suite before building this."),
  (22,"market.session","zarabot/market/session.py","`market.session`",[],[10],"Is the exchange open? Queried from the broker calendar, never hardcoded. Defaults to closed when unknown."),
- (23,"market.data","zarabot/market/data.py","`market.data`",[],[1,9],"Candles for the watchlist. One failing instrument must never blind the bot to the rest."),
+ (23,"market.data","zarabot/market/data.py","`market.data`",[],[1,9,36],"Candles for the watchlist. One failing instrument must never blind the bot to the rest, and one that fails persistently must never do so in silence."),
  (24,"state.halt","zarabot/state/halt.py","`state.halt`",["halt_state"],[20,30],"Sole owner of the halt flag. A halt suspends ENTRIES ONLY - exits keep running, and the halt survives restarts."),
  (25,"pnl","zarabot/pnl.py","`pnl`",["positions","daily_snapshots"],[12,20],"Realised and unrealised P&L, the daily loss percentage, and the buy-and-hold benchmark. Commission is read from the broker, never estimated."),
  (26,"execution.orders","zarabot/execution/orders.py","`execution.orders`",["positions","orders","stop_orders","cooldowns"],[3,4,5,11,23,26,27,28,33],"Where money moves. Write-then-send ordering, the submission locks, crash recovery, and the standing stop-loss. Highest-risk module in the project. 95% coverage."),

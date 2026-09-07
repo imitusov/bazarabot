@@ -1,7 +1,7 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.50
-**Date:** 2026-08-18
+**Version:** 1.51
+**Date:** 2026-09-07
 **Implements:** `business-brief.md` v1.11
 
 **Companion document.** Read the brief first. When this spec and the brief
@@ -681,8 +681,20 @@ it proves.
 - Fewer candles available than the longest strategy lookback returns what exists
   and the caller can detect insufficiency (proves partial history is visible, not
   silently padded).
-- A ticker failing while others succeed does not fail the batch (proves one bad
-  instrument cannot blind the bot to the rest).
+- A ticker whose fetch raises a **broker** failure while others succeed does not
+  fail the batch (proves one bad instrument cannot blind the bot to the rest).
+- A ticker failing three consecutive calls alerts exactly once, and a fourth
+  failure adds no second alert (proves the threshold and the latch together).
+- A ticker that recovers and then fails three more times alerts a **second**
+  time (proves recovery re-arms the latch; an alert that fires once per process
+  and never again is what #32 and #48 both are).
+- Two tickers crossing the threshold in the same call produce **one** alert
+  naming both (proves the call, not the ticker, is the unit — a watchlist-wide
+  outage must not send one message per instrument).
+- A ticker whose fetch raises a non-broker exception propagates it rather than
+  omitting the ticker (proves a programming error is not disguised as a missing
+  instrument, which is the exposure `broker.client`'s narrowing exists to
+  create and this module was swallowing).
 
 **`strategies.*`**
 
@@ -2311,9 +2323,26 @@ is the failure this cadence exists to prevent.
 
 **`async candles_for_watchlist(tickers: list[str], lookback: int, now: datetime) → dict[str, list[Candle]]`**
 - Returns per-ticker candle series, oldest-first.
-- A ticker that fails is omitted from the result and logged; the batch still
-  returns. One unavailable instrument must never blind the bot to the rest.
+- A ticker whose fetch fails with a **broker** failure is omitted from the
+  result and logged at WARNING; the batch still returns. One unavailable
+  instrument must never blind the bot to the rest.
+- **Consecutive failures are counted per ticker, and a persistent one alerts.**
+  On the third consecutive failed call for a ticker the owner is alerted once,
+  naming the ticker and the failure; nothing further is sent for that ticker
+  until it succeeds. A success clears both its count and its alerted flag, so a
+  later degradation alerts again. Tickers crossing the threshold in the same
+  call share one alert. This is rule 9, and rule 36 is the shape it belongs to.
+- **Only the broker's own failures are caught** — `BrokerUnavailable`,
+  `BrokerRateLimited` and `InstrumentNotFound`. Every other exception
+  propagates: an `AttributeError` from a renamed SDK field or a `ValueError`
+  from a malformed candle reaches `app.loops._supervise`, which alerts with a
+  traceback and restarts under rule 21. Since v1.27 `broker.client` raises those
+  as themselves rather than as `BrokerUnavailable`; catching `Exception` here
+  put them straight back in the dark, which is the second half of #23.
 - Never pads or interpolates missing candles.
+- The counters are process-local, like `market.session`'s cache: they measure
+  consecutive failures of *this* process, and a restart is entitled to start
+  over rather than inherit a count it did not observe.
 
 ### `zarabot/strategies/base.py`
 
@@ -3708,6 +3737,16 @@ Applies across all modules. Every external failure mode has exactly one rule.
    cycle, WARNING. Unavailable at startup → `StartupError`; the bot must not
    trade an instrument whose lot size it cannot confirm.
 9. **Candle fetch fails for one ticker** → omit it, WARNING, continue the batch.
+   Failures are counted **per ticker, consecutively**: on the **third**
+   consecutive failed call for a ticker, alert **once**, naming the ticker and
+   the failure, and send nothing further for it until it succeeds. A success
+   clears both the count and the alerted flag. Tickers crossing the threshold in
+   the same call share one alert. Only `BrokerUnavailable`, `BrokerRateLimited`
+   and `InstrumentNotFound` are handled this way; every other exception
+   propagates under rule 21. A ticker that fails forever is a delisting, a
+   rename or a wrong class code — not weather — and before this rule it was
+   dropped from every batch in silence, so the watchlist could shrink to nothing
+   while the bot reported itself healthy (#23).
 9b. **A quote is rejected as non-positive, stale, or an implausible move** →
     WARNING, omit that instrument for the cycle, alert once per cycle with the
     count. It is **not** a broker outage: it must not increment the consecutive
@@ -3844,6 +3883,27 @@ Applies across all modules. Every external failure mode has exactly one rule.
     the evidence for enabling and disabling strategies: a default that names a
     real strategy is not a missing datum, it is a wrong one, and it is wrong in
     the same direction every time.
+
+36. **A degraded state that persists must alert; only a transient one may be
+    logged.** Wherever this system absorbs a failure — a retry, a skipped
+    instrument, a partial result — the absorption needs three things *together*:
+    a threshold at which continuing to absorb stops being reasonable, exactly
+    one alert when it is crossed, and a reset on recovery that re-arms that
+    alert. Rules 1, 2 and 9 are the instances; the shape recurs wherever a loop
+    tolerates a failure it cannot fix.
+
+    Any two of the three are not enough, and each missing part has already cost
+    this project an issue. With no threshold the log is the only record and
+    nobody reads it, which is how a permanently broken ticker was dropped from
+    every batch for as long as it took to notice (#23). With no reset the second
+    incident is silent, which is #32 and #48 — the same defect written twice,
+    hours apart, in two modules. With no single alert the channel fills and
+    stops being read, which is the "commission still unknown" alert that fired
+    on every backfill run forever (#8).
+
+    Whenever a latch is added, list its set-sites against its reset-sites and
+    look for the asymmetry. That check is mechanical, it takes a minute, and it
+    is the only thing that has ever caught this class.
 
 ---
 
