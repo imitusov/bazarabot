@@ -50,6 +50,10 @@ Module **23** of 40 in `dependency-order.md`. Everything before it is complete a
   as themselves rather than as `BrokerUnavailable`; catching `Exception` here
   put them straight back in the dark, which is the second half of #23.
 - Never pads or interpolates missing candles.
+- **Emits `candles_failed` (WARNING) with `ticker` and `error` whenever a ticker
+  is omitted or counted as degraded (v1.61).** `error` is the exception type
+  name, or `short_history`. This is the structured event; the Telegram alert on
+  the third consecutive degradation is unchanged.
 - The counters are process-local, like `market.session`'s cache: they measure
   consecutive failures of *this* process, and a restart is entitled to start
   over rather than inherit a count it did not observe.
@@ -146,6 +150,8 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   omitting the ticker (proves a programming error is not disguised as a missing
   instrument, which is the exposure `broker.client`'s narrowing exists to
   create and this module was swallowing).
+- An omitted ticker emits `candles_failed` with that `ticker` and `error`
+  (v1.61).
 
 **`strategies.*`**
 

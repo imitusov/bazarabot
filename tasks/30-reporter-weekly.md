@@ -94,6 +94,8 @@ Module **30** of 40 in `dependency-order.md`. Everything before it is complete a
   distribution, cooldown counts, worst trade — and the omission is noted.
 
 **`async send(now: datetime) → None`** — builds and sends; failure alerts but does not raise.
+- **On a successful send, emit `weekly_report_sent` (INFO) with `period_start`
+  and `period_end` (v1.61).** A failed send emits nothing of this name.
 
 ## Relevant error handling rules
 
@@ -118,6 +120,8 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (proves the undefined-metric path).
 - A report exceeding the message limit drops the least important section and
   notes the omission (proves the documented trimming order).
+- A successful send emits `weekly_report_sent` with `period_start` and
+  `period_end` (v1.61).
 
 ## Expected output
 

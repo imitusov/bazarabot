@@ -17,6 +17,9 @@ Module **31** of 40 in `dependency-order.md`. Everything before it is complete a
 ### `zarabot/ops/backup.py`
 
 **`async run(db_path: Path, backup_dir: Path) → Path`** — produces a consistent copy using SQLite's own backup mechanism, never a raw file copy of a live database.
+- **On success, emit `backup_ok` (INFO) with `path` and `bytes` (v1.61).** On
+  failure, emit `backup_failed` (ERROR) with `error`, alert, and return; it must
+  never stop trading.
 
 **`async prune(backup_dir: Path, retention_days: int) → int`** — removes backups strictly older than the window; returns the count removed.
 
@@ -37,7 +40,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   rows (proves the copy is consistent, not a torn file).
 - Backups older than the retention window are removed and newer ones are kept
   (boundary).
-- A failing backup alerts and does not stop trading (proves the priority order).
+- A failing backup alerts, emits `backup_failed`, and does not stop trading
+  (v1.61).
+- A successful backup emits `backup_ok` with `path` and `bytes`.
 
 ## Expected output
 

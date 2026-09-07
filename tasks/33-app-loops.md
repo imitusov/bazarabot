@@ -91,6 +91,17 @@ Module **33** of 40 in `dependency-order.md`. Everything before it is complete a
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
 
+   **`signal_generated` / `signal_rejected` are emitted here (v1.61), not in
+   `risk.gate`.** The gate stays pure. Each non-`None` strategy result logs
+   `signal_generated` (`ticker`, `strategy`, `reference_price`) before the gate
+   runs; a rejected decision logs `signal_rejected` (`ticker`, `strategy`,
+   `rejection_reason`). Approved entries that submit are not a second
+   `signal_generated`.
+
+   **After a close that starts a cooldown, emit `cooldown_started` (`ticker`,
+   `active_until`) (v1.61).** `execution.orders` owns the cooldown write;
+   this module owns the event because the gate cannot log.
+
    **A ticker already opened earlier in this same pass is skipped before the
    gate, and recorded as `DUPLICATE_TICKER` (v1.40).** Strategies are looped
    outer and tickers inner, so two strategies can signal one ticker in a single
@@ -214,6 +225,16 @@ run continuously is added to this list in the same change, or it does not run.
 
 A failure in one task must never terminate another; each is supervised and
 restarted with backoff. A failure in one task must never terminate another.
+
+**Observability of the supervisor (v1.61):**
+- Each heartbeat job emits `heartbeat` (INFO) with `uptime_seconds`,
+  `open_positions`, `halted`.
+- A supervised task that raises emits `task_crashed` (ERROR) with `task`,
+  `error`, `restart_in_seconds` before the backoff sleep.
+- When `clock.now()` is not UTC-aware, emit `clock_drift` (WARNING) with
+  `drift_seconds` 0 and refuse to run the cycle — a naive "now" is a contract
+  violation, not weather (v1.61). Do not call `datetime.now()` here to "check"
+  the clock; that would itself violate the clock-ownership rule.
 
 ## Relevant error handling rules
 
@@ -353,6 +374,13 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - `shutdown` calls `db.connection.disconnect()`, and `db.connection.shared()`
   raises `DatabaseNotOpenError` afterwards (proves "closes the database" is that
   one call rather than a repository-level close of a connection nobody owns).
+- An approved signal emits `signal_generated` before the gate; a rejected
+  decision emits `signal_rejected` with `rejection_reason`; `risk.gate` emits
+  neither (v1.61).
+- A successful heartbeat job emits `heartbeat` with `uptime_seconds`,
+  `open_positions`, `halted`.
+- A crashing supervised task emits `task_crashed` with `task` and
+  `restart_in_seconds`.
 
 ## Expected output
 

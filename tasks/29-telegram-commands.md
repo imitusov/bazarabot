@@ -59,7 +59,9 @@ Module **29** of 40 in `dependency-order.md`. Everything before it is complete a
 One handler per command in the brief's command table.
 
 - Every handler first checks the sender against `TELEGRAM_CHAT_ID`; a mismatch
-  logs and returns without replying and without any state change.
+  emits `unauthorised_command` (INFO) with `chat_id` and `command` (v1.61), then
+  returns without replying and without any state change. `chat_id` is not a
+  brokerage secret; it is the field that makes the event answerable.
 - Replies exceeding the platform limit are truncated with an explicit note of how
   many entries were omitted.
 - No handler mutates a risk limit.
@@ -81,8 +83,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - Each command from the authorised chat returns its documented content (happy
   path per command).
-- Any command from an unauthorised chat identifier returns nothing, is logged,
-  and performs no state change (proves the single security boundary).
+- Any command from an unauthorised chat identifier returns nothing, emits
+  `unauthorised_command` with `chat_id` and `command`, and performs no state
+  change (v1.61; proves the single security boundary).
 - `/resume` when not halted replies that nothing was halted (proves the
   no-op path).
 - A response exceeding the message limit is truncated with an explicit note

@@ -51,15 +51,20 @@ Configures structured logging and enforces secret redaction.
   conversion and is the one thing it does use.
 - Called by `app.startup` immediately after `config.load()` and before any other
   module logs anything.
+- **The `secrets` list must include every token and every account identifier the
+  process holds** — `tinvest_token`, `tinvest_account_id`, and any sandbox
+  counterparts that are set (v1.61). `app.startup` is the caller that knows
+  those values; this module only redacts what it is given.
 
 ## Relevant error handling rules
 
 From `technical-spec.md` §8. Handle each exactly as written.
 
-19. **Secret exposure** → no token is ever written to a log, an exception message,
-    or a Telegram message. If the redaction filter detects a secret in an
-    outgoing Telegram message, the message is **dropped**, and an alert reporting
-    the incident without the secret is sent in its place.
+19. **Secret exposure** → no token **and no account identifier** is ever written
+    to a log, an exception message, or a Telegram message. If the redaction
+    filter detects a secret in an outgoing Telegram message, the message is
+    **dropped**, `secret_redacted` is emitted, and an alert reporting the
+    incident without the secret is sent in its place.
 
 ## Test cases
 
@@ -82,6 +87,8 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   proves the field is producer-set and that this module invents nothing).
 - A token inside the `event` field is redacted (proves redaction reaches the
   field the whole catalogue is keyed on).
+- A log record carrying an account identifier is redacted the same way as a
+  token (v1.61).
 
 ## Expected output
 

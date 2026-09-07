@@ -20,6 +20,13 @@ Module **32** of 40 in `dependency-order.md`. Everything before it is complete a
 
 Fixed ordering; each step completes before the next begins:
 1. `config.load()` — abort on failure before anything else, including any network call.
+   **When `load()` raises `ConfigError`, this module is still the owner of
+   `config_invalid` (v1.61).** Logging is not configured yet. `start()` therefore
+   calls `logging_setup.configure` with whatever token and account-id values are
+   already in the environment (empty list if none), emits `config_invalid`
+   (CRITICAL) with `variable` from the `ConfigError`, then raises `StartupError`.
+   It never proceeds to a broker call. `config` itself does not emit the event:
+   it has no logger of its own by design.
 1b. Write `SSL_TBANK_VERIFY` into the process environment from
    `config.ssl_tbank_verify`. This must precede every broker call; a channel
    created before it is set fails its TLS handshake.
@@ -28,7 +35,8 @@ Fixed ordering; each step completes before the next begins:
    carrying the trading token. `config` logs it; a log line on a server nobody
    is watching is not a security control. The alert must never contain the
    token.
-2. `logging_setup.configure()`.
+2. `logging_setup.configure()`, passing every token and account identifier on
+   the loaded `Config` as `secrets`.
 3. `db.connection.connect(config.db_path)`, then
    `db.migrations.apply(db.connection.shared())`. The connection is opened here —
    not at import, and not inside a repository — and `apply` receives the shared
@@ -130,6 +138,11 @@ Fixed ordering; each step completes before the next begins:
 
 - Raises `StartupError` on any failure, having alerted if Telegram credentials
   were valid. No entry may be attempted before step 9 completes.
+- **On any `StartupError` after logging is configured, emit `startup_failed`
+  (CRITICAL) with `stage` (the step name: `config`, `logging`, `database`,
+  `strategies`, `session`, `recovery`, `reconcile`, `halt`, `ready`) and
+  `reason` (v1.61).** No `startup_ok` on that path. `__main__` does not emit
+  either event; it only sleeps and exits.
 
 ## Relevant error handling rules
 
@@ -173,8 +186,8 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - Startup with valid config, a reachable broker and a clean database completes
   and reports ready (happy path).
-- Invalid config aborts before any broker call is made (proves fail-fast
-  ordering).
+- Invalid config aborts before any broker call is made, emits `config_invalid`
+  with `variable`, and does not emit `startup_ok` (v1.61).
 - `SSL_TBANK_VERIFY` is present in the environment before the first broker call
   (proves the TLS root is available when the channel is built — the failure this
   guards against is a handshake error that looks like a network fault rather
@@ -227,6 +240,8 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   `version`, `mode`, `halted` and `adjustments_count`, matching what the ready
   alert reports (proves the deploy health gate has something to observe — it
   greps for exactly this event, and nothing emitted it).
+- A `FOREIGN_HOLDING` refusal emits `startup_failed` with `stage` `reconcile`
+  and no `startup_ok` (v1.61).
 
 ## Expected output
 

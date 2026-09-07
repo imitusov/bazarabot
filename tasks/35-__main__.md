@@ -26,6 +26,8 @@ The process entry point, so that `python -m zarabot` is the start command.
   `app.*`; this module exists only to be the thing Python executes.
 - On `StartupError` it sleeps 30 seconds before returning, so the container
   restart policy cannot produce an alert loop (rule 15).
+- **It emits no log event of its own (v1.61).** `startup_failed` / `config_invalid`
+  belong to `app.startup`, which must have emitted them before raising.
 
 ## Relevant error handling rules
 

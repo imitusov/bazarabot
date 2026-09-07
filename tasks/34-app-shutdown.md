@@ -136,6 +136,13 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - `shutdown` calls `db.connection.disconnect()`, and `db.connection.shared()`
   raises `DatabaseNotOpenError` afterwards (proves "closes the database" is that
   one call rather than a repository-level close of a connection nobody owns).
+- An approved signal emits `signal_generated` before the gate; a rejected
+  decision emits `signal_rejected` with `rejection_reason`; `risk.gate` emits
+  neither (v1.61).
+- A successful heartbeat job emits `heartbeat` with `uptime_seconds`,
+  `open_positions`, `halted`.
+- A crashing supervised task emits `task_crashed` with `task` and
+  `restart_in_seconds`.
 
 ## Expected output
 

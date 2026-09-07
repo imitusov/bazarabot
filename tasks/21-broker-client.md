@@ -51,6 +51,11 @@ calls, each re-reading every environment variable, re-parsing every `Decimal` an
 touching the filesystem to stat `ML_MODEL_PATH` — on the latency-critical path
 (#18). Configuration is read through `config.get()`, the memoised accessor, not
 `config.load()`.
+- **Emits `broker_unavailable` (WARNING) on each `BrokerUnavailable` with
+  `method`, `consecutive_failures`, `backoff_seconds`, and `rate_limited`
+  (WARNING) on each `BrokerRateLimited` with `method`, `retry_after_seconds`
+  (v1.61).** This module is the only one that sees those exceptions at the
+  source; callers must not re-emit them.
 
 **`async close() → None`**
 - Closes the process client and forgets it. Idempotent. Called only by
@@ -354,10 +359,11 @@ From `technical-spec.md` §8. Handle each exactly as written.
    `SUBMITTING`, resolve by querying with the idempotency key on the next cycle
    or at next startup. **Never resubmit.**
 
-19. **Secret exposure** → no token is ever written to a log, an exception message,
-    or a Telegram message. If the redaction filter detects a secret in an
-    outgoing Telegram message, the message is **dropped**, and an alert reporting
-    the incident without the secret is sent in its place.
+19. **Secret exposure** → no token **and no account identifier** is ever written
+    to a log, an exception message, or a Telegram message. If the redaction
+    filter detects a secret in an outgoing Telegram message, the message is
+    **dropped**, `secret_redacted` is emitted, and an alert reporting the
+    incident without the secret is sent in its place.
 
 28. **Any code path that would set `confirm_margin_trade=True`** → rejected in
     review, not at runtime. There is no runtime condition under which this is
@@ -420,6 +426,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   `PriceRejected` (proves a renamed SDK field surfaces as the integration break
   it is, rather than as every quote in every cycle looking like bad broker data
   — the state in which no `LOCAL` stop-loss can fire).
+- Raising `BrokerUnavailable` emits `broker_unavailable` with `method`
+  (v1.61). Raising `BrokerRateLimited` emits `rate_limited` with
+  `retry_after_seconds`.
 - A zero-valued quote raises `PriceRejected`, not `BrokerUnavailable` and not
   `Decimal(0)` (proves the mass-liquidation path is closed at its source, and
   that bad data is distinguishable from an outage).

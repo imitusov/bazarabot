@@ -18,8 +18,12 @@ Module **28** of 40 in `dependency-order.md`. Everything before it is complete a
 
 **`async alert(text: str, urgent: bool = False) → None`**
 - Sends to the configured chat. Retries on failure, then logs and returns.
-- **Never raises.** Telegram must never be able to interrupt trading.
-- Never includes a token in a message.
+- **After the last failed attempt, emit `telegram_send_failed` (WARNING) with
+  `attempt` and `error` (v1.61).** Never raises.
+- **When a body contains a configured secret, drop it, emit `secret_redacted`
+  (ERROR) with `sink` equal to `telegram` — never the secret, never its length —
+  and send a substitute incident alert without the secret (v1.61, rule 19).**
+- Never includes a token or account identifier in a message.
 
 ## Relevant error handling rules
 
@@ -28,17 +32,20 @@ From `technical-spec.md` §8. Handle each exactly as written.
 13. **Telegram send failure** → retry, then log. **Never propagates.** Telegram
     being down never delays or blocks a trading decision.
 
-19. **Secret exposure** → no token is ever written to a log, an exception message,
-    or a Telegram message. If the redaction filter detects a secret in an
-    outgoing Telegram message, the message is **dropped**, and an alert reporting
-    the incident without the secret is sent in its place.
+19. **Secret exposure** → no token **and no account identifier** is ever written
+    to a log, an exception message, or a Telegram message. If the redaction
+    filter detects a secret in an outgoing Telegram message, the message is
+    **dropped**, `secret_redacted` is emitted, and an alert reporting the
+    incident without the secret is sent in its place.
 
 ## Test cases
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-- A failed send is retried and, if still failing, written to the log without
-  raising (proves Telegram outages never reach trading logic).
+- A failed send is retried and, if still failing, emits `telegram_send_failed`
+  without raising (v1.61; proves Telegram outages never reach trading logic).
+- A body containing a token is dropped, emits `secret_redacted` with `sink`
+  `telegram`, and does not contain the token (v1.61).
 - No alert body contains either token (proves the secret boundary at the last
   point of egress).
 
