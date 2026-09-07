@@ -173,7 +173,13 @@ caches nothing — the next call re-reads. Tests reset the memo with
 ## `zarabot.logging_setup`
 
 JSON logs to stdout only. Never a file, never stderr. Tokens are replaced by
-`MASK` (`"***"`).
+`MASK` (`"***"`). Every record includes `timestamp` (UTC ISO), `moscow_time`
+(Europe/Moscow ISO from the record's created instant via `clock.to_moscow`),
+`level`, `logger`, and `message`. Timestamps come from the `LogRecord`'s
+`created` instant, not from `clock.now()`. A LogRecord extra field named
+`event` is emitted as-is; a record logged without one carries no `event` key.
+There is no separate public `log_event` helper. This module invents no default
+`event` and emits no domain event of its own.
 
 **`MASK: str`**
 Fixed redaction mask.
