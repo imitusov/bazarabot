@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.56
+**Version:** 1.57
 **Date:** 2026-09-07
 **Implements:** `business-brief.md` v1.11
 
@@ -2294,12 +2294,25 @@ was one of the eight sites opening its own connection.
   would have become the position's sole protection, and the bot would have
   stopped watching its own.
 
-  Not adopting is the safe residual: the position stays `LOCAL`, `lifecycle.exits`
-  keeps watching `stop_price` itself, and the broker's stop stands underneath as
-  well. The next reconciliation with readable metadata judges it properly and
-  either adopts it or reports it mispriced. Neither branch is skipped because
-  the finding is unlikely — it is skipped because both remedies act on a price,
-  and the price is exactly what is missing.
+  Not adopting is the safe residual **for a `LOCAL` position**: it stays `LOCAL`,
+  `lifecycle.exits` keeps watching `stop_price` itself, and the broker's stop
+  stands underneath as well.
+
+  A position already `EXCHANGE`-protected has a different residual, and it is
+  weaker: it stays `EXCHANGE` and nothing at the bot verifies its stop until the
+  metadata is readable again, because `lifecycle.exits` fires `STOP_LOSS` only
+  while protection is `LOCAL`. It is **not** demoted to `LOCAL` to close that
+  gap. Demotion would arm the bot's own seller while the exchange's stop is
+  still live, which is the double-sell condition the ownership rule exists to
+  prevent — a worse failure than an unverified stop that is, after all, still
+  standing at the exchange. This is the same trade rule 37 makes about
+  `STOP_MISPRICED`, and it is stated here because "the unjudged case protects
+  itself" is true of one entrance to this branch and not the other (v1.57).
+
+  Either way the next reconciliation with readable metadata judges the stop
+  properly and adopts it, reports it mispriced, or leaves it alone. Neither
+  finding is skipped because it is unlikely — both are skipped because both
+  remedies act on a price, and the price is exactly what is missing.
 - **More than one live stop on a position is reported as `STOP_DUPLICATE`**, and
   is the most serious discrepancy this module can find: it is the double-sell
   condition the ownership design exists to prevent, actually present. The remedy
