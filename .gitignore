@@ -31,5 +31,9 @@ sandbox/models/
 *.ipynb
 *.ipynb_checkpoints/
 
+# Agent scratch — worktrees a background task checks out under the repo. They
+# are full working copies, so committing one would nest the tree inside itself.
+.claude/worktrees/
+
 # OS
 .DS_Store
