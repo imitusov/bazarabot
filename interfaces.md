@@ -989,8 +989,12 @@ orphaned event names `stop_order_id` when known, else the stop's key.
 Never raises. Never includes a token. Telegram outages cannot delay trading.
 
 **`async alert(text: str, urgent: bool = False) → None`**
-Sends to `TELEGRAM_CHAT_ID`. Retries on failure, then logs and returns. A body
-containing either token is dropped and replaced with an incident notice.
+Sends to `TELEGRAM_CHAT_ID`. Retries on failure, then logs and returns. After the
+last failed attempt, emits `telegram_send_failed` (WARNING) with `attempt` and
+`error` (exception type name). A body containing either token or the brokerage
+account identifier is dropped, emits
+`secret_redacted` (ERROR) with `sink` `telegram`, and is replaced with an incident
+notice. Never raises.
 
 ## `zarabot.telegram.commands`
 
