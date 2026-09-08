@@ -54,9 +54,10 @@ class _FakeChat:
 
 
 class _FakeMessage:
-    def __init__(self) -> None:
+    def __init__(self, text: str = "") -> None:
         self.replies: list[str] = []
         self.fail_times = 0
+        self.text = text
 
     async def reply_text(self, text: str, **kwargs: object) -> None:
         if self.fail_times > 0:
@@ -66,9 +67,9 @@ class _FakeMessage:
 
 
 class _FakeUpdate:
-    def __init__(self, chat_id: int) -> None:
+    def __init__(self, chat_id: int, command: str = "") -> None:
         self.effective_chat = _FakeChat(chat_id)
-        self.message = _FakeMessage()
+        self.message = _FakeMessage(f"/{command}" if command else "")
 
 
 def _position(**overrides: object) -> Position:
@@ -166,7 +167,7 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 async def _reply(handler: Any, chat_id: int = AUTH_CHAT) -> str:
-    update = _FakeUpdate(chat_id)
+    update = _FakeUpdate(chat_id, handler.__name__)
     await handler(update, None)
     assert update.message.replies
     return update.message.replies[-1]
@@ -285,7 +286,7 @@ async def test_each_command_from_authorised_chat_returns_documented_content(
 async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
     env: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    update = _FakeUpdate(99)
+    """v1.61: the security boundary is a structured event, not free text."""
     handlers = (
         status,
         positions,
@@ -297,13 +298,58 @@ async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
         report,
         help,
     )
-    with caplog.at_level(logging.INFO):
-        for handler in handlers:
-            await handler(update, None)
-    assert update.message.replies == []
+    commands = (
+        "status",
+        "positions",
+        "history",
+        "pnl",
+        "halt",
+        "resume",
+        "strategies",
+        "report",
+        "help",
+    )
+    replies: list[str] = []
+    with caplog.at_level(logging.INFO, logger="zarabot.telegram.commands"):
+        for handler, command in zip(handlers, commands, strict=True):
+            probe = _FakeUpdate(99, command)
+            await handler(probe, None)
+            replies.extend(probe.message.replies)
+    assert replies == []
     assert await is_halted() is False
-    assert "99" in caplog.text
-    assert any(record.levelno == logging.INFO for record in caplog.records)
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "unauthorised_command"
+    ]
+    assert len(events) == len(handlers)
+    for record, command in zip(events, commands, strict=True):
+        assert record.levelno == logging.INFO
+        assert record.chat_id == 99
+        assert record.command == command
+    assert "tinvest-secret-token" not in caplog.text
+    assert "telegram-secret-token" not in caplog.text
+
+
+async def test_unauthorised_unknown_command_is_logged_as_unknown(
+    env: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stranger's first token is not copied into the log (rule 14 / §7.1)."""
+    payload = "x" * 4096
+    probe = _FakeUpdate(99, payload)
+    with caplog.at_level(logging.INFO, logger="zarabot.telegram.commands"):
+        await halt(probe, None)
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "unauthorised_command"
+    ]
+    assert len(events) == 1
+    assert events[0].command == "unknown"
+    assert payload not in caplog.text
+    assert payload not in str(events[0].__dict__)
+    assert probe.message.replies == []
+    assert await is_halted() is False
 
 
 async def test_resume_when_not_halted_replies_nothing_was_halted(env: Path) -> None:

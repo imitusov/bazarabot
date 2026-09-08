@@ -102,12 +102,36 @@ def _join_truncated(header: str, entries: list[str]) -> str:
     return header + "\n".join(kept)
 
 
+_KNOWN_COMMANDS = frozenset(name.lstrip("/") for name, _blurb in _COMMANDS)
+
+
+def _command_name(update: Update) -> str:
+    message = update.message
+    if message is None:
+        return "unknown"
+    text = message.text
+    if not text:
+        return "unknown"
+    token = str(text).strip().split()[0]
+    name = token.lstrip("/").split("@")[0]
+    if name not in _KNOWN_COMMANDS:
+        return "unknown"
+    return name
+
+
 def _authorised(update: Update) -> bool:
     chat = update.effective_chat
     chat_id = chat.id if chat is not None else None
     if chat_id == config.get().telegram_chat_id:
         return True
-    _LOG.info("unauthorised telegram command from chat %s", chat_id)
+    _LOG.info(
+        "unauthorised_command",
+        extra={
+            "event": "unauthorised_command",
+            "chat_id": chat_id,
+            "command": _command_name(update),
+        },
+    )
     return False
 
 
