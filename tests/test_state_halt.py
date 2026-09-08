@@ -297,7 +297,9 @@ async def test_access_without_connect_raises(
         await resume("owner", NOW)
 
 
-def _halt_events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+def _halt_events(
+    caplog: pytest.LogCaptureFixture, event: str
+) -> list[logging.LogRecord]:
     return [
         record
         for record in caplog.records
@@ -342,6 +344,7 @@ async def test_weaker_rehalt_emits_no_halt_triggered(
     db: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     await halt(HaltReason.DAILY_LOSS_LIMIT, "daily loss breached", NOW)
+    caplog.clear()
     with caplog.at_level(logging.CRITICAL, logger="zarabot.state.halt"):
         await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
     assert _halt_events(caplog, "halt_triggered") == []
