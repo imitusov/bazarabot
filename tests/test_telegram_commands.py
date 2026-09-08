@@ -285,6 +285,7 @@ async def test_each_command_from_authorised_chat_returns_documented_content(
 async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
     env: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """v1.61: the security boundary is a structured event, not free text."""
     update = _FakeUpdate(99)
     handlers = (
         status,
@@ -297,13 +298,64 @@ async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
         report,
         help,
     )
-    with caplog.at_level(logging.INFO):
+    commands = (
+        "status",
+        "positions",
+        "history",
+        "pnl",
+        "halt",
+        "resume",
+        "strategies",
+        "report",
+        "help",
+    )
+    with caplog.at_level(logging.INFO, logger="zarabot.telegram.commands"):
         for handler in handlers:
             await handler(update, None)
     assert update.message.replies == []
     assert await is_halted() is False
-    assert "99" in caplog.text
-    assert any(record.levelno == logging.INFO for record in caplog.records)
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "unauthorised_command"
+    ]
+    assert len(events) == len(handlers)
+    for record, command in zip(events, commands, strict=True):
+        assert record.levelno == logging.INFO
+        assert record.chat_id == 99
+        assert record.command == command
+    assert "tinvest-secret-token" not in caplog.text
+    assert "telegram-secret-token" not in caplog.text
+
+
+async def test_halt_passes_daily_loss_pct_from_pnl(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v1.69: a manual /halt still records the day's loss percentage."""
+    captured: dict[str, object] = {}
+
+    async def _persist(
+        reason: object,
+        detail: str,
+        at: datetime,
+        daily_loss_pct: Decimal | None = None,
+    ) -> None:
+        captured["reason"] = reason
+        captured["daily_loss_pct"] = daily_loss_pct
+        captured["at"] = at
+
+    async def _loss(at: datetime) -> Decimal:
+        captured["loss_at"] = at
+        return Decimal("1.25")
+
+    monkeypatch.setattr("zarabot.telegram.commands.persist_halt", _persist)
+    monkeypatch.setattr(
+        "zarabot.telegram.commands.daily_loss_pct", _loss, raising=False
+    )
+    await _reply(halt)
+    assert captured["daily_loss_pct"] == Decimal("1.25")
+    assert captured["at"] == NOW
+    assert captured["loss_at"] == NOW
 
 
 async def test_resume_when_not_halted_replies_nothing_was_halted(env: Path) -> None:
