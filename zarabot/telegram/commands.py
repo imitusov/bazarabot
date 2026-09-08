@@ -18,7 +18,7 @@ from zarabot.db.positions import list_closed, list_open
 from zarabot.db.snapshots import list_for_period
 from zarabot.market.session import current_session, is_open, next_open
 from zarabot.models import HaltReason, Position
-from zarabot.pnl import benchmark_return, daily_loss_pct, realised, unrealised
+from zarabot.pnl import benchmark_return, realised, unrealised
 from zarabot.state.halt import current
 from zarabot.state.halt import halt as persist_halt
 from zarabot.state.halt import resume as persist_resume
@@ -344,13 +344,7 @@ async def pnl(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None
 async def halt(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
     if not _authorised(update):
         return
-    at = now()
-    await persist_halt(
-        HaltReason.MANUAL,
-        "manual halt via /halt",
-        at,
-        daily_loss_pct=await daily_loss_pct(at),
-    )
+    await persist_halt(HaltReason.MANUAL, "manual halt via /halt", now())
     await _reply(update, "Entries halted. Open positions are left untouched.")
 
 

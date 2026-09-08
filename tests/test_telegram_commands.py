@@ -331,36 +331,6 @@ async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
     assert "telegram-secret-token" not in caplog.text
 
 
-async def test_halt_passes_daily_loss_pct_from_pnl(
-    env: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """v1.69: a manual /halt still records the day's loss percentage."""
-    captured: dict[str, object] = {}
-
-    async def _persist(
-        reason: object,
-        detail: str,
-        at: datetime,
-        daily_loss_pct: Decimal | None = None,
-    ) -> None:
-        captured["reason"] = reason
-        captured["daily_loss_pct"] = daily_loss_pct
-        captured["at"] = at
-
-    async def _loss(at: datetime) -> Decimal:
-        captured["loss_at"] = at
-        return Decimal("1.25")
-
-    monkeypatch.setattr("zarabot.telegram.commands.persist_halt", _persist)
-    monkeypatch.setattr(
-        "zarabot.telegram.commands.daily_loss_pct", _loss, raising=False
-    )
-    await _reply(halt)
-    assert captured["daily_loss_pct"] == Decimal("1.25")
-    assert captured["at"] == NOW
-    assert captured["loss_at"] == NOW
-
-
 async def test_resume_when_not_halted_replies_nothing_was_halted(env: Path) -> None:
     text = await _reply(resume)
     assert "nothing was halted" in text.lower()

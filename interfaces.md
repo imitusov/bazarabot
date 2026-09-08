@@ -998,8 +998,7 @@ One handler per brief command. Authorised `TELEGRAM_CHAT_ID` only; a mismatch
 emits `unauthorised_command` (INFO) with `chat_id` and `command` and neither
 replies nor changes state. Replies over 4096 characters are truncated with an
 omission count. No command mutates a risk limit. `/halt` and `/resume` delegate
-to `state.halt` only; `/halt` passes `daily_loss_pct` from `pnl.daily_loss_pct`
-(v1.69). `/report` calls
+to `state.halt` only. `/report` calls
 an injected `async (start: date, end: date) → str` matching
 `reporter.weekly.build`; when unset it replies `report unavailable`. `/status`
 reads today's P&L and `orders_placed` from `daily_snapshots` (both 0 if none).
