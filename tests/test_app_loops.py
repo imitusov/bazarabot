@@ -2354,6 +2354,52 @@ async def test_close_emits_cooldown_started(
     assert events[0].active_until == (NOW + timedelta(minutes=90)).isoformat()
 
 
+async def test_exchange_executed_stop_emits_cooldown_started(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(
+        stop_protection=StopProtection.EXCHANGE,
+        stop_order_key="stop-key-1",
+    )
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _stops() -> list[StopOrderRecord]:
+        return []
+
+    async def _executed(pos: Position, fill: OrderRecord) -> Position:
+        return pos
+
+    async def _fills(since: object, until: object) -> dict[str, OrderRecord]:
+        return {"broker-stop": _broker_fill(Decimal("95.00"))}
+
+    async def _active(position_id: int) -> StopOrderRecord | None:
+        return _our_stop()
+
+    async def _until(ticker: str, minutes: int) -> datetime:
+        return NOW + timedelta(minutes=90)
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "list_stop_orders", _stops)
+    monkeypatch.setattr(loops, "get_executed_stop_fills", _fills)
+    monkeypatch.setattr(loops, "active_for_position", _active)
+    monkeypatch.setattr(loops, "close_executed_stop", _executed)
+    monkeypatch.setattr(loops, "active_until", _until)
+    with caplog.at_level(logging.INFO, logger="zarabot.app.loops"):
+        await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    events = _loop_events(caplog, "cooldown_started")
+    assert len(events) == 1
+    assert events[0].ticker == "SBER"
+    assert events[0].active_until == (NOW + timedelta(minutes=90)).isoformat()
+
+
 async def test_heartbeat_emits_heartbeat_event(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

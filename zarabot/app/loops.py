@@ -174,13 +174,28 @@ def _stop_is_live(
     return bool(candidates & standing_keys)
 
 
+async def _note_cooldown(ticker: str, minutes: int) -> None:
+    until = await active_until(ticker, minutes)
+    if until is None:
+        _LOG.warning("cooldown missing after close ticker=%s", ticker)
+        return
+    _LOG.info(
+        "cooldown_started",
+        extra={
+            "event": "cooldown_started",
+            "ticker": ticker,
+            "active_until": until.isoformat(),
+        },
+    )
+
+
 def _moscow_day_start(moment: datetime) -> datetime:
     """Midnight of the current Moscow day, as an aware UTC instant."""
     moscow = to_moscow(moment)
     return moscow.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
 
 
-async def _close_executed(positions: list[Position]) -> set[int]:
+async def _close_executed(positions: list[Position], minutes: int) -> set[int]:
     """Close positions whose exchange stop the BROKER says has executed.
 
     Execution is confirmed, never inferred. The previous rule concluded a stop
@@ -217,6 +232,7 @@ async def _close_executed(positions: list[Position]) -> set[int]:
         fill = fills.get(broker_id) if broker_id else None
         if fill is not None:
             await close_executed_stop(position, fill)
+            await _note_cooldown(position.ticker, minutes)
             closed.add(position.id)
             continue
         if not _stop_is_live(position, live, broker_id):
@@ -312,19 +328,7 @@ async def _submit_exits(
         except (ExitFailed, ValueError):
             _LOG.exception("exit failed for %s trigger=%s", position.ticker, trigger)
             continue
-        until = await active_until(
-            position.ticker, ctx.config.reentry_cooldown_minutes
-        )
-        if until is None:
-            continue
-        _LOG.info(
-            "cooldown_started",
-            extra={
-                "event": "cooldown_started",
-                "ticker": position.ticker,
-                "active_until": until.isoformat(),
-            },
-        )
+        await _note_cooldown(position.ticker, ctx.config.reentry_cooldown_minutes)
     await _report_ages(unmeasurable)
 
 
@@ -547,7 +551,9 @@ async def trading_cycle(ctx: AppContext) -> None:
         await resolve_unfinished(moment)
         positions = await list_open()
         prices = await _prices_for(positions)
-        executed = await _close_executed(positions)
+        executed = await _close_executed(
+            positions, ctx.config.reentry_cooldown_minutes
+        )
         await _submit_exits(positions, prices, executed, moment, ctx)
         if not await _measure_daily_loss(ctx, moment, len(positions)):
             return
