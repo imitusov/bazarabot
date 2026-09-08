@@ -1029,6 +1029,15 @@ Additionally, on exits booked from an exchange stop:
   is on the telling, not the trying).
 
 **`state.halt`**
+- A `DAILY_LOSS_LIMIT` halt emits `halt_triggered` carrying the `daily_loss_pct`
+  its caller passed (v1.69; proves the field is the caller's real figure, not a
+  placeholder — a test asserting only that the key exists would pass against a
+  hardcoded zero).
+- A halt whose caller passes no `daily_loss_pct` emits `halt_triggered` with the
+  key **absent** — not null, not `Decimal("0")` (v1.69; proves an unknown loss
+  is reported as unknown. Zero on a halt record reads as "no loss today", which
+  is false precisely when it matters).
+- `resume` emits `halt_cleared` with `actor` (v1.61).
 - Halting then reading state reports halted with its reason (happy path).
 - Halt state survives a simulated restart, where a restart is
   `db.connection.disconnect()` followed by `connect` to the same file — a
@@ -2933,6 +2942,12 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
   cancel; submits the market sell directly.
+- **The database-failure halt passes no `daily_loss_pct` (v1.69).**
+  `_halt_on_db_failure` runs because a database write just failed, and
+  `pnl.daily_loss_pct` reads that same database — calling it there would query
+  the thing that is broken, on the path that exists to handle its being broken.
+  `halt_triggered` for this halt omits the field, and that absence is correct.
+  This module does not import `pnl`, and must not start.
 - **A failed cooldown write halts but does not fail the exit (v1.63).** The
   cooldown is written after the sell has executed and after the position row is
   already `CLOSED`, so raising out of `close_position` would report a completed
@@ -3111,7 +3126,7 @@ obligation.
 
 **`async is_halted() → bool`** · **`async current() → HaltState | None`**
 
-**`async halt(reason: HaltReason, detail: str, at: datetime, daily_loss_pct: Decimal) → None`**
+**`async halt(reason: HaltReason, detail: str, at: datetime, daily_loss_pct: Decimal | None = None) → None`**
 - Persists the halt so it survives a restart. Idempotent when already halted
   **for the same or a more severe reason**.
 - **Severity order: `DAILY_LOSS_LIMIT` > `RECONCILIATION_MISMATCH` > `MANUAL`.**
@@ -3122,10 +3137,34 @@ obligation.
 - Suspends **entries only**. Never affects `lifecycle.exits` or
   `execution.orders.close_position`.
 - **Emits `halt_triggered` (CRITICAL) after a halt is persisted or upgraded,
-  with `reason`, `detail`, and `daily_loss_pct` (v1.61).** `daily_loss_pct` is
-  a required argument of `halt` (`Decimal`); callers that already computed the
-  day's loss pass it, and `/halt` passes the current figure from `pnl`.
-  `risk.gate` stays pure and emits nothing.
+  with `reason`, `detail`, and — when the caller supplied one — `daily_loss_pct`
+  (v1.61, amended v1.69).** `risk.gate` stays pure and emits nothing.
+- **`daily_loss_pct` is optional, and absent rather than zero when unknown
+  (v1.69).** v1.61 made it a required `Decimal`, which no caller could satisfy:
+  a `MANUAL` or `RECONCILIATION_MISMATCH` halt has no daily-loss figure, and one
+  of the three call sites cannot obtain one at all (below). A required argument
+  nobody can supply is not a contract, and `Decimal("0")` in its place would
+  read as "no loss today" on the record of a halt — the worst available lie in
+  this event. When the caller passes nothing, the field is **omitted from the
+  record**, not set to null or zero.
+- **Who passes it, by call site (v1.69).** Stated here so a later agent does not
+  "fix" the one that abstains:
+  - `app.loops` **passes it.** At the daily-loss check it already holds
+    `loss = await daily_loss_pct(moment)` as a `Decimal` in scope, one line
+    above the `halt` call. This is the `DAILY_LOSS_LIMIT` halt and the only site
+    where the figure is both meaningful and free.
+  - `telegram.commands` `/halt` **passes `await pnl.daily_loss_pct(now())`.**
+    The module already imports `zarabot.pnl`, so this adds no dependency. A
+    manual halt is worth annotating with the day's position.
+  - `execution.orders._halt_on_db_failure` **passes nothing, deliberately.** It
+    halts *because a database write just failed*, and `pnl.daily_loss_pct` reads
+    that same database. Calling it there would query the thing that is broken,
+    on the path that exists to handle its being broken. The field is absent from
+    this halt's record and that absence is correct.
+- Until v1.69 the spec's signature line carried a fourth argument while
+  `interfaces.md` and `state/halt.py` both had three, and no `halt_triggered`
+  was emitted anywhere. v1.61 amended the signature and never re-ran the
+  callers — failure class 1, amendment scope under-counted.
 
 **`async resume(actor: str, at: datetime) → bool`**
 - Clears the halt, recording who cleared it. Returns `False` when not halted.
@@ -3211,6 +3250,10 @@ One handler per command in the brief's command table.
   many entries were omitted.
 - No handler mutates a risk limit.
 - `/halt` and `/resume` delegate to `state.halt` and to nothing else.
+- **`/halt` passes `daily_loss_pct` (v1.69).** It calls
+  `pnl.daily_loss_pct(clock.now())` and hands the result to `state.halt.halt`,
+  so a manual halt's record still carries the day's position. This module
+  already imports `zarabot.pnl`, so it adds no dependency.
 
 ### `zarabot/reporter/weekly.py`
 
@@ -3433,6 +3476,12 @@ Fixed ordering; each step completes before the next begins:
 5. If halted, return; entries stop here.
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
+
+   **The daily-loss halt passes `daily_loss_pct` (v1.69).** The `loss` this
+   module already computed for the limit check is handed to `state.halt.halt`
+   as its fourth argument, so `halt_triggered` carries the real figure. It is in
+   scope one line above the call; not passing it is what left the field
+   unsatisfiable.
 
    **`signal_generated` / `signal_rejected` are emitted here (v1.61), not in
    `risk.gate`.** The gate stays pure. Each non-`None` strategy result logs
@@ -4222,7 +4271,7 @@ implementation gap.
 | `stop_order_orphaned` | `broker.reconcile` | ERROR | `stop_order_id`, `ticker` |
 | `partial_fill` | `execution.orders` | WARNING | `key`, `ticker`, `intent`, `requested_lots`, `filled_lots` |
 | `cooldown_started` | `app.loops` | INFO | `ticker`, `active_until` |
-| `halt_triggered` | `state.halt` | CRITICAL | `reason`, `detail`, `daily_loss_pct` |
+| `halt_triggered` | `state.halt` | CRITICAL | `reason`, `detail`, `daily_loss_pct` (only on a `DAILY_LOSS_LIMIT` or `/halt` halt) |
 | `halt_cleared` | `state.halt` | INFO | `actor` |
 | `reconciliation` | `broker.reconcile` | INFO | `adjustments_count`, `types` |
 | `broker_unavailable` | `broker.client` | WARNING | `method`, `consecutive_failures` |

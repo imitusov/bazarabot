@@ -91,6 +91,12 @@ Module **33** of 40 in `dependency-order.md`. Everything before it is complete a
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
 
+   **The daily-loss halt passes `daily_loss_pct` (v1.69).** The `loss` this
+   module already computed for the limit check is handed to `state.halt.halt`
+   as its fourth argument, so `halt_triggered` carries the real figure. It is in
+   scope one line above the call; not passing it is what left the field
+   unsatisfiable.
+
    **`signal_generated` / `signal_rejected` are emitted here (v1.61), not in
    `risk.gate`.** The gate stays pure. Each non-`None` strategy result logs
    `signal_generated` (`ticker`, `strategy`, `reference_price`) before the gate
