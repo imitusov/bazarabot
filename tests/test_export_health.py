@@ -112,7 +112,10 @@ def test_old_schema_missing_tables_are_errors_not_zero(tmp_path: Path) -> None:
     assert info["present"] is True
     assert info["schema_version"] == 2
     assert problems
-    assert any("schema" in item.lower() or "no such table" in item.lower() for item in problems)
+    assert any(
+        "schema" in item.lower() or "no such table" in item.lower()
+        for item in problems
+    )
 
 
 def test_recent_errors_omit_keys_prices_and_tokens() -> None:
@@ -123,7 +126,7 @@ def test_recent_errors_omit_keys_prices_and_tokens() -> None:
         key="secret-order-key",
         ticker="SBER",
         filled_price="100",
-        tinvest_token="tok",
+        tinvest_token="tok",  # noqa: S106
     )
     _events, errors, _unknown = mod.parse_logs(raw)
     blob = " ".join(errors)
