@@ -10,7 +10,7 @@ from zarabot.telegram.notifier import alert
 
 REQUIRED_ENV = {
     "TINVEST_TOKEN": "tinvest-secret-token",
-    "TINVEST_ACCOUNT_ID": "acct",
+    "TINVEST_ACCOUNT_ID": "tinvest-account-id-secret",
     "TELEGRAM_BOT_TOKEN": "telegram-secret-token",
     "TELEGRAM_CHAT_ID": "42",
     "ALLOCATED_CAPITAL": "100000",
@@ -67,6 +67,7 @@ async def test_failed_send_is_retried_then_emits_telegram_send_failed(
     assert record.error == "RuntimeError"
     assert "tinvest-secret-token" not in caplog.text
     assert "telegram-secret-token" not in caplog.text
+    assert "tinvest-account-id-secret" not in caplog.text
 
 
 async def test_alert_body_containing_a_token_is_dropped_and_emits_secret_redacted(
@@ -83,7 +84,9 @@ async def test_alert_body_containing_a_token_is_dropped_and_emits_secret_redacte
     assert not hasattr(record, "length")
     assert "tinvest-secret-token" not in caplog.text
     assert "telegram-secret-token" not in caplog.text
+    assert "tinvest-account-id-secret" not in caplog.text
     assert "tinvest-secret-token" not in str(record.__dict__)
+    assert "tinvest-account-id-secret" not in str(record.__dict__)
     assert _FakeBot.calls
     body = str(_FakeBot.calls[-1]["text"])
     assert "tinvest-secret-token" not in body
@@ -100,3 +103,21 @@ async def test_alert_body_never_contains_tokens(env: None) -> None:
     await alert("plain status")
     assert _FakeBot.calls[-1]["text"] == "plain status"
     assert _FakeBot.calls[-1]["chat_id"] == 42
+
+
+async def test_alert_body_containing_account_id_is_dropped_and_emits_secret_redacted(
+    env: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 19: the brokerage account identifier is a secret too."""
+    with caplog.at_level(logging.ERROR, logger="zarabot.telegram.notifier"):
+        await alert("leak tinvest-account-id-secret please")
+    events = _events(caplog, "secret_redacted")
+    assert len(events) == 1
+    record = events[0]
+    assert record.sink == "telegram"
+    assert not hasattr(record, "length")
+    assert "tinvest-account-id-secret" not in caplog.text
+    assert "tinvest-account-id-secret" not in str(record.__dict__)
+    body = str(_FakeBot.calls[-1]["text"])
+    assert "tinvest-account-id-secret" not in body
+    assert body != "leak tinvest-account-id-secret please"
