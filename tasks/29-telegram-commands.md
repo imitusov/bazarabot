@@ -1,4 +1,4 @@
-# Task 29/40: Implement `zarabot/telegram/commands.py`
+# Task 29/42: Implement `zarabot/telegram/commands.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The entire user interface. One authorised chat id; everything else is ignored an
 
 ## Build order position
 
-Module **29** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **29** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

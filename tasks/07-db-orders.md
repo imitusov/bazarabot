@@ -1,4 +1,4 @@
-# Task 7/40: Implement `zarabot/db/orders.py`
+# Task 7/42: Implement `zarabot/db/orders.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of order rows. Records intent BEFORE the broker is called, which is w
 
 ## Build order position
 
-Module **7** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **7** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

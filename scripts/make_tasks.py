@@ -25,6 +25,8 @@ M = [
  (6,"db.positions","zarabot/db/positions.py","`db.positions`",["positions","position_events"],[11,12,30],"Sole owner of position rows. Positions are never deleted; closing is a state transition, because the history is the point of the project."),
  (7,"db.orders","zarabot/db/orders.py","`db.orders`",["orders"],[5,11,12,30],"Sole owner of order rows. Records intent BEFORE the broker is called, which is what makes a crash mid-submission recoverable."),
  (8,"db.stop_orders","zarabot/db/stop_orders.py",None,["stop_orders"],[11,12,30],"Sole owner of stop-order rows. Tracks the standing stop the exchange holds for each open position."),
+ ("8b","db.job_runs","zarabot/db/job_runs.py","`db.job_runs`",["job_runs"],[12,30],"Sole owner of job_runs. Periodic jobs ask has_run so a restart cannot double-send the weekly report or skip a backup forever."),
+ ("8c","db.trading_days","zarabot/db/trading_days.py","`db.trading_days`",["trading_days"],[12,30],"Sole owner of trading_days. The cached exchange calendar, including days that later become holidays."),
  (9,"db.cooldowns","zarabot/db/cooldowns.py","`db.cooldowns`",["cooldowns"],[12,30],"Sole owner of per-instrument re-entry cooldowns, which replace a daily order cap as the runaway-loop protection."),
  (10,"db.signals","zarabot/db/signals.py","`db.signals` / `db.snapshots`",["signals"],[12,30],"Records every signal with its risk decision, approved or rejected. Rejections are analysed in the weekly report."),
  (11,"db.snapshots","zarabot/db/snapshots.py","`db.signals` / `db.snapshots`",["daily_snapshots"],[12,30],"Daily equity snapshots. The opening baseline is what the daily loss limit measures against."),
