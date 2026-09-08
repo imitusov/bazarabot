@@ -331,6 +331,27 @@ async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
     assert "telegram-secret-token" not in caplog.text
 
 
+async def test_unauthorised_unknown_command_is_logged_as_unknown(
+    env: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stranger's first token is not copied into the log (rule 14 / §7.1)."""
+    payload = "x" * 4096
+    probe = _FakeUpdate(99, payload)
+    with caplog.at_level(logging.INFO, logger="zarabot.telegram.commands"):
+        await halt(probe, None)
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "unauthorised_command"
+    ]
+    assert len(events) == 1
+    assert events[0].command == "unknown"
+    assert payload not in caplog.text
+    assert payload not in str(events[0].__dict__)
+    assert probe.message.replies == []
+    assert await is_halted() is False
+
+
 async def test_resume_when_not_halted_replies_nothing_was_halted(env: Path) -> None:
     text = await _reply(resume)
     assert "nothing was halted" in text.lower()
