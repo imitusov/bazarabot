@@ -147,6 +147,17 @@ async def _close_externally(position: Position, moment: datetime) -> dict[str, o
         f"position {position.ticker} closed externally at {sale.price} "
         f"on {sale.occurred_at.isoformat()} (id={position.id})"
     )
+    if position.stop_protection is StopProtection.EXCHANGE:
+        _LOG.info(
+            "stop_order_executed",
+            extra={
+                "event": "stop_order_executed",
+                "position_id": position.id,
+                "ticker": position.ticker,
+                "fill_price": sale.price,
+                "gap_vs_stop": sale.price - position.stop_price,
+            },
+        )
     return {
         "type": "CLOSED_EXTERNALLY",
         "ticker": position.ticker,
@@ -419,6 +430,14 @@ def _stop_adjustments(
                 "key": stop.key,
             }
         )
+        _LOG.error(
+            "stop_order_orphaned",
+            extra={
+                "event": "stop_order_orphaned",
+                "stop_order_id": _identifier(stop),
+                "ticker": stop.ticker,
+            },
+        )
     return adjustments
 
 
@@ -472,4 +491,13 @@ async def reconcile(now: datetime) -> ReconciliationReport:
     adjustments.extend(_stop_adjustments(remaining_open, broker_stops, increments))
 
     await _persist(now, adjustments)
+    types = list(dict.fromkeys(str(item["type"]) for item in adjustments))
+    _LOG.info(
+        "reconciliation",
+        extra={
+            "event": "reconciliation",
+            "adjustments_count": len(adjustments),
+            "types": types,
+        },
+    )
     return ReconciliationReport(ran_at=now, adjustments=tuple(adjustments))
