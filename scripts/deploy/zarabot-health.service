@@ -16,7 +16,8 @@ ExecStart=/bin/bash -lc '\
       diff --cached --quiet || \
   git -c user.name=zarabot-vps -c user.email=noreply@localhost \
       commit -m "ops: production health $(date -I)" && \
-  git push https://x-access-token:${HEALTH_TOKEN}@github.com/imitusov/bazarabot.git HEAD:ops/health; \
+  git push https://x-access-token:${HEALTH_TOKEN}@github.com/imitusov/bazarabot.git HEAD:ops/health \
+  || status=1; \
   exit $status'
 StandardOutput=journal
 StandardError=journal

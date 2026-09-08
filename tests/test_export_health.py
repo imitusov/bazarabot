@@ -219,6 +219,9 @@ def test_main_missing_database_exits_1(
     assert rc == 1
     data = json.loads((out / "latest.json").read_text())
     assert data["export_failed"] is True
+    md = (out / "latest.md").read_text()
+    assert "Log export failed: no" in md
+    assert "database file missing" in md
 
 
 def test_main_malformed_line_is_written_into_health_not_a_clean_bill(
@@ -255,3 +258,36 @@ def test_main_malformed_line_is_written_into_health_not_a_clean_bill(
     md = (out / "latest.md").read_text()
     assert "Malformed JSON lines: 1" in md
     assert "Log export failed: yes" in md
+
+
+def test_main_clean_export_exits_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _mod()
+
+    def _run(*_a: object, **_k: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout=_line("heartbeat"), stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", _run)
+    monkeypatch.setattr(
+        mod,
+        "read_database",
+        lambda *_a, **_k: ({"present": True, "positions_open": 0}, []),
+    )
+    out = tmp_path / "health"
+    rc = mod.main(
+        ["--db", str(tmp_path / "x.db"), "--out", str(out), "--compose", "c.yml"]
+    )
+    assert rc == 0
+    data = json.loads((out / "latest.json").read_text())
+    assert data["export_failed"] is False
+    assert data["malformed"] == 0
+    assert data["unknown"] is False
+    assert "Log export failed: no" in (out / "latest.md").read_text()
+
+
+def test_health_unit_treats_a_failed_push_as_failure() -> None:
+    text = Path("scripts/deploy/zarabot-health.service").read_text()
+    push_at = text.index("git push")
+    fail_at = text.index("|| status=1")
+    assert push_at < fail_at

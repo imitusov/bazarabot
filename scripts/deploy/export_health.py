@@ -338,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
         f"Deployed digest: `{health['deployed_digest'] or 'unknown'}`",
         "",
         f"- Heartbeats: {health['heartbeats']} of ~{health['expected_heartbeats']} expected",
-        f"- Log export failed: {'yes' if failed else 'no'}",
+        f"- Log export failed: {'yes' if log_failed else 'no'}",
         f"- Unknown catalogue names: {'yes' if unknown else 'no'}",
         f"- Malformed JSON lines: {malformed}",
         f"- Open positions: {db_info_out.get('positions_open', '?')}"
@@ -359,6 +359,9 @@ def main(argv: list[str] | None = None) -> int:
         "",
     ]
     lines += [f"- `{e}`" for e in errors] or ["- none"]
+    if db_problems:
+        lines += ["", "## Database problems", ""]
+        lines += [f"- `{p}`" for p in db_problems]
     (out / "latest.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {out / 'latest.md'}")
     return 1 if failed else 0
