@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,6 +31,12 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
     monkeypatch.setattr("zarabot.ops.backup.now", lambda: NOW)
     return tmp_path
+
+
+def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    return [
+        record for record in caplog.records if getattr(record, "event", None) == event
+    ]
 
 
 async def test_backup_opens_as_valid_database_with_same_rows(
@@ -75,8 +82,8 @@ async def test_prune_removes_older_than_retention_and_keeps_newer(
     assert recent.exists()
 
 
-async def test_failing_backup_alerts_and_does_not_stop_trading(
-    env: Path, monkeypatch: pytest.MonkeyPatch
+async def test_failing_backup_alerts_emits_backup_failed_and_does_not_stop_trading(
+    env: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     alerts: list[str] = []
 
@@ -85,6 +92,33 @@ async def test_failing_backup_alerts_and_does_not_stop_trading(
 
     monkeypatch.setattr("zarabot.ops.backup.alert", _alert)
     missing = env / "missing-parent" / "zarabot.db"
-    dest = await run(missing, env / "backups")
+    with caplog.at_level(logging.ERROR, logger="zarabot.ops.backup"):
+        dest = await run(missing, env / "backups")
     assert alerts
     assert dest.name.startswith("zarabot-")
+    events = _events(caplog, "backup_failed")
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.ERROR
+    assert record.error
+    assert "token" not in caplog.text
+    assert "tg" not in caplog.text
+
+
+async def test_successful_backup_emits_backup_ok_with_path_and_bytes(
+    env: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db_path = env / "zarabot.db"
+    backup_dir = env / "backups"
+    async with aiosqlite.connect(db_path) as conn:
+        await apply(conn)
+        await conn.commit()
+    with caplog.at_level(logging.INFO, logger="zarabot.ops.backup"):
+        dest = await run(db_path, backup_dir)
+    events = _events(caplog, "backup_ok")
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.INFO
+    assert record.path == dest.name
+    assert record.bytes == dest.stat().st_size
+    assert dest.stat().st_size > 0
