@@ -350,6 +350,31 @@ async def test_weaker_rehalt_emits_no_halt_triggered(
     assert _halt_events(caplog, "halt_triggered") == []
 
 
+async def test_escalation_emits_halt_triggered_with_new_reason_and_pct(
+    db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.61: upgrade is persist-or-upgrade; #9 is this path."""
+
+    await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
+    caplog.clear()
+    loss = Decimal("5.25")
+    later = NOW + timedelta(hours=1)
+    with caplog.at_level(logging.CRITICAL, logger="zarabot.state.halt"):
+        await halt(
+            HaltReason.DAILY_LOSS_LIMIT,
+            "daily loss 5.25% reached limit 5%",
+            later,
+            daily_loss_pct=loss,
+        )
+    events = _halt_events(caplog, "halt_triggered")
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.CRITICAL
+    assert record.reason == HaltReason.DAILY_LOSS_LIMIT.value
+    assert record.detail == "daily loss 5.25% reached limit 5%"
+    assert record.daily_loss_pct == loss
+
+
 async def test_resume_emits_halt_cleared_with_actor(
     db: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
