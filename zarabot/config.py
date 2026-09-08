@@ -168,7 +168,7 @@ class Config:
         return (
             "Config("
             f"tinvest_token={_REDACT!r}, "
-            f"tinvest_account_id={self.tinvest_account_id!r}, "
+            f"tinvest_account_id={_REDACT!r}, "
             f"trading_mode={self.trading_mode!r}, "
             f"telegram_bot_token={_REDACT!r}, "
             f"telegram_chat_id={self.telegram_chat_id!r}, "

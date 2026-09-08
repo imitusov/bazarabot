@@ -107,8 +107,9 @@ on a naive input or when `end` precedes `start`.
 
 ## `zarabot.config`
 
-Loads and validates every setting once at startup. Tokens never appear in
-`ConfigError` messages or in `Config`'s `__repr__` / `__str__`.
+Loads and validates every setting once at startup. Tokens and account
+identifiers never appear in `ConfigError` messages or in `Config`'s
+`__repr__` / `__str__`.
 
 **`ConfigError`**
 Raised when a required variable is missing or empty, a numeric value is out of
