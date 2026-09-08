@@ -16,7 +16,13 @@ _DROPPED = "An outbound alert was dropped because it contained a secret."
 def _secrets() -> tuple[str, ...]:
     cfg = load()
     return tuple(
-        secret for secret in (cfg.tinvest_token, cfg.telegram_bot_token) if secret
+        secret
+        for secret in (
+            cfg.tinvest_token,
+            cfg.telegram_bot_token,
+            cfg.tinvest_account_id,
+        )
+        if secret
     )
 
 
