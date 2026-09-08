@@ -160,9 +160,11 @@ async def test_invalid_config_emits_config_invalid_and_not_startup_ok(
         return None
 
     monkeypatch.setattr("zarabot.app.startup.alert", _alert)
-    with caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"):
-        with pytest.raises(StartupError):
-            await start()
+    with (
+        caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"),
+        pytest.raises(StartupError),
+    ):
+        await start()
     events = [
         record
         for record in caplog.records
@@ -172,7 +174,9 @@ async def test_invalid_config_emits_config_invalid_and_not_startup_ok(
     record = events[0]
     assert record.levelno == logging.CRITICAL
     assert record.variable == "ALLOCATED_CAPITAL"
-    assert not any(getattr(item, "event", None) == "startup_ok" for item in caplog.records)
+    assert not any(
+        getattr(item, "event", None) == "startup_ok" for item in caplog.records
+    )
     assert "tinvest-secret-token" not in caplog.text
 
 
@@ -845,9 +849,11 @@ async def test_foreign_holding_emits_startup_failed_reconcile(
         env,
     )
     monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
-    with caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"):
-        with pytest.raises(StartupError):
-            await start()
+    with (
+        caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"),
+        pytest.raises(StartupError),
+    ):
+        await start()
     events = [
         record
         for record in caplog.records
@@ -858,7 +864,9 @@ async def test_foreign_holding_emits_startup_failed_reconcile(
     assert record.levelno == logging.CRITICAL
     assert record.stage == "reconcile"
     assert record.reason
-    assert not any(getattr(item, "event", None) == "startup_ok" for item in caplog.records)
+    assert not any(
+        getattr(item, "event", None) == "startup_ok" for item in caplog.records
+    )
     assert "tinvest-secret-token" not in caplog.text
 
 
