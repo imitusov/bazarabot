@@ -1,7 +1,7 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.61
-**Date:** 2026-09-07
+**Version:** 1.70
+**Date:** 2026-09-08
 **Implements:** `business-brief.md` v1.11
 
 **Companion document.** Read the brief first. When this spec and the brief
@@ -1029,15 +1029,30 @@ Additionally, on exits booked from an exchange stop:
   is on the telling, not the trying).
 
 **`state.halt`**
-- A `DAILY_LOSS_LIMIT` halt emits `halt_triggered` carrying the `daily_loss_pct`
-  its caller passed (v1.69; proves the field is the caller's real figure, not a
-  placeholder — a test asserting only that the key exists would pass against a
-  hardcoded zero).
-- A halt whose caller passes no `daily_loss_pct` emits `halt_triggered` with the
-  key **absent** — not null, not `Decimal("0")` (v1.69; proves an unknown loss
-  is reported as unknown. Zero on a halt record reads as "no loss today", which
-  is false precisely when it matters).
+- A `DAILY_LOSS_LIMIT` halt emits `halt_triggered` carrying `reason`, `detail`
+  and the `daily_loss_pct` its caller passed (v1.69; proves the field is the
+  caller's real figure, not a placeholder — a test asserting only that the key
+  exists would pass against a hardcoded zero).
+- A halt whose caller passes no `daily_loss_pct` emits `halt_triggered` with
+  `reason` and `detail` and the key **absent** — not null, not `Decimal("0")`
+  (v1.69; proves an unknown loss is reported as unknown. Zero on a halt record
+  reads as "no loss today", which is false precisely when it matters).
 - `resume` emits `halt_cleared` with `actor` (v1.61).
+- An **escalation** emits `halt_triggered` too — a `DAILY_LOSS_LIMIT` halt
+  arriving during a `MANUAL` one emits a CRITICAL record carrying the new reason,
+  the new detail and the caller's figure (v1.70; the contract says "persisted
+  **or upgraded**" and only the persist half was stated. Move the emit under
+  `if not replacing:` and every other case in this file stays green while the
+  event goes silent on exactly the #9 path).
+- A **no-op `resume`** emits nothing (v1.70; the `False` return had a case, its
+  silence did not).
+- A **rejected weaker re-halt** emits nothing — a `MANUAL` halt arriving during
+  a `DAILY_LOSS_LIMIT` one changes no state and emits no `halt_triggered`
+  (v1.70). The severity ordering had a case for the state it leaves and none
+  for its silence, so §3.2 permitted a CRITICAL on every `halt()` call,
+  discarded ones included. This is the mirror of the escalation case: one guards
+  moving the emit under `if not replacing:`, this one guards moving it above the
+  severity check.
 - Halting then reading state reports halted with its reason (happy path).
 - Halt state survives a simulated restart, where a restart is
   `db.connection.disconnect()` followed by `connect` to the same file — a
@@ -1054,8 +1069,6 @@ Additionally, on exits booked from an exchange stop:
 - A halt does not prevent `lifecycle.exits` from returning triggers, nor
   `execution.orders` from placing an exit (proves the halt-blocks-entries-only
   contract, which is the single most consequential interaction in the system).
-- `halt` emits `halt_triggered` with `reason`, `detail`, `daily_loss_pct`;
-  `resume` of a halted process emits `halt_cleared` with `actor` (v1.61).
 
 **`pnl`**
 - Realised P&L for a closed position matches the arithmetic including commission
