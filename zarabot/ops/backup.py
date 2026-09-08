@@ -61,7 +61,10 @@ async def run(db_path: Path, backup_dir: Path) -> Path:
         )
         await alert(f"Database backup failed for {dest.name}. Trading continues.")
         return dest
-    size = dest.stat().st_size
+    try:
+        size = dest.stat().st_size
+    except OSError:
+        size = 0
     _LOG.info(
         "backup_ok",
         extra={
