@@ -124,3 +124,30 @@ async def test_successful_backup_emits_backup_ok_with_path_and_bytes(
     assert record.path == dest.name
     assert record.bytes == dest.stat().st_size
     assert dest.stat().st_size > 0
+
+
+async def test_stat_failure_after_copy_returns_backup_ok_not_backup_failed(
+    env: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Copy succeeded; a later stat must not raise or look like a failed copy."""
+    db_path = env / "zarabot.db"
+    backup_dir = env / "backups"
+    async with aiosqlite.connect(db_path) as conn:
+        await apply(conn)
+        await conn.commit()
+    original = Path.stat
+
+    def _stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self.parent == backup_dir and self.name.startswith("zarabot-"):
+            raise OSError("stat failed")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _stat)
+    with caplog.at_level(logging.INFO, logger="zarabot.ops.backup"):
+        dest = await run(db_path, backup_dir)
+    assert dest.name.startswith("zarabot-")
+    assert original(dest).st_size > 0
+    assert _events(caplog, "backup_failed") == []
+    events = _events(caplog, "backup_ok")
+    assert len(events) == 1
+    assert events[0].bytes == 0

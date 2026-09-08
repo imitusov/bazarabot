@@ -188,6 +188,16 @@ def test_config_string_form_contains_neither_token(
     text = str(cfg) + repr(cfg)
     assert "tinvest-secret-token" not in text
     assert "telegram-secret-token" not in text
+    assert REQUIRED["TINVEST_ACCOUNT_ID"] not in text
+
+
+def test_repr_does_not_contain_the_configured_account_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = "acc-200199-live"
+    _env(monkeypatch, {"TINVEST_ACCOUNT_ID": account})
+    assert load().tinvest_account_id == account
+    assert account not in repr(load())
 
 
 def test_ssl_tbank_verify_defaults_true_when_unset(
@@ -463,6 +473,7 @@ def test_config_string_form_hides_the_sandbox_token(
     cfg = load()
     text = str(cfg) + repr(cfg)
     assert SANDBOX["TINVEST_TOKEN_SANDBOX"] not in text
+    assert SANDBOX["TINVEST_ACCOUNT_ID_SANDBOX"] not in text
 
 
 def test_get_returns_a_populated_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -547,6 +558,7 @@ def test_get_string_form_contains_neither_token(
     text = str(get()) + repr(get())
     assert "tinvest-secret-token" not in text
     assert "telegram-secret-token" not in text
+    assert REQUIRED["TINVEST_ACCOUNT_ID"] not in text
 
 
 def test_importing_the_module_loads_nothing(tmp_path: Path) -> None:
