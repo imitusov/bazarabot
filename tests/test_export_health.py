@@ -66,7 +66,9 @@ def test_docker_nonzero_is_log_export_failed_not_empty_healthy(
         return SimpleNamespace(returncode=1, stdout="", stderr="compose: failed")
 
     monkeypatch.setattr(mod.subprocess, "run", _run)
-    events, errors, failed = mod.collect_log_events(compose="compose.yml", days=7)
+    events, errors, failed, _unknown, _malformed = mod.collect_log_events(
+        compose="compose.yml", days=7
+    )
     assert failed is True
     assert events == {"log_export_failed": 1}
     assert errors == ["CalledProcessError"]
@@ -82,7 +84,9 @@ def test_docker_stderr_only_is_log_export_failed(
         return SimpleNamespace(returncode=0, stdout="", stderr="permission denied")
 
     monkeypatch.setattr(mod.subprocess, "run", _run)
-    events, _errors, failed = mod.collect_log_events(compose="compose.yml", days=7)
+    events, _errors, failed, _unknown, _malformed = mod.collect_log_events(
+        compose="compose.yml", days=7
+    )
     assert failed is True
     assert events == {"log_export_failed": 1}
 
@@ -96,7 +100,9 @@ def test_empty_stdout_is_log_export_failed(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(mod.subprocess, "run", _run)
-    events, _errors, failed = mod.collect_log_events(compose="compose.yml", days=7)
+    events, _errors, failed, _unknown, _malformed = mod.collect_log_events(
+        compose="compose.yml", days=7
+    )
     assert failed is True
     assert events == {"log_export_failed": 1}
 
@@ -122,7 +128,9 @@ def test_logs_without_heartbeat_fail_collect(
         )
 
     monkeypatch.setattr(mod.subprocess, "run", _run)
-    _events, _errors, failed = mod.collect_log_events(compose="compose.yml", days=7)
+    _events, _errors, failed, _unknown, _malformed = mod.collect_log_events(
+        compose="compose.yml", days=7
+    )
     assert failed is True
 
 
@@ -184,3 +192,66 @@ def test_connects_read_only(tmp_path: Path) -> None:
     with pytest.raises(sqlite3.OperationalError, match="readonly"):
         opened.execute("INSERT INTO schema_version VALUES (8, 'x')")
     opened.close()
+
+
+def test_main_missing_database_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _mod()
+
+    def _run(*_a: object, **_k: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=0, stdout=_line("heartbeat"), stderr=""
+        )
+
+    monkeypatch.setattr(mod.subprocess, "run", _run)
+    out = tmp_path / "health"
+    rc = mod.main(
+        [
+            "--db",
+            str(tmp_path / "missing.db"),
+            "--out",
+            str(out),
+            "--compose",
+            "compose.yml",
+        ]
+    )
+    assert rc == 1
+    data = json.loads((out / "latest.json").read_text())
+    assert data["export_failed"] is True
+
+
+def test_main_malformed_line_is_written_into_health_not_a_clean_bill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 1 and the committed files must name malformed/unknown, not look healthy."""
+    mod = _mod()
+    stdout = (
+        _line("heartbeat")
+        + "\nprefix {not json\n"
+        + _line("session_open")
+        + "\n"
+    )
+
+    def _run(*_a: object, **_k: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", _run)
+    monkeypatch.setattr(
+        mod,
+        "read_database",
+        lambda *_a, **_k: ({"present": True, "positions_open": 0}, []),
+    )
+    out = tmp_path / "health"
+    rc = mod.main(
+        ["--db", str(tmp_path / "x.db"), "--out", str(out), "--compose", "c.yml"]
+    )
+    assert rc == 1
+    data = json.loads((out / "latest.json").read_text())
+    assert data["malformed"] == 1
+    assert data["unknown"] is False
+    assert data["export_failed"] is True
+    assert data["heartbeats"] == 1
+    md = (out / "latest.md").read_text()
+    assert "Malformed JSON lines: 1" in md
+    assert "Log export failed: yes" in md

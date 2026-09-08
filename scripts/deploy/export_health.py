@@ -122,8 +122,8 @@ def parse_logs(raw: str) -> tuple[dict[str, int], list[str], bool, int]:
 
 def collect_log_events(
     compose: str, days: int
-) -> tuple[dict[str, int], list[str], bool]:
-    """Return (events, errors, failed). Docker failure is never an empty healthy set."""
+) -> tuple[dict[str, int], list[str], bool, bool, int]:
+    """Return (events, errors, failed, unknown, malformed)."""
     try:
         proc = subprocess.run(
             [
@@ -141,18 +141,13 @@ def collect_log_events(
             timeout=120,
             check=False,
         )
-    except (
-        OSError,
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
-        subprocess.SubprocessError,
-    ) as exc:
-        return {"log_export_failed": 1}, [type(exc).__name__], True
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"log_export_failed": 1}, [type(exc).__name__], True, False, 0
     if proc.returncode != 0 or not proc.stdout.strip():
-        return {"log_export_failed": 1}, ["CalledProcessError"], True
+        return {"log_export_failed": 1}, ["CalledProcessError"], True, False, 0
     events, errors, unknown, malformed = parse_logs(proc.stdout)
     failed = unknown or malformed > 0 or events.get("heartbeat", 0) < 1
-    return events, errors, failed
+    return events, errors, failed, unknown, malformed
 
 
 def fill_database_health(
@@ -312,13 +307,18 @@ def main(argv: list[str] | None = None) -> int:
         failed = True
         health["database_problems"] = db_problems
 
-    events, errors, log_failed = collect_log_events(args.compose, args.days)
+    events, errors, log_failed, unknown, malformed = collect_log_events(
+        args.compose, args.days
+    )
     if log_failed:
         failed = True
     health["events"] = dict(sorted(events.items(), key=lambda kv: -kv[1]))
     health["recent_errors"] = errors
     health["heartbeats"] = events.get("heartbeat", 0)
     health["expected_heartbeats"] = args.days
+    health["unknown"] = unknown
+    health["malformed"] = malformed
+    health["export_failed"] = failed
 
     digest = pathlib.Path("/opt/zarabot/data/.deployed-digest")
     health["deployed_digest"] = digest.read_text().strip() if digest.exists() else None
@@ -338,6 +338,9 @@ def main(argv: list[str] | None = None) -> int:
         f"Deployed digest: `{health['deployed_digest'] or 'unknown'}`",
         "",
         f"- Heartbeats: {health['heartbeats']} of ~{health['expected_heartbeats']} expected",
+        f"- Log export failed: {'yes' if failed else 'no'}",
+        f"- Unknown catalogue names: {'yes' if unknown else 'no'}",
+        f"- Malformed JSON lines: {malformed}",
         f"- Open positions: {db_info_out.get('positions_open', '?')}"
         f" (adopted: {db_info_out.get('adopted_open', '?')})",
         f"- Closed this window: {db_info_out.get('positions_closed_window', '?')}",
