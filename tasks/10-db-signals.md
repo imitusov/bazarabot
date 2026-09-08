@@ -1,4 +1,4 @@
-# Task 10/40: Implement `zarabot/db/signals.py`
+# Task 10/42: Implement `zarabot/db/signals.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Records every signal with its risk decision, approved or rejected. Rejections ar
 
 ## Build order position
 
-Module **10** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **10** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

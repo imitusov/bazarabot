@@ -1,4 +1,4 @@
-# Task 17/40: Implement `zarabot/strategies/momentum.py`
+# Task 17/42: Implement `zarabot/strategies/momentum.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Momentum breakout entries. Pure function over candles.
 
 ## Build order position
 
-Module **17** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **17** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

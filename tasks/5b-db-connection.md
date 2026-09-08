@@ -1,4 +1,4 @@
-# Task 5b/40: Implement `zarabot/db/connection.py`
+# Task 5b/42: Implement `zarabot/db/connection.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of the process-wide SQLite connection. Opened by app.startup, closed 
 
 ## Build order position
 
-Module **5b** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **5b** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

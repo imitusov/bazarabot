@@ -1,4 +1,4 @@
-# Task 31b/40: Implement `zarabot/ops/commissions.py`
+# Task 31b/42: Implement `zarabot/ops/commissions.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Records commissions the broker reported after the fill and corrects the profit f
 
 ## Build order position
 
-Module **31b** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **31b** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -95,7 +95,17 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-No dedicated test block in §3.2. Derive cases from the contract above: happy path, every early return, every boundary, and every documented exception.
+- A stop-exit row carrying a `broker_order_id` is re-queried through
+  `get_order_state_by_broker_id`, and the commission that comes back is written
+  and the closed position's `realised_pnl` recomputed (proves the money half of
+  #8: the fee on an exchange-fired stop is recoverable at all).
+- A row with no `broker_order_id` is still re-queried by `key` (proves the
+  ordinary path is unchanged).
+- A row whose commission stays unknown past 24 hours alerts on the first run and
+  **not** on the second (proves the alert terminates — it fired on every backfill
+  run, daily and before every weekly report, once per stop-loss exit ever taken).
+- That same row is still re-queried on the second run (proves the terminal state
+  is on the telling, not the trying).
 
 ## Expected output
 

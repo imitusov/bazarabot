@@ -1,4 +1,4 @@
-# Task 6/40: Implement `zarabot/db/positions.py`
+# Task 6/42: Implement `zarabot/db/positions.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of position rows. Positions are never deleted; closing is a state tra
 
 ## Build order position
 
-Module **6** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **6** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

@@ -1,4 +1,4 @@
-# Task 33/40: Implement `zarabot/app/loops.py`
+# Task 33/42: Implement `zarabot/app/loops.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The trading cycle. Exits run before the halt check, which is what implements hal
 
 ## Build order position
 
-Module **33** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **33** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

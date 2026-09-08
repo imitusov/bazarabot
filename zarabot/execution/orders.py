@@ -65,6 +65,23 @@ _LOG = logging.getLogger(__name__)
 _HUNDRED = Decimal("100")
 _STOP_ATTEMPTS = 3
 
+
+def _emit(level: int, event: str, **fields: object) -> None:
+    _LOG.log(level, event, extra={"event": event, **fields})
+
+
+def _emit_filled(order: OrderRecord) -> None:
+    _emit(
+        logging.INFO,
+        "order_filled",
+        key=order.key,
+        ticker=order.ticker,
+        filled_lots=order.filled_lots,
+        filled_price=order.filled_price,
+        commission=order.commission,
+    )
+
+
 # A trade the bot did not decide on is named, not credited. In the same family
 # as `ADOPTED`: the schema accepts it, `telegram.commands` iterates the enabled
 # strategies and so never shows it under one, and `reporter.weekly` groups by
@@ -227,9 +244,18 @@ async def _place_stop(position: Position, instrument: Instrument) -> Position:
             if not stop_id:
                 raise StopOrderRejected("rejected")
             await _write(activate(key, stop_id))
-            return await _write(
+            updated = await _write(
                 set_stop_protection(position.id, StopProtection.EXCHANGE, key)
             )
+            _emit(
+                logging.INFO,
+                "stop_order_placed",
+                position_id=updated.id,
+                ticker=updated.ticker,
+                stop_price=updated.stop_price,
+                stop_order_id=stop_id,
+            )
+            return updated
         except (StopOrderRejected, BrokerUnavailable, BrokerRateLimited) as exc:
             last_error = exc
             try:
@@ -239,6 +265,13 @@ async def _place_stop(position: Position, instrument: Instrument) -> Position:
     await alert(
         f"stop-loss unplaceable for {position.ticker} after {_STOP_ATTEMPTS} attempts"
         f"{': ' + str(last_error) if last_error else ''}"
+    )
+    _emit(
+        logging.ERROR,
+        "stop_protection_degraded",
+        position_id=position.id,
+        ticker=position.ticker,
+        attempts=_STOP_ATTEMPTS,
     )
     current = await get_position(position.id)
     return current if current is not None else position
@@ -265,9 +298,18 @@ async def adopt_existing_stop(position: Position, stop: StopOrderRecord) -> Posi
         if not stop_id:
             raise StopOrderRejected("cannot adopt a stop without a broker identifier")
         await _write(activate(stop.key, stop_id))
-        return await _write(
+        updated = await _write(
             set_stop_protection(position.id, StopProtection.EXCHANGE, stop.key)
         )
+        _emit(
+            logging.INFO,
+            "stop_order_placed",
+            position_id=updated.id,
+            ticker=updated.ticker,
+            stop_price=stop.stop_price,
+            stop_order_id=stop_id,
+        )
+        return updated
 
 
 async def cancel_orphaned_stop(stop: StopOrderRecord) -> None:
@@ -275,6 +317,13 @@ async def cancel_orphaned_stop(stop: StopOrderRecord) -> None:
     async with _locks(stop.ticker):
         if stop.stop_order_id:
             await cancel_stop_order(stop.stop_order_id)
+            _emit(
+                logging.INFO,
+                "stop_order_cancelled",
+                position_id=stop.position_id,
+                stop_order_id=stop.stop_order_id,
+                cause="orphan",
+            )
         with suppress(OrderStateError):
             await settle_stop(stop.key, StopOrderStatus.ORPHANED, clock_now())
         owner = await get_position(stop.position_id)
@@ -289,18 +338,25 @@ async def cancel_orphaned_stop(stop: StopOrderRecord) -> None:
 async def replace_stop(position: Position, instrument: Instrument) -> Position:
     """Cancel the standing stop and place a replacement at the stored price."""
     async with _locks(position.ticker):
-        await _cancel_stop_to_local(position)
+        await _cancel_stop_to_local(position, "replace")
         loaded = await get_position(position.id)
         if loaded is None:
             return position
         return await _place_stop(loaded, instrument)
 
 
-async def _cancel_stop_to_local(position: Position) -> Position:
+async def _cancel_stop_to_local(position: Position, cause: str) -> Position:
     standing = await active_for_position(position.id)
     if standing is not None:
         if standing.stop_order_id:
             await cancel_stop_order(standing.stop_order_id)
+            _emit(
+                logging.INFO,
+                "stop_order_cancelled",
+                position_id=position.id,
+                stop_order_id=standing.stop_order_id,
+                cause=cause,
+            )
         with suppress(OrderStateError):
             await settle_stop(standing.key, StopOrderStatus.CANCELLED, clock_now())
     loaded = await get_position(position.id)
@@ -324,6 +380,16 @@ async def _finish_close(
         close_row(position.id, trigger, order.filled_price, moment, order)
     )
     await start_cooldown(position.ticker, moment)
+    fields: dict[str, object] = {
+        "position_id": closed.id,
+        "ticker": closed.ticker,
+        "exit_trigger": trigger.value,
+        "exit_price": order.filled_price,
+        "realised_pnl": closed.realised_pnl,
+    }
+    if trigger is ExitTrigger.STOP_LOSS:
+        fields["gap_vs_stop"] = order.filled_price - position.stop_price
+    _emit(logging.INFO, "position_closed", **fields)
     return closed
 
 
@@ -353,14 +419,39 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
             await _write(
                 settle_order(key, OrderStatus.REJECTED, 0, None, None, "max lots is 0")
             )
+            _emit(
+                logging.ERROR,
+                "order_rejected",
+                key=key,
+                ticker=signal.ticker,
+                intent="ENTRY",
+                broker_reason="max lots is 0",
+            )
             raise OrderRejected("max lots is 0")
         key = str(uuid4())
         await _write(record_submitting(key, signal.ticker, Side.BUY, lots, "ENTRY"))
+        _emit(
+            logging.INFO,
+            "order_submitting",
+            key=key,
+            ticker=signal.ticker,
+            side=Side.BUY.value,
+            intent="ENTRY",
+            lots=lots,
+        )
         try:
             posted = await post_market_order(key, instrument.figi, Side.BUY, lots)
         except OrderRejected as exc:
             await _write(
                 settle_order(key, OrderStatus.REJECTED, 0, None, None, exc.reason)
+            )
+            _emit(
+                logging.ERROR,
+                "order_rejected",
+                key=key,
+                ticker=signal.ticker,
+                intent="ENTRY",
+                broker_reason=exc.reason,
             )
             await alert(f"entry rejected for {signal.ticker}: {exc.reason}")
             raise
@@ -376,6 +467,17 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
             if got <= 0 or settled.filled_price is None:
                 raise OrderRejected("entry cancelled with nothing filled")
             await alert(f"partial entry fill for {signal.ticker}: {got} of {lots}")
+            if got < lots:
+                _emit(
+                    logging.WARNING,
+                    "partial_fill",
+                    key=key,
+                    ticker=signal.ticker,
+                    intent="ENTRY",
+                    requested_lots=lots,
+                    filled_lots=got,
+                )
+            _emit_filled(settled)
             return await _open_from_fill(signal, settled, instrument)
         # A SUBMITTED order that has filled nothing is left alone. Nothing is
         # held, so nothing is unprotected, and cancelling a market order that is
@@ -396,6 +498,7 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
                 posted.broker_reason,
             )
         )
+        _emit_filled(settled)
         return await _open_from_fill(signal, settled, instrument)
 
 
@@ -407,6 +510,17 @@ async def _open_from_fill(
     stop, target = _stop_and_target(order.filled_price)
     position = await _write(
         open_row(signal, order, instrument, stop, target, clock_now())
+    )
+    _emit(
+        logging.INFO,
+        "position_opened",
+        position_id=position.id,
+        ticker=position.ticker,
+        strategy=signal.strategy,
+        lots=position.lots,
+        entry_price=position.entry_price,
+        stop_price=position.stop_price,
+        target_price=position.target_price,
     )
     return await _place_stop(position, instrument)
 
@@ -423,7 +537,7 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
         ):
             raise ValueError("STOP_LOSS on EXCHANGE is closed from the exchange fill")
         if current.stop_protection is StopProtection.EXCHANGE:
-            current = await _cancel_stop_to_local(current)
+            current = await _cancel_stop_to_local(current, "exit")
         # Exactly one sell order, for the whole position. Until v1.34 this
         # looped until flat and then booked the close from the last slice
         # alone, dropping every earlier slice's price and commission from
@@ -435,22 +549,65 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
                 key, current.ticker, Side.SELL, current.lots, "EXIT", trigger
             )
         )
+        _emit(
+            logging.INFO,
+            "order_submitting",
+            key=key,
+            ticker=current.ticker,
+            side=Side.SELL.value,
+            intent="EXIT",
+            lots=current.lots,
+        )
         try:
             posted = await post_market_order(key, current.figi, Side.SELL, current.lots)
         except OrderRejected as exc:
             await _write(
                 settle_order(key, OrderStatus.REJECTED, 0, None, None, exc.reason)
             )
+            _emit(
+                logging.ERROR,
+                "order_rejected",
+                key=key,
+                ticker=current.ticker,
+                intent="EXIT",
+                broker_reason=exc.reason,
+            )
+            _emit(
+                logging.ERROR,
+                "exit_failed",
+                position_id=current.id,
+                ticker=current.ticker,
+                attempt=1,
+                error="OrderRejected",
+            )
             await alert(f"exit rejected for {current.ticker}: {exc.reason}")
             raise ExitFailed(exc.reason) from exc
         except (BrokerUnavailable, BrokerRateLimited) as exc:
+            _emit(
+                logging.ERROR,
+                "exit_failed",
+                position_id=current.id,
+                ticker=current.ticker,
+                attempt=1,
+                error=type(exc).__name__,
+            )
             await alert(f"exit unreachable for {current.ticker}: {exc}")
             raise ExitFailed(str(exc)) from exc
         filled = posted.filled_lots if posted.filled_lots is not None else 0
         price = posted.filled_price
         if posted.status is not OrderStatus.FILLED or filled <= 0 or price is None:
             # The remainder of an exit is never abandoned: the caller retries on
-            # the next cycle under rule 4.
+            # the next cycle under rule 4. Do not emit `partial_fill` from this
+            # unsettled response — the figure is stale (rule 33); recovery
+            # emits after settle.
+            _emit(
+                logging.ERROR,
+                "exit_failed",
+                position_id=current.id,
+                ticker=current.ticker,
+                attempt=1,
+                error="unknown_outcome",
+            )
             await alert(f"exit outcome unknown for {current.ticker}")
             raise ExitFailed("exit outcome unknown")
         order = await _write(
@@ -463,6 +620,7 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
                 posted.broker_reason,
             )
         )
+        _emit_filled(order)
         return await _finish_close(current, order, trigger, clock_now())
 
 
@@ -517,6 +675,7 @@ async def close_executed_stop(position: Position, fill: OrderRecord) -> Position
             )
         )
         await alert(f"stop executed for {current.ticker}")
+        _emit_filled(order)
         return await _finish_close(current, order, ExitTrigger.STOP_LOSS, clock_now())
 
 
@@ -527,7 +686,27 @@ async def resolve_unfinished(now: datetime) -> list[OrderRecord]:
     for order in await list_unresolved_orders():
         async with _locks(order.ticker):
             settled = await _resolve_one(order, now)
-            if settled is not None:
+            if settled is None:
+                _emit(
+                    logging.WARNING,
+                    "order_unresolved",
+                    key=order.key,
+                    ticker=order.ticker,
+                    age_seconds=int((now - order.created_at).total_seconds()),
+                )
+            else:
+                source = (
+                    "never_placed"
+                    if settled.broker_reason == "never placed"
+                    else "query"
+                )
+                _emit(
+                    logging.INFO,
+                    "order_resolved",
+                    key=settled.key,
+                    resolved_status=settled.status.value,
+                    source=source,
+                )
                 resolved.append(settled)
     return resolved
 
@@ -553,6 +732,8 @@ async def _resolve_one(order: OrderRecord, now: datetime) -> OrderRecord | None:
                 state.broker_reason,
             )
         )
+        if filled > 0 and settled.filled_price is not None:
+            _emit_filled(settled)
         await _apply_discovered_fill(settled, now)
         return settled
     if state.status in {OrderStatus.REJECTED, OrderStatus.CANCELLED}:
@@ -577,6 +758,19 @@ async def _resolve_one(order: OrderRecord, now: datetime) -> OrderRecord | None:
         resolved = await _resolve_partial_entry(order.key)
         if resolved is None:
             return None
+        got = resolved.filled_lots if resolved.filled_lots is not None else 0
+        if 0 < got < order.lots:
+            _emit(
+                logging.WARNING,
+                "partial_fill",
+                key=order.key,
+                ticker=order.ticker,
+                intent="ENTRY",
+                requested_lots=order.lots,
+                filled_lots=got,
+            )
+        if got > 0 and resolved.filled_price is not None:
+            _emit_filled(resolved)
         await _apply_discovered_fill(resolved, now)
         return resolved
     return None
@@ -610,11 +804,20 @@ async def _apply_terminal_exit(order: OrderRecord, now: datetime) -> None:
                 f"exit order {order.key} has no trigger; leaving {order.ticker} open"
             )
             return
-        await _cancel_stop_to_local(position)
+        await _cancel_stop_to_local(position, "exit")
         await _finish_close(position, order, order.exit_trigger, now)
         return
     remaining = position.lots - filled
     await _write(update_lots(position.id, remaining))
+    _emit(
+        logging.WARNING,
+        "partial_fill",
+        key=order.key,
+        ticker=position.ticker,
+        intent="EXIT",
+        requested_lots=order.lots,
+        filled_lots=filled,
+    )
     await alert(
         f"partial exit for {position.ticker}: sold {filled} at "
         f"{order.filled_price}, {remaining} lots still open"
@@ -632,6 +835,17 @@ async def _apply_discovered_fill(order: OrderRecord, now: datetime) -> None:
         signal = await _signal_for_recovered_entry(order, now)
         stop, target = _stop_and_target(order.filled_price)
         position = await _write(open_row(signal, order, instrument, stop, target, now))
+        _emit(
+            logging.INFO,
+            "position_opened",
+            position_id=position.id,
+            ticker=position.ticker,
+            strategy=signal.strategy,
+            lots=position.lots,
+            entry_price=position.entry_price,
+            stop_price=position.stop_price,
+            target_price=position.target_price,
+        )
         await _place_stop(position, instrument)
         return
     if order.intent == "EXIT" and order.side is Side.SELL:
@@ -643,5 +857,5 @@ async def _apply_discovered_fill(order: OrderRecord, now: datetime) -> None:
                 f"exit order {order.key} has no trigger; leaving {order.ticker} open"
             )
             return
-        await _cancel_stop_to_local(open_pos)
+        await _cancel_stop_to_local(open_pos, "exit")
         await _finish_close(open_pos, order, order.exit_trigger, now)
