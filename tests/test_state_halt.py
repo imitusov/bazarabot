@@ -351,9 +351,15 @@ async def test_weaker_rehalt_emits_no_halt_triggered(
 
 
 async def test_escalation_emits_halt_triggered_with_new_reason_and_pct(
-    db: Path, caplog: pytest.LogCaptureFixture
+    db: Path, alerts: list[str], caplog: pytest.LogCaptureFixture
 ) -> None:
-    """v1.61: upgrade is persist-or-upgrade; #9 is this path."""
+    """v1.61: upgrade is persist-or-upgrade; #9 is this path.
+
+    Takes `alerts` because the escalation branch calls `alert()` one line after
+    the emit. The fixture is not autouse, so without it this case runs the real
+    `telegram.notifier` — rule 13 would swallow the failure and the test would
+    still pass, which is exactly how a real send gets into a suite unnoticed.
+    """
 
     await halt(HaltReason.MANUAL, "owner pressed halt", NOW)
     caplog.clear()
