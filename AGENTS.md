@@ -68,7 +68,10 @@ Never write implementation before tests. Never declare done with failing tests.
 
 - Match contract signatures exactly — names, parameters, return types,
   including `| None`.
-- Handle every failure per the spec's numbered error rules (1–29).
+- Handle every failure per the spec's numbered error rules (1–38, plus 9b).
+  Rules 30–38 are the ones incidents produced — shared-connection ownership,
+  foreign holdings, recorded prices, partial fills, the degraded-state latch.
+  Skipping them is how each of those incidents happened the first time.
 - Release locks through an async context manager guaranteeing release on
   success, on exception, and on cancellation.
 - Keep `strategies.*`, `risk.gate`, `risk.sizing` and `lifecycle.exits` pure —

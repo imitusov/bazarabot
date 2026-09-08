@@ -1,16 +1,32 @@
 #!/usr/bin/env python3
 """Fail when the documents and the code have drifted apart.
 
-Two checks that are cheap and catch a whole class of decay:
+Five checks that are cheap and catch a whole class of decay:
   1. Every module in dependency-order.md has an interfaces.md entry. A module
      built without one is invisible to every later task.
   2. Every task file references a module that exists in dependency-order.md.
+  3. Every function specified in spec §4 has the same signature in
+     interfaces.md - parameters, defaults and return type.
+  4. Every error rule in spec §8 is claimed by a named module in §4.
+  5. Every table in spec §5 has exactly one writing module, and is named in
+     the contract of the module that owns it.
+
+Checks 3-5 exist because the spec stores one obligation in two normative
+places - §8 rules and §4 contracts, §4 signatures and interfaces.md - and
+duplication without a consistency check drifts apart on the first amendment.
+That is what the 2026-09-07 audit found thirty times over.
+
+Each of 3-5 carries an allowlist of the violations that existed when the
+check was written, every entry naming the issue that will delete it. The
+allowlist is an inventory, not an exemption: these checks cannot find the
+existing violations, only stop new ones joining them.
 
 The third check - that tasks/ regenerates identically from the spec - runs in
 the workflow as `make_tasks.py && git diff --exit-code tasks/`, because it needs
 a clean tree rather than a parser.
 """
 
+import ast
 import pathlib
 import re
 import sys
@@ -84,7 +100,227 @@ if unimplemented:
         print(f"  {mod}.{fn}{where}")
     sys.exit(1)
 
+
+# ---------------------------------------------------------------- gate 1
+# Signature drift. `AGENTS.md` requires contract signatures to match exactly,
+# "including `| None`" — but nothing compared them, so an amendment could add
+# a parameter to §4 and never reach the code. The check above only asks
+# whether a function of that NAME is recorded.
+
+SIG = re.compile(r"^\*\*`(?:async\s+)?(\w+)\((.*?)\)\s*(?:→|->)\s*(.+?)`\*\*")
+
+
+def signatures(text: str) -> dict[str, tuple[str, str]]:
+    """Map function name to (parameters, return type), whitespace-normalised."""
+    found: dict[str, tuple[str, str]] = {}
+    for line in text.splitlines():
+        m = SIG.match(line.strip())
+        if m:
+            params = re.sub(r"\s+", " ", m.group(2)).strip()
+            ret = re.sub(r"\s+", " ", m.group(3)).strip()
+            found[m.group(1)] = (params, ret)
+    return found
+
+
+def sections(text: str, pattern: str) -> dict[str, str]:
+    """Split a document into {module: body} on a heading regex."""
+    out: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for line in text.splitlines():
+        head = re.match(pattern, line)
+        if head:
+            if current:
+                out[current] = "\n".join(buf)
+            paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
+            zar = [q.replace("/", ".") for q in paths if q.startswith("zarabot/")]
+            current = zar[0] if zar else head.group(1)
+            buf = []
+            continue
+        if current:
+            buf.append(line)
+    if current:
+        out[current] = "\n".join(buf)
+    return out
+
+
+# Divergences present when this gate was written, each keyed on the signature
+# `interfaces.md` actually records. Keying on (module, function) alone would
+# exempt that name from every FUTURE divergence too, not just the recorded one
+# — and `state.halt.halt` is the most-amended signature in this project.
+# Delete an entry with its issue.
+KNOWN_SIGNATURE_DRIFT: dict[tuple[str, str], tuple[str, str]] = {
+    # 98 — spec has daily_loss_pct, code does not
+    ("zarabot.state.halt", "halt"): (
+        "reason: HaltReason, detail: str, at: datetime",
+        "None",
+    ),
+    # 116 — Connection vs aiosqlite.Connection
+    ("zarabot.db.migrations", "apply"): ("conn: aiosqlite.Connection", "int"),
+    # 116 — return elided as list[...]
+    ("zarabot.db.signals", "list_for_period"): (
+        "start: date, end: date",
+        "list[tuple[Signal, RiskDecision]]",
+    ),
+    # 116 — protocol self
+    ("zarabot.strategies.base", "evaluate"): (
+        "self, ticker: str, candles: list[Candle], now: datetime",
+        "Signal | None",
+    ),
+    # 116 — ctx untyped in the spec
+    ("zarabot.app.loops", "run"): ("ctx: AppContext", "None"),
+    # 116 — ctx, signal untyped in the spec
+    ("zarabot.app.shutdown", "shutdown"): ("ctx: AppContext, signal: int", "None"),
+}
+
+spec_mods = sections(section, r"^### (.+)")
+iface_mods = sections(iface, r"^## `([\w\.]+)`")
+
+drift = []
+still_diverging = set()
+for mod, body in spec_mods.items():
+    if mod not in iface_mods:
+        continue
+    specified = signatures(body)
+    recorded = signatures(iface_mods[mod])
+    for fn, want in specified.items():
+        got = recorded.get(fn)
+        if got is None or got == want:
+            continue
+        if KNOWN_SIGNATURE_DRIFT.get((mod, fn)) == got:
+            still_diverging.add((mod, fn))
+        else:
+            drift.append((mod, fn, want, got))
+
+# An entry whose recorded signature no longer diverges — because it was fixed,
+# because the function is gone, or because it moved on to a DIFFERENT
+# divergence — is an exemption nobody voted for. The third case is why the
+# allowlist stores the signature rather than just the name.
+stale_drift = sorted(set(KNOWN_SIGNATURE_DRIFT) - still_diverging)
+
+if drift or stale_drift:
+    if drift:
+        print("FAIL signatures differ between spec §4 and interfaces.md")
+        for mod, fn, want, got in drift:
+            print(f"  {mod}.{fn}")
+            print(f"    spec       {fn}({want[0]}) → {want[1]}")
+            print(f"    interfaces {fn}({got[0]}) → {got[1]}")
+    if stale_drift:
+        print("FAIL KNOWN_SIGNATURE_DRIFT entries no longer describe a divergence")
+        for mod, fn in stale_drift:
+            print(f"  {mod}.{fn}")
+    sys.exit(1)
+
+# ---------------------------------------------------------------- gate 2
+# Rule ownership. §7.1 already requires every log event to be "owed by exactly
+# one module, named in the table". §8 never got the same treatment, so a rule
+# could be superseded by a §4 amendment and left standing — which is how rule 6
+# still orders the adoption that rule 32 forbids (#91).
+
+s8 = spec[spec.index("## 8. Error handling rules") : spec.index("## 9. Dependencies")]
+rules = re.findall(r"^(\d+[a-z]?)\. \*\*", s8, re.M)
+claims = {m.group(1) for m in re.finditer(r"rules?\s+(\d+[a-z]?)", section)}
+
+# Unclaimed when this gate was written (#115). Delete an entry when a §4
+# contract takes the rule, or when the rule itself goes.
+KNOWN_UNCLAIMED_RULES = {
+    "2", "3", "5", "6", "7", "8", "12", "13", "14", "16", "17", "18", "20",
+    "22", "24", "25", "26", "27", "28", "29", "30", "34", "37",
+}
+
+orphans = [r for r in rules if r not in claims and r not in KNOWN_UNCLAIMED_RULES]
+stale = sorted(KNOWN_UNCLAIMED_RULES - set(rules))
+if orphans or stale:
+    if orphans:
+        print("FAIL error rules claimed by no module contract in §4")
+        for r in orphans:
+            print(f"  rule {r}")
+    if stale:
+        print("FAIL KNOWN_UNCLAIMED_RULES names rules that no longer exist")
+        for r in stale:
+            print(f"  rule {r}")
+    sys.exit(1)
+
+# ---------------------------------------------------------------- gate 3
+# Table ownership. `AGENTS.md`: "Never write to another module's tables.
+# Ownership is listed in the spec." Nothing checked that a table HAS an owner,
+# so `instruments` was specified, created by a migration, referenced by two
+# error rules, and written by nothing at all (#102).
+
+s5 = spec[spec.index("## 5. Database schema") : spec.index("## 6. Migrations")]
+tables = re.findall(r"^### `(\w+)`", s5, re.M)
+
+# Tables whose ownership the spec does not state, or that nothing writes (#102).
+KNOWN_UNOWNED_TABLES = {
+    "instruments",  # no writer anywhere in zarabot/
+    "schema_version",  # §4 says "schema creation", names no table
+    "daily_snapshots",  # db.signals/snapshots section has no sole-owner line
+    "halt_state",  # §4 says "the halt flag", names no table
+    "reconciliations",  # owner stated only in interfaces.md
+}
+
+WRITE = re.compile(r"(?:insert\s+into|update|delete\s+from)\s+(\w+)", re.I)
+
+
+def sql_literals(src: pathlib.Path) -> list[str]:
+    """Every string constant in the file, and nothing else.
+
+    Scanning the raw text matched English: the comment "we update positions
+    only through db.positions" made `risk.gate` a writer of `positions` and
+    failed this gate with the most alarming message it can print, from a
+    sentence saying the opposite. `update` is a common verb and needs no
+    INTO/FROM to anchor it, so only string literals can carry SQL.
+    """
+    tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+
+
+writers: dict[str, set[str]] = {t: set() for t in tables}
+for src in pathlib.Path("zarabot").rglob("*.py"):
+    for literal in sql_literals(src):
+        for table in WRITE.findall(literal):
+            if table in writers:
+                writers[table].add(str(src))
+
+# Same reason as KNOWN_SIGNATURE_DRIFT: an entry naming a table that no longer
+# exists in §5, or one that has since acquired a writer, is an exemption
+# nobody voted for. #102 deletes `instruments`; that must not pass in silence.
+stale_tables = sorted(
+    (KNOWN_UNOWNED_TABLES - set(tables))
+    | {t for t in KNOWN_UNOWNED_TABLES if writers.get(t) and f"`{t}`" in section}
+)
+
+unowned, shared = [], []
+for table in tables:
+    who = writers[table]
+    if not who and table not in KNOWN_UNOWNED_TABLES:
+        unowned.append(table)
+    elif len(who) > 1:
+        shared.append((table, sorted(who)))
+    elif f"`{table}`" not in section and table not in KNOWN_UNOWNED_TABLES:
+        unowned.append(table)
+
+if unowned or shared or stale_tables:
+    if stale_tables:
+        print("FAIL KNOWN_UNOWNED_TABLES names tables that are gone or now owned")
+        for table in stale_tables:
+            print(f"  {table}")
+    if unowned:
+        print("FAIL §5 tables with no owning module named in §4")
+        for table in unowned:
+            print(f"  {table}")
+    if shared:
+        print("FAIL §5 tables written by more than one module")
+        for table, who in shared:
+            print(f"  {table}: {', '.join(who)}")
+    sys.exit(1)
+
 print(
     f"PASS docs consistent ({len(modules)} modules recorded, "
-    "every specified function implemented)"
+    f"every specified function implemented, {len(rules)} error rules, "
+    f"{len(tables)} tables owned)"
 )
