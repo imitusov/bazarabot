@@ -18,7 +18,7 @@ from zarabot.db.positions import list_closed, list_open
 from zarabot.db.snapshots import list_for_period
 from zarabot.market.session import current_session, is_open, next_open
 from zarabot.models import HaltReason, Position
-from zarabot.pnl import benchmark_return, realised, unrealised
+from zarabot.pnl import benchmark_return, daily_loss_pct, realised, unrealised
 from zarabot.state.halt import current
 from zarabot.state.halt import halt as persist_halt
 from zarabot.state.halt import resume as persist_resume
@@ -102,12 +102,19 @@ def _join_truncated(header: str, entries: list[str]) -> str:
     return header + "\n".join(kept)
 
 
-def _authorised(update: Update) -> bool:
+def _authorised(update: Update, command: str) -> bool:
     chat = update.effective_chat
     chat_id = chat.id if chat is not None else None
     if chat_id == config.get().telegram_chat_id:
         return True
-    _LOG.info("unauthorised telegram command from chat %s", chat_id)
+    _LOG.info(
+        "unauthorised_command",
+        extra={
+            "event": "unauthorised_command",
+            "chat_id": chat_id,
+            "command": command,
+        },
+    )
     return False
 
 
@@ -302,38 +309,44 @@ def _help_text() -> str:
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "status"):
         return
     await _reply(update, await _status_text())
 
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "positions"):
         return
     await _reply(update, await _positions_text())
 
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "history"):
         return
     await _reply(update, await _history_text())
 
 
 async def pnl(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "pnl"):
         return
     await _reply(update, await _pnl_text())
 
 
 async def halt(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "halt"):
         return
-    await persist_halt(HaltReason.MANUAL, "manual halt via /halt", now())
+    at = now()
+    await persist_halt(
+        HaltReason.MANUAL,
+        "manual halt via /halt",
+        at,
+        daily_loss_pct=await daily_loss_pct(at),
+    )
     await _reply(update, "Entries halted. Open positions are left untouched.")
 
 
 async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "resume"):
         return
     if not await persist_resume("telegram", now()):
         await _reply(update, _NOTHING_HALTED)
@@ -342,19 +355,19 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> N
 
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "strategies"):
         return
     await _reply(update, await _strategies_text())
 
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "report"):
         return
     await _reply(update, await _report_text())
 
 
 async def help(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update):
+    if not _authorised(update, "help"):
         return
     await _reply(update, _help_text())
 
