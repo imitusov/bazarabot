@@ -564,20 +564,30 @@ async def test_partial_entry_cancelled_with_nothing_filled_opens_nothing(
     assert await list_open() == []
 
 
-async def test_partial_exit_submits_one_order_and_raises(env: _Broker) -> None:
+async def test_partial_exit_submits_one_order_and_raises(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
     """No slicing loop: one sell, and a partial settles nothing (#10)."""
     position = await open_position(_signal(), 2, _instrument())
     env.exit_partial_lots = 1
-    with pytest.raises(ExitFailed):
+    with (
+        caplog.at_level(logging.ERROR, logger="zarabot.execution.orders"),
+        pytest.raises(ExitFailed),
+    ):
         await close_position(position, ExitTrigger.TAKE_PROFIT)
     assert env.calls.count("post:SELL") == 1
+    assert [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "partial_fill"
+    ] == []
 
 
-async def _unresolved_exit(lots: int) -> str:
+async def _unresolved_exit(lots: int, key: str = "exit-partial-key-00000000001") -> str:
     from zarabot.db.orders import record_submitting
 
     order = await record_submitting(
-        "exit-partial-key-00000000001",
+        key,
         "SBER",
         Side.SELL,
         lots,
@@ -657,6 +667,29 @@ async def test_terminal_partial_exit_emits_partial_fill_from_the_order(
     assert events[0].requested_lots == 5
     assert events[0].filled_lots == 2
     del position
+
+
+async def test_second_partial_exit_requested_lots_is_the_order(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    await open_position(_signal(), 5, _instrument())
+    key1 = await _unresolved_exit(5, key="exit-partial-key-00000000001")
+    env.state[key1] = _broker_exit(key1, 5, 2, OrderStatus.CANCELLED)
+    await resolve_unfinished(NOW)
+    key2 = await _unresolved_exit(3, key="exit-partial-key-00000000002")
+    env.state[key2] = _broker_exit(key2, 3, 1, OrderStatus.CANCELLED)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="zarabot.execution.orders"):
+        await resolve_unfinished(NOW)
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "partial_fill"
+    ]
+    assert len(events) == 1
+    assert events[0].key == key2
+    assert events[0].requested_lots == 3
+    assert events[0].filled_lots == 1
 
 
 async def test_terminal_partial_exit_records_the_adjustment_not_a_close(
@@ -1142,7 +1175,9 @@ async def test_resolve_unknown_status_left_unresolved(env: _Broker) -> None:
     assert await list_unresolved()
 
 
-async def test_resolve_zero_fill_does_not_open(env: _Broker) -> None:
+async def test_resolve_zero_fill_does_not_open(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
     env.timeout = True
     with pytest.raises(BrokerUnavailable):
         await open_position(_signal(), 2, _instrument())
@@ -1162,7 +1197,11 @@ async def test_resolve_zero_fill_does_not_open(env: _Broker) -> None:
         created_at=NOW,
         settled_at=NOW,
     )
-    await resolve_unfinished(NOW)
+    with caplog.at_level(logging.INFO, logger="zarabot.execution.orders"):
+        await resolve_unfinished(NOW)
+    assert not any(
+        getattr(record, "event", None) == "order_filled" for record in caplog.records
+    )
     assert await list_open() == []
 
 

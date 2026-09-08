@@ -717,7 +717,8 @@ async def _resolve_one(order: OrderRecord, now: datetime) -> OrderRecord | None:
                 state.broker_reason,
             )
         )
-        _emit_filled(settled)
+        if filled > 0 and settled.filled_price is not None:
+            _emit_filled(settled)
         await _apply_discovered_fill(settled, now)
         return settled
     if state.status in {OrderStatus.REJECTED, OrderStatus.CANCELLED}:
