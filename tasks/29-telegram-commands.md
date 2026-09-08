@@ -66,10 +66,13 @@ One handler per command in the brief's command table.
   many entries were omitted.
 - No handler mutates a risk limit.
 - `/halt` and `/resume` delegate to `state.halt` and to nothing else.
-- **`/halt` passes `daily_loss_pct` (v1.69).** It calls
-  `pnl.daily_loss_pct(clock.now())` and hands the result to `state.halt.halt`,
-  so a manual halt's record still carries the day's position. This module
-  already imports `zarabot.pnl`, so it adds no dependency.
+- **`/halt` passes no `daily_loss_pct` (v1.71, reversing v1.69).** It calls
+  `state.halt.halt(reason, detail, at)` and nothing else. The reasoning is under
+  `state.halt`'s heading with the other two call sites. Note that v1.69's
+  obligation contradicted the line directly above it — `/halt` cannot delegate
+  "to `state.halt` and to nothing else" while calling `pnl` — and that line is
+  correct as written; it is v1.69 that was wrong. `/status` already reports the
+  day's position on demand, so the figure remains one command away.
 
 ## Relevant error handling rules
 
@@ -95,6 +98,12 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A response exceeding the message limit is truncated with an explicit note
   naming how many entries were omitted (proves the truncation contract).
 - No command mutates a risk limit (proves the brief's prohibition).
+- **`/halt` halts with the broker unreachable** — every `broker.client` call
+  raising `BrokerUnavailable`, the halt is still persisted and the reply still
+  sent (v1.71; proves the kill switch does not depend on the system it stops
+  trading against. Written as a caller-shaped test: drive `/halt`, do not stub
+  `state.halt`. A test that stubbed the halt would pass with the broker call
+  still in place).
 
 ## Expected output
 

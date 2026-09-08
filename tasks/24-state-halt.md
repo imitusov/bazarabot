@@ -69,9 +69,20 @@ obligation.
     `loss = await daily_loss_pct(moment)` as a `Decimal` in scope, one line
     above the `halt` call. This is the `DAILY_LOSS_LIMIT` halt and the only site
     where the figure is both meaningful and free.
-  - `telegram.commands` `/halt` **passes `await pnl.daily_loss_pct(now())`.**
-    The module already imports `zarabot.pnl`, so this adds no dependency. A
-    manual halt is worth annotating with the day's position.
+  - `telegram.commands` `/halt` **passes nothing, deliberately (v1.71).** v1.69
+    told it to pass `await pnl.daily_loss_pct(now())`, reasoning that the module
+    already imports `zarabot.pnl` so this "adds no dependency". That is true of
+    the import graph and false of the runtime: `pnl.daily_loss_pct` ends in
+    `bot_equity`, which calls `get_last_price` **once per open position**, and
+    alerts through `telegram.notifier` when the day has no opening snapshot. The
+    argument is evaluated before the call, so a broker that is unavailable, rate
+    limited, or rejecting the token means the halt is **never persisted** and the
+    operator gets no halt and no reply.
+    `/halt` is the manual kill switch. The operator reaches for it precisely when
+    something is wrong, and "the broker is misbehaving" is one of the commonest
+    such moments. A control that stops entries must not depend on the system it
+    exists to stop trading against. The annotation was worth having; it was not
+    worth this.
   - `execution.orders._halt_on_db_failure` **passes nothing, deliberately.** It
     halts *because a database write just failed*, and `pnl.daily_loss_pct` reads
     that same database. Calling it there would query the thing that is broken,
