@@ -878,6 +878,9 @@ prices are missing, never zero-filled.
 Owns order submission, per-ticker and global submission locks, crash recovery,
 and stop-order remedies. Write-then-send. Never resubmits an entry. Never
 passes `confirm_margin_trade=True`. Alerts go through `telegram.notifier.alert`.
+Submission locks are created for the running event loop and replaced when
+that loop changes, so a second `asyncio.run` in the same process does not
+raise `RuntimeError` after contention (#50).
 
 **`ExitFailed`**
 Raised when an exit is rejected or the broker is unreachable. Caller retries.
