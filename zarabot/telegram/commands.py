@@ -102,7 +102,16 @@ def _join_truncated(header: str, entries: list[str]) -> str:
     return header + "\n".join(kept)
 
 
-def _authorised(update: Update, command: str) -> bool:
+def _command_name(update: Update) -> str:
+    message = update.message
+    text = getattr(message, "text", None) if message is not None else None
+    if not text:
+        return "unknown"
+    token = str(text).strip().split()[0]
+    return token.lstrip("/").split("@")[0]
+
+
+def _authorised(update: Update) -> bool:
     chat = update.effective_chat
     chat_id = chat.id if chat is not None else None
     if chat_id == config.get().telegram_chat_id:
@@ -112,7 +121,7 @@ def _authorised(update: Update, command: str) -> bool:
         extra={
             "event": "unauthorised_command",
             "chat_id": chat_id,
-            "command": command,
+            "command": _command_name(update),
         },
     )
     return False
@@ -309,31 +318,31 @@ def _help_text() -> str:
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "status"):
+    if not _authorised(update):
         return
     await _reply(update, await _status_text())
 
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "positions"):
+    if not _authorised(update):
         return
     await _reply(update, await _positions_text())
 
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "history"):
+    if not _authorised(update):
         return
     await _reply(update, await _history_text())
 
 
 async def pnl(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "pnl"):
+    if not _authorised(update):
         return
     await _reply(update, await _pnl_text())
 
 
 async def halt(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "halt"):
+    if not _authorised(update):
         return
     at = now()
     await persist_halt(
@@ -346,7 +355,7 @@ async def halt(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> Non
 
 
 async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "resume"):
+    if not _authorised(update):
         return
     if not await persist_resume("telegram", now()):
         await _reply(update, _NOTHING_HALTED)
@@ -355,19 +364,19 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> N
 
 
 async def strategies(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "strategies"):
+    if not _authorised(update):
         return
     await _reply(update, await _strategies_text())
 
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "report"):
+    if not _authorised(update):
         return
     await _reply(update, await _report_text())
 
 
 async def help(update: Update, context: ContextTypes.DEFAULT_TYPE | None) -> None:
-    if not _authorised(update, "help"):
+    if not _authorised(update):
         return
     await _reply(update, _help_text())
 

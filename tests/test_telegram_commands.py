@@ -54,9 +54,10 @@ class _FakeChat:
 
 
 class _FakeMessage:
-    def __init__(self) -> None:
+    def __init__(self, text: str = "") -> None:
         self.replies: list[str] = []
         self.fail_times = 0
+        self.text = text
 
     async def reply_text(self, text: str, **kwargs: object) -> None:
         if self.fail_times > 0:
@@ -66,9 +67,9 @@ class _FakeMessage:
 
 
 class _FakeUpdate:
-    def __init__(self, chat_id: int) -> None:
+    def __init__(self, chat_id: int, command: str = "") -> None:
         self.effective_chat = _FakeChat(chat_id)
-        self.message = _FakeMessage()
+        self.message = _FakeMessage(f"/{command}" if command else "")
 
 
 def _position(**overrides: object) -> Position:
@@ -166,7 +167,7 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 async def _reply(handler: Any, chat_id: int = AUTH_CHAT) -> str:
-    update = _FakeUpdate(chat_id)
+    update = _FakeUpdate(chat_id, handler.__name__)
     await handler(update, None)
     assert update.message.replies
     return update.message.replies[-1]
@@ -286,7 +287,6 @@ async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
     env: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """v1.61: the security boundary is a structured event, not free text."""
-    update = _FakeUpdate(99)
     handlers = (
         status,
         positions,
@@ -309,10 +309,13 @@ async def test_unauthorised_chat_gets_no_reply_no_state_change_and_is_logged(
         "report",
         "help",
     )
+    replies: list[str] = []
     with caplog.at_level(logging.INFO, logger="zarabot.telegram.commands"):
-        for handler in handlers:
-            await handler(update, None)
-    assert update.message.replies == []
+        for handler, command in zip(handlers, commands, strict=True):
+            probe = _FakeUpdate(99, command)
+            await handler(probe, None)
+            replies.extend(probe.message.replies)
+    assert replies == []
     assert await is_halted() is False
     events = [
         record

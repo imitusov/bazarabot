@@ -1528,15 +1528,24 @@ async def test_run_starts_telegram_listener_and_halt_stops_entries(
     async def _is_halted() -> bool:
         return halted_flag
 
-    async def _persist(reason: HaltReason, detail: str, at: datetime) -> None:
+    async def _persist(
+        reason: HaltReason,
+        detail: str,
+        at: datetime,
+        daily_loss_pct: Decimal | None = None,
+    ) -> None:
         nonlocal halted_flag
         halted_flag = True
+
+    async def _loss(_at: datetime) -> Decimal:
+        return Decimal("0")
 
     async def _reply(update: object, text: str) -> None:
         return None
 
     monkeypatch.setattr(loops, "is_halted", _is_halted)
     monkeypatch.setattr(commands_mod, "persist_halt", _persist)
+    monkeypatch.setattr(commands_mod, "daily_loss_pct", _loss)
     monkeypatch.setattr(commands_mod, "_authorised", lambda update: True)
     monkeypatch.setattr(commands_mod, "_reply", _reply)
     monkeypatch.setattr(commands_mod, "now", lambda: NOW)
