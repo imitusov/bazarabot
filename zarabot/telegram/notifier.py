@@ -26,8 +26,7 @@ def _contains_secret(text: str) -> bool:
 
 async def _send(text: str, urgent: bool) -> None:
     cfg = load()
-    last_error: Exception | None = None
-    for _attempt in range(_ATTEMPTS):
+    for attempt in range(1, _ATTEMPTS + 1):
         try:
             bot = Bot(token=cfg.telegram_bot_token)
             await bot.send_message(
@@ -37,15 +36,28 @@ async def _send(text: str, urgent: bool) -> None:
             )
             return
         except Exception as exc:
-            last_error = exc
-    if last_error is not None:
-        _LOG.error("telegram send failed after retries")
+            if attempt == _ATTEMPTS:
+                _LOG.warning(
+                    "telegram_send_failed",
+                    extra={
+                        "event": "telegram_send_failed",
+                        "attempt": attempt,
+                        "error": type(exc).__name__,
+                    },
+                )
 
 
 async def alert(text: str, urgent: bool = False) -> None:
     """Send `text` to the configured chat. Never raises."""
     try:
-        outbound = _DROPPED if _contains_secret(text) else text
+        if _contains_secret(text):
+            _LOG.error(
+                "secret_redacted",
+                extra={"event": "secret_redacted", "sink": "telegram"},
+            )
+            outbound = _DROPPED
+        else:
+            outbound = text
         await _send(outbound, urgent)
     except Exception:
         _LOG.error("telegram alert failed")
