@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail when the documents and the code have drifted apart.
 
-Five checks that are cheap and catch a whole class of decay:
+Six checks that are cheap and catch a whole class of decay:
   1. Every module in dependency-order.md has an interfaces.md entry. A module
      built without one is invisible to every later task.
   2. Every task file references a module that exists in dependency-order.md.
@@ -10,8 +10,10 @@ Five checks that are cheap and catch a whole class of decay:
   4. Every error rule in spec §8 is claimed by a named module in §4.
   5. Every table in spec §5 has exactly one writing module, and is named in
      the contract of the module that owns it.
+  6. The spec's **Version:** header is not older than the amendments its body
+     cites.
 
-Checks 3-5 exist because the spec stores one obligation in two normative
+Checks 3-6 exist because the spec stores one obligation in two normative
 places - §8 rules and §4 contracts, §4 signatures and interfaces.md - and
 duplication without a consistency check drifts apart on the first amendment.
 That is what the 2026-09-07 audit found thirty times over.
@@ -101,7 +103,7 @@ if unimplemented:
     sys.exit(1)
 
 
-# ---------------------------------------------------------------- gate 1
+# ---------------------------------------------------------------- check 3
 # Signature drift. `AGENTS.md` requires contract signatures to match exactly,
 # "including `| None`" — but nothing compared them, so an amendment could add
 # a parameter to §4 and never reach the code. The check above only asks
@@ -206,7 +208,7 @@ if drift or stale_drift:
             print(f"  {mod}.{fn}")
     sys.exit(1)
 
-# ---------------------------------------------------------------- gate 2
+# ---------------------------------------------------------------- check 4
 # Rule ownership. §7.1 already requires every log event to be "owed by exactly
 # one module, named in the table". §8 never got the same treatment, so a rule
 # could be superseded by a §4 amendment and left standing — which is how rule 6
@@ -236,7 +238,7 @@ if orphans or stale:
             print(f"  rule {r}")
     sys.exit(1)
 
-# ---------------------------------------------------------------- gate 3
+# ---------------------------------------------------------------- check 5
 # Table ownership. `AGENTS.md`: "Never write to another module's tables.
 # Ownership is listed in the spec." Nothing checked that a table HAS an owner,
 # so `instruments` was specified, created by a migration, referenced by two
@@ -314,7 +316,7 @@ if unowned or shared or stale_tables:
             print(f"  {table}: {', '.join(who)}")
     sys.exit(1)
 
-# ---------------------------------------------------------------- gate 4
+# ---------------------------------------------------------------- check 6
 # Version drift. §"Versioning": "A new version is issued when any module
 # contract, schema, error rule, or test contract changes." Nothing enforced it,
 # so the header sat at 1.61 from a3b4b6d through eight contract amendments
@@ -326,9 +328,16 @@ if header is None:
     print("FAIL technical-spec.md has no **Version:** header")
     sys.exit(1)
 declared = (int(header.group(1)), int(header.group(2)))
-cited = [
-    (int(a), int(b)) for a, b in re.findall(r"\bv(\d+)\.(\d+)\b", spec)
-]
+# Only this spec's own amendment markers. The body cites OTHER documents'
+# versions — "**Implements:** `business-brief.md` v1.11" and three "(brief
+# v1.8)" — and the brief is the senior document, amended independently. Pooling
+# them means a brief bump to v1.71 fails this gate, and the only way to green is
+# to bump the spec header to a version it never issued: the exact drift the gate
+# exists to prevent. Amendment markers are always parenthesised or sentence-
+# initial "vN.NN"; a citation of another document names that document first,
+# so those are stripped before the scan.
+own = re.sub(r"[`\w.\-]*brief[`\w.\-]*\s+v\d+\.\d+", "", spec)
+cited = [(int(a), int(b)) for a, b in re.findall(r"\bv(\d+)\.(\d+)\b", own)]
 highest = max(cited, default=(0, 0))
 if declared < highest:
     print("FAIL technical-spec.md header is older than the amendments it cites")

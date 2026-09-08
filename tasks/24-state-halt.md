@@ -105,14 +105,14 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-- A `DAILY_LOSS_LIMIT` halt emits `halt_triggered` carrying the `daily_loss_pct`
-  its caller passed (v1.69; proves the field is the caller's real figure, not a
-  placeholder — a test asserting only that the key exists would pass against a
-  hardcoded zero).
-- A halt whose caller passes no `daily_loss_pct` emits `halt_triggered` with the
-  key **absent** — not null, not `Decimal("0")` (v1.69; proves an unknown loss
-  is reported as unknown. Zero on a halt record reads as "no loss today", which
-  is false precisely when it matters).
+- A `DAILY_LOSS_LIMIT` halt emits `halt_triggered` carrying `reason`, `detail`
+  and the `daily_loss_pct` its caller passed (v1.69; proves the field is the
+  caller's real figure, not a placeholder — a test asserting only that the key
+  exists would pass against a hardcoded zero).
+- A halt whose caller passes no `daily_loss_pct` emits `halt_triggered` with
+  `reason` and `detail` and the key **absent** — not null, not `Decimal("0")`
+  (v1.69; proves an unknown loss is reported as unknown. Zero on a halt record
+  reads as "no loss today", which is false precisely when it matters).
 - `resume` emits `halt_cleared` with `actor` (v1.61).
 - An **escalation** emits `halt_triggered` too — a `DAILY_LOSS_LIMIT` halt
   arriving during a `MANUAL` one emits a CRITICAL record carrying the new reason,
@@ -122,6 +122,13 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   event goes silent on exactly the #9 path).
 - A **no-op `resume`** emits nothing (v1.70; the `False` return had a case, its
   silence did not).
+- A **rejected weaker re-halt** emits nothing — a `MANUAL` halt arriving during
+  a `DAILY_LOSS_LIMIT` one changes no state and emits no `halt_triggered`
+  (v1.70). The severity ordering had a case for the state it leaves and none
+  for its silence, so §3.2 permitted a CRITICAL on every `halt()` call,
+  discarded ones included. This is the mirror of the escalation case: one guards
+  moving the emit under `if not replacing:`, this one guards moving it above the
+  severity check.
 - Halting then reading state reports halted with its reason (happy path).
 - Halt state survives a simulated restart, where a restart is
   `db.connection.disconnect()` followed by `connect` to the same file — a
