@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1433,3 +1434,205 @@ async def test_executed_stop_without_a_price_refuses_to_book(env: _Broker) -> No
     still = await get_position(position.id)
     assert still is not None
     assert still.status == "OPEN"
+
+
+def _order_events(
+    caplog: pytest.LogCaptureFixture, event: str
+) -> list[logging.LogRecord]:
+    return [
+        record for record in caplog.records if getattr(record, "event", None) == event
+    ]
+
+
+def _event_names(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        str(record.event)
+        for record in caplog.records
+        if getattr(record, "event", None)
+    ]
+
+
+async def test_successful_entry_emits_submitting_filled_opened_stop(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    import zarabot.execution.orders as orders_mod
+
+    real_post = env.post_market_order
+
+    async def wrapped_post(*args: Any, **kwargs: Any) -> OrderRecord:
+        names = _event_names(caplog)
+        assert names[-1] == "order_submitting"
+        return await real_post(*args, **kwargs)
+
+    orders_mod.post_market_order = wrapped_post  # type: ignore[method-assign]
+    with caplog.at_level(logging.INFO, logger="zarabot.execution.orders"):
+        position = await open_position(_signal(), 2, _instrument())
+    names = _event_names(caplog)
+    assert names[:4] == [
+        "order_submitting",
+        "order_filled",
+        "position_opened",
+        "stop_order_placed",
+    ]
+    submitting = _order_events(caplog, "order_submitting")[0]
+    assert submitting.ticker == "SBER"
+    assert submitting.side == Side.BUY.value
+    assert submitting.intent == "ENTRY"
+    assert submitting.lots == 2
+    filled = _order_events(caplog, "order_filled")[0]
+    assert filled.filled_lots == 2
+    assert filled.filled_price == Decimal("100")
+    assert filled.commission == Decimal("1")
+    opened = _order_events(caplog, "position_opened")[0]
+    assert opened.position_id == position.id
+    assert opened.strategy == "ma_crossover"
+    assert opened.lots == 2
+    assert opened.entry_price == Decimal("100")
+    assert opened.stop_price == Decimal("95")
+    assert opened.target_price == Decimal("110")
+    placed = _order_events(caplog, "stop_order_placed")[0]
+    assert placed.stop_order_id == "ex-stop"
+    assert placed.stop_price == Decimal("95")
+
+
+async def test_rejected_entry_emits_order_rejected_not_opened(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.reject_entry = True
+    with (
+        caplog.at_level(logging.ERROR, logger="zarabot.execution.orders"),
+        pytest.raises(OrderRejected),
+    ):
+        await open_position(_signal(), 2, _instrument())
+    assert _order_events(caplog, "order_rejected")
+    rejected = _order_events(caplog, "order_rejected")[0]
+    assert rejected.ticker == "SBER"
+    assert rejected.intent == "ENTRY"
+    assert rejected.broker_reason == "nope"
+    assert _order_events(caplog, "position_opened") == []
+
+
+async def test_stop_degrade_emits_stop_protection_degraded(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.stop_failures_left = 3
+    with caplog.at_level(logging.ERROR, logger="zarabot.execution.orders"):
+        position = await open_position(_signal(), 2, _instrument())
+    events = _order_events(caplog, "stop_protection_degraded")
+    assert len(events) == 1
+    assert events[0].position_id == position.id
+    assert events[0].ticker == "SBER"
+    assert events[0].attempts == 3
+
+
+async def test_take_profit_emits_cancel_before_sell_submitting(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="zarabot.execution.orders"):
+        closed = await close_position(position, ExitTrigger.TAKE_PROFIT)
+    names = _event_names(caplog)
+    assert names.index("stop_order_cancelled") < names.index("order_submitting")
+    cancelled = _order_events(caplog, "stop_order_cancelled")[0]
+    assert cancelled.position_id == position.id
+    assert cancelled.cause == "exit"
+    closed_ev = _order_events(caplog, "position_closed")[0]
+    assert closed_ev.exit_trigger == ExitTrigger.TAKE_PROFIT.value
+    assert closed_ev.exit_price == Decimal("100")
+    assert closed_ev.realised_pnl == closed.realised_pnl
+    assert not hasattr(closed_ev, "gap_vs_stop")
+
+
+async def test_local_stop_loss_close_emits_gap_vs_stop(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.stop_failures_left = 3
+    position = await open_position(_signal(), 2, _instrument())
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="zarabot.execution.orders"):
+        closed = await close_position(position, ExitTrigger.STOP_LOSS)
+    closed_ev = _order_events(caplog, "position_closed")[0]
+    assert closed_ev.exit_trigger == ExitTrigger.STOP_LOSS.value
+    assert closed_ev.gap_vs_stop == closed.exit_price - position.stop_price
+    assert closed_ev.gap_vs_stop == Decimal("5")
+
+
+async def test_rejected_exit_emits_order_rejected_and_exit_failed(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    position = await open_position(_signal(), 2, _instrument())
+    env.reject_exit = True
+    caplog.clear()
+    with (
+        caplog.at_level(logging.ERROR, logger="zarabot.execution.orders"),
+        pytest.raises(ExitFailed),
+    ):
+        await close_position(position, ExitTrigger.TAKE_PROFIT)
+    rejected = _order_events(caplog, "order_rejected")[0]
+    assert rejected.intent == "EXIT"
+    failed = _order_events(caplog, "exit_failed")[0]
+    assert failed.position_id == position.id
+    assert failed.ticker == "SBER"
+    assert failed.attempt == 1
+    assert failed.error == "OrderRejected"
+
+
+async def test_unresolved_recovery_emits_order_unresolved(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    env.state_unavailable = True
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="zarabot.execution.orders"):
+        await resolve_unfinished(NOW)
+    events = _order_events(caplog, "order_unresolved")
+    assert len(events) == 1
+    assert events[0].ticker == "SBER"
+    assert events[0].age_seconds == 0
+
+
+async def test_recovered_fill_emits_order_resolved(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.timeout = True
+    with pytest.raises(BrokerUnavailable):
+        await open_position(_signal(), 2, _instrument())
+    key = (await list_unresolved())[0].key
+    env.state[key] = OrderRecord(
+        key=key,
+        ticker="SBER",
+        figi="BBG000000001",
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=2,
+        status=OrderStatus.FILLED,
+        filled_lots=2,
+        filled_price=Decimal("100"),
+        commission=Decimal("1"),
+        broker_reason=None,
+        created_at=NOW,
+        settled_at=NOW,
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="zarabot.execution.orders"):
+        await resolve_unfinished(NOW)
+    resolved = _order_events(caplog, "order_resolved")[0]
+    assert resolved.key == key
+    assert resolved.resolved_status == OrderStatus.FILLED.value
+    assert resolved.source == "query"
+
+
+async def test_partial_entry_emits_partial_fill(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    env.partial_fill_lots = 1
+    with caplog.at_level(logging.WARNING, logger="zarabot.execution.orders"):
+        await open_position(_signal(), 2, _instrument())
+    events = _order_events(caplog, "partial_fill")
+    assert len(events) == 1
+    assert events[0].requested_lots == 2
+    assert events[0].filled_lots == 1
+    assert events[0].intent == "ENTRY"
