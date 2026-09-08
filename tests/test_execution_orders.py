@@ -1433,3 +1433,18 @@ async def test_executed_stop_without_a_price_refuses_to_book(env: _Broker) -> No
     still = await get_position(position.id)
     assert still is not None
     assert still.status == "OPEN"
+
+
+def test_contended_locks_work_on_a_second_event_loop() -> None:
+    """Module-level Lock objects bind the first loop once they have waiters (#50)."""
+    import zarabot.execution.orders as orders
+
+    async def contend() -> None:
+        async def hold() -> None:
+            async with orders._locks("SBER"):
+                await asyncio.sleep(0)
+
+        await asyncio.gather(hold(), hold())
+
+    asyncio.run(contend())
+    asyncio.run(contend())
