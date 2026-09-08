@@ -76,6 +76,8 @@ _MIGRATION = re.compile(r"^(\d+)_.*\.sql$")
 
 def expected_schema_version(migrations: pathlib.Path | None = None) -> int:
     root = migrations or pathlib.Path(__file__).resolve().parents[2] / "migrations"
+    if not root.is_dir():
+        return 0
     versions = [
         int(match.group(1))
         for path in root.iterdir()
@@ -88,10 +90,11 @@ def read_only_uri(db: pathlib.Path) -> str:
     return f"file:{db}?mode=ro"
 
 
-def parse_logs(raw: str) -> tuple[dict[str, int], list[str], bool]:
+def parse_logs(raw: str) -> tuple[dict[str, int], list[str], bool, int]:
     events: dict[str, int] = {}
     errors: list[str] = []
     unknown = False
+    malformed = 0
     for line in raw.splitlines():
         brace = line.find("{")
         if brace < 0:
@@ -99,6 +102,7 @@ def parse_logs(raw: str) -> tuple[dict[str, int], list[str], bool]:
         try:
             rec = json.loads(line[brace:])
         except ValueError:
+            malformed += 1
             continue
         if not isinstance(rec, dict) or "event" not in rec:
             continue
@@ -111,10 +115,9 @@ def parse_logs(raw: str) -> tuple[dict[str, int], list[str], bool]:
             safe = {
                 "event": rec.get("event"),
                 "level": rec.get("level"),
-                "message": rec.get("message"),
             }
             errors.append(json.dumps(safe, default=str))
-    return events, errors, unknown
+    return events, errors, unknown, malformed
 
 
 def collect_log_events(
@@ -138,12 +141,18 @@ def collect_log_events(
             timeout=120,
             check=False,
         )
-    except Exception as exc:  # noqa: BLE001
+    except (
+        OSError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        subprocess.SubprocessError,
+    ) as exc:
         return {"log_export_failed": 1}, [type(exc).__name__], True
-    if proc.returncode != 0 or (not proc.stdout.strip() and proc.stderr.strip()):
+    if proc.returncode != 0 or not proc.stdout.strip():
         return {"log_export_failed": 1}, ["CalledProcessError"], True
-    events, errors, unknown = parse_logs(proc.stdout)
-    return events, errors, unknown
+    events, errors, unknown, malformed = parse_logs(proc.stdout)
+    failed = unknown or malformed > 0 or events.get("heartbeat", 0) < 1
+    return events, errors, failed
 
 
 def fill_database_health(
