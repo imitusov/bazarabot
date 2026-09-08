@@ -995,7 +995,8 @@ containing either token is dropped and replaced with an incident notice.
 ## `zarabot.telegram.commands`
 
 One handler per brief command. Authorised `TELEGRAM_CHAT_ID` only; a mismatch
-emits `unauthorised_command` (INFO) with `chat_id` and `command` and neither
+emits `unauthorised_command` (INFO) with `chat_id` and `command` (a name from
+the brief table, or `unknown`) and neither
 replies nor changes state. Replies over 4096 characters are truncated with an
 omission count. No command mutates a risk limit. `/halt` and `/resume` delegate
 to `state.halt` only. `/report` calls

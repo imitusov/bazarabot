@@ -102,13 +102,21 @@ def _join_truncated(header: str, entries: list[str]) -> str:
     return header + "\n".join(kept)
 
 
+_KNOWN_COMMANDS = frozenset(name.lstrip("/") for name, _blurb in _COMMANDS)
+
+
 def _command_name(update: Update) -> str:
     message = update.message
-    text = getattr(message, "text", None) if message is not None else None
+    if message is None:
+        return "unknown"
+    text = message.text
     if not text:
         return "unknown"
     token = str(text).strip().split()[0]
-    return token.lstrip("/").split("@")[0]
+    name = token.lstrip("/").split("@")[0]
+    if name not in _KNOWN_COMMANDS:
+        return "unknown"
+    return name
 
 
 def _authorised(update: Update) -> bool:
