@@ -114,6 +114,14 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   is reported as unknown. Zero on a halt record reads as "no loss today", which
   is false precisely when it matters).
 - `resume` emits `halt_cleared` with `actor` (v1.61).
+- An **escalation** emits `halt_triggered` too — a `DAILY_LOSS_LIMIT` halt
+  arriving during a `MANUAL` one emits a CRITICAL record carrying the new reason,
+  the new detail and the caller's figure (v1.70; the contract says "persisted
+  **or upgraded**" and only the persist half was stated. Move the emit under
+  `if not replacing:` and every other case in this file stays green while the
+  event goes silent on exactly the #9 path).
+- A **no-op `resume`** emits nothing (v1.70; the `False` return had a case, its
+  silence did not).
 - Halting then reading state reports halted with its reason (happy path).
 - Halt state survives a simulated restart, where a restart is
   `db.connection.disconnect()` followed by `connect` to the same file — a
@@ -130,8 +138,6 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A halt does not prevent `lifecycle.exits` from returning triggers, nor
   `execution.orders` from placing an exit (proves the halt-blocks-entries-only
   contract, which is the single most consequential interaction in the system).
-- `halt` emits `halt_triggered` with `reason`, `detail`, `daily_loss_pct`;
-  `resume` of a halted process emits `halt_cleared` with `actor` (v1.61).
 
 ## Expected output
 

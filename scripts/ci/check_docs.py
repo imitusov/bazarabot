@@ -314,6 +314,28 @@ if unowned or shared or stale_tables:
             print(f"  {table}: {', '.join(who)}")
     sys.exit(1)
 
+# ---------------------------------------------------------------- gate 4
+# Version drift. §"Versioning": "A new version is issued when any module
+# contract, schema, error rule, or test contract changes." Nothing enforced it,
+# so the header sat at 1.61 from a3b4b6d through eight contract amendments
+# while the body cited v1.69 in fourteen places. A reader cannot tell which
+# document they have, and neither can a task file.
+
+header = re.search(r"^\*\*Version:\*\* (\d+)\.(\d+)", spec, re.M)
+if header is None:
+    print("FAIL technical-spec.md has no **Version:** header")
+    sys.exit(1)
+declared = (int(header.group(1)), int(header.group(2)))
+cited = [
+    (int(a), int(b)) for a, b in re.findall(r"\bv(\d+)\.(\d+)\b", spec)
+]
+highest = max(cited, default=(0, 0))
+if declared < highest:
+    print("FAIL technical-spec.md header is older than the amendments it cites")
+    print(f"  header **Version:** {declared[0]}.{declared[1]}")
+    print(f"  cites  v{highest[0]}.{highest[1]}")
+    sys.exit(1)
+
 print(
     f"PASS docs consistent ({len(modules)} modules recorded, "
     f"every specified function implemented, {len(rules)} error rules, "
