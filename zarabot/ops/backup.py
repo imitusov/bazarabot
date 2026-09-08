@@ -54,9 +54,20 @@ async def run(db_path: Path, backup_dir: Path) -> Path:
     dest = _dest_path(backup_dir)
     try:
         await asyncio.to_thread(_copy, db_path, dest)
+        _LOG.info(
+            "backup_ok",
+            extra={
+                "event": "backup_ok",
+                "path": dest.name,
+                "bytes": dest.stat().st_size,
+            },
+        )
         return dest
-    except Exception:
-        _LOG.exception("backup failed")
+    except Exception as exc:
+        _LOG.error(
+            "backup_failed",
+            extra={"event": "backup_failed", "error": type(exc).__name__},
+        )
         await alert(f"Database backup failed for {dest.name}. Trading continues.")
         return dest
 

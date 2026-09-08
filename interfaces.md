@@ -1034,7 +1034,9 @@ never raises; trading continues.
 
 **`async run(db_path: Path, backup_dir: Path) → Path`**
 Writes `zarabot-<UTC stamp>.db` into `backup_dir` via `sqlite3.Connection.backup`.
-On failure, alerts and still returns the intended path.
+On success, emits `backup_ok` (INFO) with `path` (file name) and `bytes`. On
+failure, emits `backup_failed` (ERROR) with `error`, alerts, and still returns
+the intended path. Never raises; trading continues.
 
 **`async prune(backup_dir: Path, retention_days: int) → int`**
 Deletes `zarabot-*.db` files whose mtime is strictly older than `retention_days`.
