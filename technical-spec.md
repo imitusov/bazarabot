@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.70
+**Version:** 1.71
 **Date:** 2026-09-08
 **Implements:** `business-brief.md` v1.11
 
@@ -1102,6 +1102,12 @@ Additionally, on exits booked from an exchange stop:
 - A response exceeding the message limit is truncated with an explicit note
   naming how many entries were omitted (proves the truncation contract).
 - No command mutates a risk limit (proves the brief's prohibition).
+- **`/halt` halts with the broker unreachable** — every `broker.client` call
+  raising `BrokerUnavailable`, the halt is still persisted and the reply still
+  sent (v1.71; proves the kill switch does not depend on the system it stops
+  trading against. Written as a caller-shaped test: drive `/halt`, do not stub
+  `state.halt`. A test that stubbed the halt would pass with the broker call
+  still in place).
 
 **`telegram.notifier`**
 - A failed send is retried and, if still failing, emits `telegram_send_failed`
@@ -3166,9 +3172,20 @@ obligation.
     `loss = await daily_loss_pct(moment)` as a `Decimal` in scope, one line
     above the `halt` call. This is the `DAILY_LOSS_LIMIT` halt and the only site
     where the figure is both meaningful and free.
-  - `telegram.commands` `/halt` **passes `await pnl.daily_loss_pct(now())`.**
-    The module already imports `zarabot.pnl`, so this adds no dependency. A
-    manual halt is worth annotating with the day's position.
+  - `telegram.commands` `/halt` **passes nothing, deliberately (v1.71).** v1.69
+    told it to pass `await pnl.daily_loss_pct(now())`, reasoning that the module
+    already imports `zarabot.pnl` so this "adds no dependency". That is true of
+    the import graph and false of the runtime: `pnl.daily_loss_pct` ends in
+    `bot_equity`, which calls `get_last_price` **once per open position**, and
+    alerts through `telegram.notifier` when the day has no opening snapshot. The
+    argument is evaluated before the call, so a broker that is unavailable, rate
+    limited, or rejecting the token means the halt is **never persisted** and the
+    operator gets no halt and no reply.
+    `/halt` is the manual kill switch. The operator reaches for it precisely when
+    something is wrong, and "the broker is misbehaving" is one of the commonest
+    such moments. A control that stops entries must not depend on the system it
+    exists to stop trading against. The annotation was worth having; it was not
+    worth this.
   - `execution.orders._halt_on_db_failure` **passes nothing, deliberately.** It
     halts *because a database write just failed*, and `pnl.daily_loss_pct` reads
     that same database. Calling it there would query the thing that is broken,
@@ -3263,10 +3280,13 @@ One handler per command in the brief's command table.
   many entries were omitted.
 - No handler mutates a risk limit.
 - `/halt` and `/resume` delegate to `state.halt` and to nothing else.
-- **`/halt` passes `daily_loss_pct` (v1.69).** It calls
-  `pnl.daily_loss_pct(clock.now())` and hands the result to `state.halt.halt`,
-  so a manual halt's record still carries the day's position. This module
-  already imports `zarabot.pnl`, so it adds no dependency.
+- **`/halt` passes no `daily_loss_pct` (v1.71, reversing v1.69).** It calls
+  `state.halt.halt(reason, detail, at)` and nothing else. The reasoning is under
+  `state.halt`'s heading with the other two call sites. Note that v1.69's
+  obligation contradicted the line directly above it — `/halt` cannot delegate
+  "to `state.halt` and to nothing else" while calling `pnl` — and that line is
+  correct as written; it is v1.69 that was wrong. `/status` already reports the
+  day's position on demand, so the figure remains one command away.
 
 ### `zarabot/reporter/weekly.py`
 
@@ -4284,7 +4304,7 @@ implementation gap.
 | `stop_order_orphaned` | `broker.reconcile` | ERROR | `stop_order_id`, `ticker` |
 | `partial_fill` | `execution.orders` | WARNING | `key`, `ticker`, `intent`, `requested_lots`, `filled_lots` |
 | `cooldown_started` | `app.loops` | INFO | `ticker`, `active_until` |
-| `halt_triggered` | `state.halt` | CRITICAL | `reason`, `detail`, `daily_loss_pct` (only on a `DAILY_LOSS_LIMIT` or `/halt` halt) |
+| `halt_triggered` | `state.halt` | CRITICAL | `reason`, `detail`, `daily_loss_pct` (only on a `DAILY_LOSS_LIMIT` halt) |
 | `halt_cleared` | `state.halt` | INFO | `actor` |
 | `reconciliation` | `broker.reconcile` | INFO | `adjustments_count`, `types` |
 | `broker_unavailable` | `broker.client` | WARNING | `method`, `consecutive_failures` |
