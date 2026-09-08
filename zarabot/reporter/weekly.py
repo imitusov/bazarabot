@@ -185,6 +185,14 @@ async def send(now: datetime) -> None:
         start, end = _week_bounds(now)
         text = await build(start, end)
         await alert(text)
+        _LOG.info(
+            "weekly_report_sent",
+            extra={
+                "event": "weekly_report_sent",
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+            },
+        )
     except Exception:
         _LOG.exception("weekly report failed")
         try:
