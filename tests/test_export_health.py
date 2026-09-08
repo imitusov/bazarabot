@@ -304,6 +304,7 @@ def test_known_events_matches_the_spec_71_table() -> None:
     One table row can name two events (`session_open` / `session_closed`), so
     the cell is split on "/" rather than taken whole.
     """
+    mod = _mod()
     spec = Path("technical-spec.md").read_text(encoding="utf-8")
     section = spec[spec.index("| `startup_ok`") : spec.index("`gap_vs_stop` on")]
     table: set[str] = set()
@@ -313,7 +314,7 @@ def test_known_events_matches_the_spec_71_table() -> None:
         cell = line.split("|")[1]
         table.update(name.strip().strip("`") for name in cell.split("/"))
     assert table, "spec §7.1 event table not found — the slice above moved"
-    assert mod.KNOWN_EVENTS == table, (
+    assert table == mod.KNOWN_EVENTS, (
         f"only in code: {sorted(mod.KNOWN_EVENTS - table)}; "
         f"only in spec §7.1: {sorted(table - mod.KNOWN_EVENTS)}"
     )
