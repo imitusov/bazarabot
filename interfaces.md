@@ -943,6 +943,14 @@ than substituting a number (#4). `fill.key` — the broker's `exchange_order_id`
 is written to the row's `broker_order_id`, which is what makes a late commission
 on it recoverable (#8). A `commission` of `None` does not block the close.
 
+Money-path events (v1.61): `order_submitting` after the intent row and before
+`post_market_order`; `order_filled` after a fill settle; `order_rejected` on
+`OrderRejected`; `order_unresolved` / `order_resolved` from recovery;
+`position_opened` / `position_closed` (`gap_vs_stop` only on `STOP_LOSS`);
+`exit_failed`; `stop_order_placed` / `stop_order_cancelled`;
+`stop_protection_degraded`; `partial_fill`. Does not emit `signal_*`,
+`stop_order_executed`, `stop_order_orphaned`, or `cooldown_started`.
+
 ## `zarabot.broker.reconcile`
 
 Observes and records. Never places or cancels an order. SQL for `reconciliations`
