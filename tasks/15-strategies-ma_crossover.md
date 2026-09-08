@@ -1,4 +1,4 @@
-# Task 15/40: Implement `zarabot/strategies/ma_crossover.py`
+# Task 15/42: Implement `zarabot/strategies/ma_crossover.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Moving-average crossover entries. Pure function over candles.
 
 ## Build order position
 
-Module **15** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **15** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

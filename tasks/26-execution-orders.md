@@ -1,4 +1,4 @@
-# Task 26/40: Implement `zarabot/execution/orders.py`
+# Task 26/42: Implement `zarabot/execution/orders.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Where money moves. Write-then-send ordering, the submission locks, crash recover
 
 ## Build order position
 
-Module **26** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **26** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

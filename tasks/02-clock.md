@@ -1,4 +1,4 @@
-# Task 2/40: Implement `zarabot/clock.py`
+# Task 2/42: Implement `zarabot/clock.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of 'now' and of trading-day arithmetic. Everything else receives time
 
 ## Build order position
 
-Module **2** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **2** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

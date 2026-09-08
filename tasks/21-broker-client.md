@@ -1,4 +1,4 @@
-# Task 21/40: Implement `zarabot/broker/client.py`
+# Task 21/42: Implement `zarabot/broker/client.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The ONLY module that talks to the broker. Wraps t_tech.invest.AsyncClient and re
 
 ## Build order position
 
-Module **21** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **21** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

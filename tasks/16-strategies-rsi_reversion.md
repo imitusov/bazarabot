@@ -1,4 +1,4 @@
-# Task 16/40: Implement `zarabot/strategies/rsi_reversion.py`
+# Task 16/42: Implement `zarabot/strategies/rsi_reversion.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ RSI mean-reversion entries. Pure function over candles.
 
 ## Build order position
 
-Module **16** of 40 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **16** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
