@@ -1089,12 +1089,17 @@ Frozen: `config`, `strategies`, `halt`, `reconciliation`. Lives here, not in
 **`async start() → AppContext`**
 `config.load` → write `SSL_TBANK_VERIFY` from `config.ssl_tbank_verify` into
 `os.environ` (`"true"` / `"false"`) → urgent `alert` when verification is
-disabled, before any broker call and carrying no token → `logging_setup.configure` →
+disabled, before any broker call and carrying no token → `logging_setup.configure`
+(secrets include both tokens and `tinvest_account_id`) →
 `db.connection.connect(config.db_path)` then
 `db.migrations.apply(db.connection.shared())` → `strategies.registry.enabled` →
 `market.session.refresh` → `execution.orders.resolve_unfinished` →
 `broker.reconcile.reconcile` plus stop remedies → refuse to start on a foreign
-holding → restore halt → watchlist budget reachability → ready `alert`.
+holding → restore halt → watchlist budget reachability → ready `alert` and
+`startup_ok`. A `ConfigError` from `load` configures logging from the environment,
+emits `config_invalid` with `variable`, and raises `StartupError` with no
+`startup_ok`. Any later `StartupError` emits `startup_failed` with `stage` and
+`reason`. `__main__` does not emit those events.
 The connection is opened here, not at import. The TLS env write precedes every
 broker call. Remedies: `STOP_MISSING` → `place_protective_stop`, `STOP_MISPRICED`
 → `replace_stop`, `STOP_ADOPTABLE` → `adopt_existing_stop`, `STOP_ORPHAN` →

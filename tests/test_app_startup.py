@@ -142,6 +142,44 @@ async def test_invalid_config_aborts_before_any_broker_call(
     assert alerts
 
 
+async def test_invalid_config_emits_config_invalid_and_not_startup_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.61: missing config is a catalogued event, not a silent abort."""
+    from zarabot.app.startup import StartupError, start
+
+    monkeypatch.setenv("TINVEST_TOKEN", "tinvest-secret-token")
+    monkeypatch.setenv("TINVEST_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-secret-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setenv("WATCHLIST", "SBER")
+    monkeypatch.delenv("ALLOCATED_CAPITAL", raising=False)
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr("zarabot.app.startup.alert", _alert)
+    with (
+        caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"),
+        pytest.raises(StartupError),
+    ):
+        await start()
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "config_invalid"
+    ]
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.CRITICAL
+    assert record.variable == "ALLOCATED_CAPITAL"
+    assert not any(
+        getattr(item, "event", None) == "startup_ok" for item in caplog.records
+    )
+    assert "tinvest-secret-token" not in caplog.text
+
+
 async def test_ssl_tbank_verify_is_present_before_first_broker_call(
     env: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -790,6 +828,46 @@ async def test_foreign_holding_refuses_to_start_naming_every_ticker(
     assert [text for text in alerts if "LKOH" in text and "GMKN" in text], alerts
     assert not [text for text in alerts if "running" in text.lower()]
     assert all(REQUIRED_ENV["TINVEST_TOKEN"] not in text for text in alerts)
+
+
+async def test_foreign_holding_emits_startup_failed_reconcile(
+    env: list[str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.61: a FOREIGN_HOLDING refusal is startup_failed, not a silent abort."""
+    from zarabot.app.startup import StartupError, start
+
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "FOREIGN_HOLDING",
+                "ticker": "LKOH",
+                "lots": 3,
+                "average_price": "6200.5",
+            }
+        ),
+        env,
+    )
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+    with (
+        caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"),
+        pytest.raises(StartupError),
+    ):
+        await start()
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "startup_failed"
+    ]
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.CRITICAL
+    assert record.stage == "reconcile"
+    assert record.reason
+    assert not any(
+        getattr(item, "event", None) == "startup_ok" for item in caplog.records
+    )
+    assert "tinvest-secret-token" not in caplog.text
 
 
 async def test_allow_foreign_holdings_starts_observe_only(

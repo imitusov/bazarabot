@@ -91,7 +91,38 @@ def _telegram_usable() -> bool:
     return bool(token and chat)
 
 
-async def _abort(message: str, cause: BaseException | None = None) -> NoReturn:
+def _env_secrets() -> list[str]:
+    return [
+        value
+        for value in (
+            os.environ.get("TINVEST_TOKEN", "").strip(),
+            os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
+            os.environ.get("TINVEST_ACCOUNT_ID", "").strip(),
+        )
+        if value
+    ]
+
+
+def _config_variable(exc: ConfigError) -> str:
+    return str(exc).split()[0]
+
+
+async def _abort(
+    message: str,
+    cause: BaseException | None = None,
+    *,
+    stage: str | None = None,
+    reason: str | None = None,
+) -> NoReturn:
+    if stage is not None:
+        _LOG.critical(
+            "startup_failed",
+            extra={
+                "event": "startup_failed",
+                "stage": stage,
+                "reason": reason if reason is not None else message,
+            },
+        )
     if _telegram_usable():
         await alert(message)
     if cause is None:
@@ -343,7 +374,9 @@ async def _enforce_account_exclusivity(
     await _abort(
         "Startup aborted: the broker reports holdings the bot has no record of "
         f"({', '.join(foreign)}). The account is the bot's alone; set "
-        "ALLOW_FOREIGN_HOLDINGS=true to start anyway and leave them untraded."
+        "ALLOW_FOREIGN_HOLDINGS=true to start anyway and leave them untraded.",
+        stage="reconcile",
+        reason="FOREIGN_HOLDING",
     )
 
 
@@ -390,31 +423,50 @@ async def start() -> AppContext:
     try:
         cfg = load()
     except ConfigError as exc:
+        configure("INFO", _env_secrets())
+        _LOG.critical(
+            "config_invalid",
+            extra={
+                "event": "config_invalid",
+                "variable": _config_variable(exc),
+            },
+        )
         await _abort(f"Startup aborted: {exc}", exc)
 
     os.environ["SSL_TBANK_VERIFY"] = "true" if cfg.ssl_tbank_verify else "false"
     if not cfg.ssl_tbank_verify:
         await alert(_SSL_DISABLED_TEXT, urgent=True)
 
-    configure(cfg.log_level, [cfg.tinvest_token, cfg.telegram_bot_token])
+    configure(
+        cfg.log_level,
+        [cfg.tinvest_token, cfg.telegram_bot_token, cfg.tinvest_account_id],
+    )
+    stage = "database"
     try:
         await connect(str(cfg.db_path))
         await apply(shared())
+        stage = "strategies"
         strategies = tuple(enabled(cfg))
+        stage = "session"
         await refresh(_SCHEDULE_DAYS)
         moment = now()
+        stage = "recovery"
         await resolve_unfinished(moment)
+        stage = "reconcile"
         report = await reconcile(moment)
         await _apply_remedies(report)
         await _enforce_account_exclusivity(cfg, report)
+        stage = "halt"
         halt = await current()
         # 8a. Never raises, never prevents startup: an unaffordable budget
         # stops new entries only, and refusing to start would additionally
         # abandon every open position. A diagnostic must not become the reason
         # the bot is down.
+        stage = "reachability"
         reach = await _reachability(cfg)
         await _report_reachability(reach)
         set_report_builder(build_report)
+        stage = "ready"
         await alert(_ready_text(cfg, halt, report, reach))
         # The same four facts as the alert, for a reader that cannot read
         # Telegram: `scripts/deploy/update.sh` waits for this event and rolls
@@ -438,6 +490,17 @@ async def start() -> AppContext:
     except StartupError:
         raise
     except (MigrationError, ConfigError) as exc:
-        await _abort(f"Startup aborted: {exc}", exc)
+        await _abort(
+            f"Startup aborted: {exc}",
+            exc,
+            stage=stage,
+            reason=type(exc).__name__,
+        )
     except Exception as exc:
-        await _abort(f"Startup aborted: {exc}", exc)
+        await _abort(
+            f"Startup aborted: {exc}",
+            exc,
+            stage=stage,
+            reason=type(exc).__name__,
+        )
+
