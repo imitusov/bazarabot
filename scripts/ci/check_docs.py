@@ -147,14 +147,9 @@ def sections(text: str, pattern: str) -> dict[str, str]:
 # Divergences present when this gate was written, each keyed on the signature
 # `interfaces.md` actually records. Keying on (module, function) alone would
 # exempt that name from every FUTURE divergence too, not just the recorded one
-# — and `state.halt.halt` is the most-amended signature in this project.
+# — and several functions here have been amended more than once.
 # Delete an entry with its issue.
 KNOWN_SIGNATURE_DRIFT: dict[tuple[str, str], tuple[str, str]] = {
-    # 98 — spec has daily_loss_pct, code does not
-    ("zarabot.state.halt", "halt"): (
-        "reason: HaltReason, detail: str, at: datetime",
-        "None",
-    ),
     # 116 — Connection vs aiosqlite.Connection
     ("zarabot.db.migrations", "apply"): ("conn: aiosqlite.Connection", "int"),
     # 116 — return elided as list[...]

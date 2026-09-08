@@ -826,16 +826,19 @@ connection. Access before `connect` or after `disconnect` raises
 **`async current() → HaltState | None`**
 The singleton row, or `None` if missing.
 
-**`async halt(reason: HaltReason, detail: str, at: datetime) → None`**
+**`async halt(reason: HaltReason, detail: str, at: datetime, daily_loss_pct: Decimal | None = None) → None`**
 Persists halt. Raises `ValueError` on naive `at`. Severity orders the reasons —
 `DAILY_LOSS_LIMIT` > `RECONCILIATION_MISMATCH` > `MANUAL`. A strictly more severe
 reason replaces a standing halt, rewriting `reason` and `detail` and alerting
 through `telegram.notifier`; `halted_at` keeps the moment the halt began, since
 the suspension has been continuous. The same reason or a weaker one is a no-op
-and sends nothing, so re-halting adds no alert noise (#9).
+and sends nothing, so re-halting adds no alert noise (#9). After persist or
+upgrade, emits `halt_triggered` (CRITICAL) with `reason` and `detail`;
+`daily_loss_pct` is included only when the caller passed one (v1.69).
 
 **`async resume(actor: str, at: datetime) → bool`**
-Clears the halt and records `actor`. `False` when not halted.
+Clears the halt and records `actor`. `False` when not halted. Emits
+`halt_cleared` (INFO) with `actor` when a halt was actually cleared.
 
 ## `zarabot.pnl`
 

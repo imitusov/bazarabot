@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
+from decimal import Decimal
 
 import aiosqlite
 
 from zarabot.db.connection import shared, transaction
 from zarabot.models import HaltReason, HaltState
 from zarabot.telegram.notifier import alert
+
+_LOG = logging.getLogger(__name__)
 
 # Severity order: DAILY_LOSS_LIMIT > RECONCILIATION_MISMATCH > MANUAL. A halt
 # for a strictly more severe reason replaces a weaker one; the same reason or a
@@ -58,7 +62,12 @@ async def is_halted() -> bool:
     return state is not None and state.halted
 
 
-async def halt(reason: HaltReason, detail: str, at: datetime) -> None:
+async def halt(
+    reason: HaltReason,
+    detail: str,
+    at: datetime,
+    daily_loss_pct: Decimal | None = None,
+) -> None:
     _reject_naive(at)
     conn = _conn()
     cursor = await conn.execute("SELECT halted, reason FROM halt_state WHERE id = 1")
@@ -92,6 +101,14 @@ async def halt(reason: HaltReason, detail: str, at: datetime) -> None:
                 """,
                 (reason.value, detail, at.isoformat()),
             )
+    extra: dict[str, object] = {
+        "event": "halt_triggered",
+        "reason": reason.value,
+        "detail": detail,
+    }
+    if daily_loss_pct is not None:
+        extra["daily_loss_pct"] = daily_loss_pct
+    _LOG.critical("halt_triggered", extra=extra)
     if replacing:
         previous = standing.value if standing is not None else "an unrecorded reason"
         await alert(f"Halt escalated from {previous} to {reason.value}: {detail}")
@@ -115,4 +132,5 @@ async def resume(actor: str, at: datetime) -> bool:
             """,
             (at.isoformat(), actor),
         )
+    _LOG.info("halt_cleared", extra={"event": "halt_cleared", "actor": actor})
     return True
