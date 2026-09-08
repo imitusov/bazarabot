@@ -311,6 +311,16 @@ async def _submit_exits(
             await close_position(position, trigger)
         except (ExitFailed, ValueError):
             _LOG.exception("exit failed for %s trigger=%s", position.ticker, trigger)
+            continue
+        until = moment + timedelta(minutes=ctx.config.reentry_cooldown_minutes)
+        _LOG.info(
+            "cooldown_started",
+            extra={
+                "event": "cooldown_started",
+                "ticker": position.ticker,
+                "active_until": until.isoformat(),
+            },
+        )
     await _report_ages(unmeasurable)
 
 
@@ -387,7 +397,7 @@ async def _measure_daily_loss(
     _loss_unmeasurable_alerted = False
     if loss >= ctx.config.daily_loss_limit_pct:
         detail = f"daily loss {loss}% reached limit {ctx.config.daily_loss_limit_pct}%"
-        await halt(HaltReason.DAILY_LOSS_LIMIT, detail, moment)
+        await halt(HaltReason.DAILY_LOSS_LIMIT, detail, moment, daily_loss_pct=loss)
         await alert(detail)
     return True
 
@@ -414,6 +424,15 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
             signal = strategy.evaluate(ticker, series, moment)
             if signal is None:
                 continue
+            _LOG.info(
+                "signal_generated",
+                extra={
+                    "event": "signal_generated",
+                    "ticker": signal.ticker,
+                    "strategy": signal.strategy,
+                    "reference_price": signal.reference_price,
+                },
+            )
             if ticker in opened_this_pass:
                 await record(
                     signal,
@@ -422,6 +441,15 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
                         lots=None,
                         reason=RejectionReason.DUPLICATE_TICKER,
                     ),
+                )
+                _LOG.info(
+                    "signal_rejected",
+                    extra={
+                        "event": "signal_rejected",
+                        "ticker": signal.ticker,
+                        "strategy": signal.strategy,
+                        "rejection_reason": RejectionReason.DUPLICATE_TICKER.value,
+                    },
                 )
                 continue
             try:
@@ -444,6 +472,16 @@ async def _evaluate_entries(ctx: AppContext, moment: datetime) -> None:
             )
             await record(signal, decision)
             if not decision.approved or decision.lots is None:
+                if decision.reason is not None:
+                    _LOG.info(
+                        "signal_rejected",
+                        extra={
+                            "event": "signal_rejected",
+                            "ticker": signal.ticker,
+                            "strategy": signal.strategy,
+                            "rejection_reason": decision.reason.value,
+                        },
+                    )
                 continue
             try:
                 await open_position(signal, decision.lots, instrument)
@@ -480,6 +518,11 @@ async def trading_cycle(ctx: AppContext) -> None:
     """One iteration: session guard, exits, daily-loss halt, then entries."""
     global _cache_exhausted_alerted, _first_cycle_at
     moment = now()
+    if moment.tzinfo is None:
+        # Naive "now" is a contract violation, not weather. Do not call
+        # `datetime.now()` here to compare; clock.now() is the sole "now".
+        _LOG.warning("clock_drift", extra={"event": "clock_drift", "drift_seconds": 0})
+        return
     # Recorded before the session guard: a cycle that returns because the market
     # is shut is still evidence this process was running before the open, which
     # is what entitles it to write the day's opening snapshot at step 4.
@@ -635,6 +678,12 @@ async def _heartbeat_loop(ctx: AppContext) -> None:
                 uptime,
                 len(opened),
                 halted,
+                extra={
+                    "event": "heartbeat",
+                    "uptime_seconds": uptime,
+                    "open_positions": len(opened),
+                    "halted": halted,
+                },
             )
             await alert(
                 f"zarabot heartbeat uptime={uptime}s "
@@ -652,7 +701,15 @@ async def _supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _LOG.exception("task_crashed task=%s error=%s", name, exc)
+            _LOG.exception(
+                "task_crashed",
+                extra={
+                    "event": "task_crashed",
+                    "task": name,
+                    "error": type(exc).__name__,
+                    "restart_in_seconds": delay,
+                },
+            )
             await alert(f"Background task {name} crashed: {exc}")
             await asyncio.sleep(delay)
             delay = min(delay * 2, 300)

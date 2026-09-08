@@ -184,9 +184,9 @@ async def test_the_daily_loss_limit_can_fire_at_all() -> None:
     halted: list[str] = []
     original = halt_mod.halt
 
-    async def _spy(reason, detail, at):  # type: ignore[no-untyped-def]
+    async def _spy(reason, detail, at, **kwargs):  # type: ignore[no-untyped-def]
         halted.append(reason.value)
-        return await original(reason, detail, at)
+        return await original(reason, detail, at, **kwargs)
 
     import zarabot.app.loops as loops
 
