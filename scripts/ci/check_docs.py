@@ -4,14 +4,18 @@
 Six checks that are cheap and catch a whole class of decay:
   1. Every module in dependency-order.md has an interfaces.md entry. A module
      built without one is invisible to every later task.
-  2. Every task file references a module that exists in dependency-order.md.
+  2. Every function specified in spec §4 is recorded by name in interfaces.md.
   3. Every function specified in spec §4 has the same signature in
-     interfaces.md - parameters, defaults and return type.
+     interfaces.md - parameters, defaults and return type. A heading that
+     names two zarabot modules is compared against each module's section.
   4. Every error rule in spec §8 is claimed by a named module in §4.
   5. Every table in spec §5 has exactly one writing module, and is named in
      the contract of the module that owns it.
-  6. The spec's **Version:** header is not older than the amendments its body
-     cites.
+  6. Each of technical-spec.md, business-brief.md and dependency-order.md has a
+     **Version:** header that is not older than that document's own vN.NN
+     citations. This is a proxy (citations present and header ≥ max citation),
+     not a proof that every contract edit bumped the header. Documents are not
+     pooled. Header newer than any citation is allowed.
 
 Checks 3-6 exist because the spec stores one obligation in two normative
 places - §8 rules and §4 contracts, §4 signatures and interfaces.md - and
@@ -49,32 +53,90 @@ def signatures(text: str) -> dict[str, tuple[str, str]]:
 
 
 def sections(text: str, pattern: str) -> dict[str, str]:
-    """Split a document into {module: body} on a heading regex."""
+    """Split a document into {module: body} on a heading regex.
+
+    A heading that names more than one zarabot path maps the same body to
+    every path, so a signature recorded only under the second module is still
+    compared. Skip a function only when it is recorded in none of those
+    interfaces.md sections.
+    """
     out: dict[str, str] = {}
-    current: str | None = None
+    current: list[str] = []
     buf: list[str] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        body = "\n".join(buf)
+        for key in current:
+            out[key] = body
+
     for line in text.splitlines():
         head = re.match(pattern, line)
         if head:
-            if current:
-                out[current] = "\n".join(buf)
+            flush()
             paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
             zar = [q.replace("/", ".") for q in paths if q.startswith("zarabot/")]
-            current = zar[0] if zar else head.group(1)
+            current = zar if zar else [head.group(1)]
             buf = []
             continue
         if current:
             buf.append(line)
-    if current:
-        out[current] = "\n".join(buf)
+    flush()
     return out
+
+
+# Citations of another document name that document first. The brief is senior
+# and amended independently; pooling `brief v1.71` into the spec scan would
+# force a spec header bump the spec never issued. `technical-spec.md` v1.23 in
+# dependency-order.md is the same shape. Keep this sub — a brief bump must not
+# fail the spec.
+_BRIEF_CITE = r"[`\w.\-]*brief[`\w.\-]*\s+v\d+\.\d+"
+_OTHER_DOC_CITE = r"`[\w.\-]+\.md`\s+v\d+\.\d+"
+
+
+def header_vs_own_citations(
+    text: str,
+) -> tuple[tuple[int, int] | None, tuple[int, int]]:
+    """Return (header version, max own citation), each document scanned alone.
+
+    Proxy only: citations present and header ≥ max citation. An amendment with
+    no marker is invisible. Header newer than any citation is not a failure.
+    """
+    header = re.search(r"^\*\*Version:\*\* (\d+)\.(\d+)", text, re.M)
+    declared = (int(header.group(1)), int(header.group(2))) if header else None
+    own = re.sub(_BRIEF_CITE, "", text)
+    own = re.sub(_OTHER_DOC_CITE, "", own)
+    cited = [(int(a), int(b)) for a, b in re.findall(r"\bv(\d+)\.(\d+)\b", own)]
+    highest = max(cited, default=(0, 0))
+    return declared, highest
+
+
+def version_gate_failures(documents: dict[str, str]) -> list[str]:
+    """Run header-vs-own-citations on each document; do not pool markers."""
+    lines: list[str] = []
+    for name, text in documents.items():
+        declared, highest = header_vs_own_citations(text)
+        if declared is None:
+            lines.append(f"FAIL {name} has no **Version:** header")
+            continue
+        if declared < highest:
+            lines.append(
+                f"FAIL {name} header is older than the amendments it cites"
+            )
+            lines.append(f"  header **Version:** {declared[0]}.{declared[1]}")
+            lines.append(f"  cites  v{highest[0]}.{highest[1]}")
+    return lines
 
 
 def find_signature_drift(
     spec_section: str,
     iface_text: str,
     known: dict[tuple[str, str], tuple[str, str]] | None = None,
-) -> tuple[list[tuple[str, str, tuple[str, str], tuple[str, str]]], set[tuple[str, str]]]:
+) -> tuple[
+    list[tuple[str, str, tuple[str, str], tuple[str, str]]],
+    set[tuple[str, str]],
+]:
     """Compare §4 signatures against interfaces.md. Skip names recorded nowhere."""
     known = known if known is not None else {}
     spec_mods = sections(spec_section, r"^### (.+)")
@@ -131,6 +193,12 @@ KNOWN_SIGNATURE_DRIFT: dict[tuple[str, str], tuple[str, str]] = {
     ("zarabot.app.loops", "run"): ("ctx: AppContext", "None"),
     # 116 — ctx, signal untyped in the spec
     ("zarabot.app.shutdown", "shutdown"): ("ctx: AppContext, signal: int", "None"),
+    # 161 — two-module heading; visible once both keys are compared
+    ("zarabot.db.snapshots", "list_for_period"): (
+        "start: date, end: date",
+        "list[DailySnapshot]",
+    ),
+    ("zarabot.db.snapshots", "write_daily"): ("snapshot: DailySnapshot", "None"),
 }
 
 WRITE = re.compile(r"(?:insert\s+into|update|delete\s+from)\s+(\w+)", re.I)
@@ -160,7 +228,10 @@ def main() -> None:
         end = spec.index("## 5. Database schema")
         section = spec[start:end]
     except ValueError:
-        section = ""
+        # Empty section would skip every signature, rule-claim and table-name
+        # check and still print PASS.
+        print("FAIL technical-spec.md is missing §4 or §5 headings")
+        sys.exit(1)
 
     # The search is scoped to the module's OWN section of interfaces.md. A plain
     # substring search over the whole file passes as soon as any module anywhere
@@ -241,7 +312,9 @@ def main() -> None:
     # could be superseded by a §4 amendment and left standing — which is how rule 6
     # still orders the adoption that rule 32 forbids (#91).
 
-    s8 = spec[spec.index("## 8. Error handling rules") : spec.index("## 9. Dependencies")]
+    s8 = spec[
+        spec.index("## 8. Error handling rules") : spec.index("## 9. Dependencies")
+    ]
     rules = re.findall(r"^(\d+[a-z]?)\. \*\*", s8, re.M)
     claims = {m.group(1) for m in re.finditer(r"rules?\s+(\d+[a-z]?)", section)}
 
@@ -324,32 +397,20 @@ def main() -> None:
         sys.exit(1)
 
     # ---------------------------------------------------------------- check 6
-    # Version drift. §"Versioning": "A new version is issued when any module
-    # contract, schema, error rule, or test contract changes." Nothing enforced it,
-    # so the header sat at 1.61 from a3b4b6d through eight contract amendments
-    # while the body cited v1.69 in fourteen places. A reader cannot tell which
-    # document they have, and neither can a task file.
-
-    header = re.search(r"^\*\*Version:\*\* (\d+)\.(\d+)", spec, re.M)
-    if header is None:
-        print("FAIL technical-spec.md has no **Version:** header")
-        sys.exit(1)
-    declared = (int(header.group(1)), int(header.group(2)))
-    # Only this spec's own amendment markers. The body cites OTHER documents'
-    # versions — "**Implements:** `business-brief.md` v1.11" and three "(brief
-    # v1.8)" — and the brief is the senior document, amended independently. Pooling
-    # them means a brief bump to v1.71 fails this gate, and the only way to green is
-    # to bump the spec header to a version it never issued: the exact drift the gate
-    # exists to prevent. Amendment markers are always parenthesised or sentence-
-    # initial "vN.NN"; a citation of another document names that document first,
-    # so those are stripped before the scan.
-    own = re.sub(r"[`\w.\-]*brief[`\w.\-]*\s+v\d+\.\d+", "", spec)
-    cited = [(int(a), int(b)) for a, b in re.findall(r"\bv(\d+)\.(\d+)\b", own)]
-    highest = max(cited, default=(0, 0))
-    if declared < highest:
-        print("FAIL technical-spec.md header is older than the amendments it cites")
-        print(f"  header **Version:** {declared[0]}.{declared[1]}")
-        print(f"  cites  v{highest[0]}.{highest[1]}")
+    # Version drift. §"Versioning" claims a new version when a contract, schema,
+    # rule or test contract changes. The check is a proxy: header ≥ max own
+    # citation. An unmarked amendment is invisible. A git-diff versioner is a
+    # different gate and is not this one.
+    brief = pathlib.Path("business-brief.md").read_text(encoding="utf-8")
+    version_fails = version_gate_failures(
+        {
+            "technical-spec.md": spec,
+            "business-brief.md": brief,
+            "dependency-order.md": dep,
+        }
+    )
+    if version_fails:
+        print("\n".join(version_fails))
         sys.exit(1)
 
     print(
