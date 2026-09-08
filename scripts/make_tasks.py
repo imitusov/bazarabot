@@ -50,7 +50,7 @@ M = [
  (29,"telegram.commands","zarabot/telegram/commands.py","`telegram.commands`",["positions"],[13,14],"The entire user interface. One authorised chat id; everything else is ignored and logged."),
  (30,"reporter.weekly","zarabot/reporter/weekly.py","`reporter.weekly`",["positions","signals","daily_snapshots"],[12,13],"The Sunday report. Undefined metrics are reported as not applicable, never as zero."),
  (31,"ops.backup","zarabot/ops/backup.py","`ops.backup`",[],[18],"Nightly database backup. A failure alerts but never stops trading."),
- ("31b","ops.commissions","zarabot/ops/commissions.py",None,["positions"],[12],"Records commissions the broker reported after the fill and corrects the profit figures that depended on them. Without it a trade's cost stays permanently understated."),
+ ("31b","ops.commissions","zarabot/ops/commissions.py","`ops.commissions`",["positions"],[12],"Records commissions the broker reported after the fill and corrects the profit figures that depended on them. Without it a trade's cost stays permanently understated."),
  (32,"app.startup","zarabot/app/startup.py","`app.startup`",[],[15,16,17,21,30,32],"Fixed startup ordering: config, logging, connection, migrations, strategies, session, order recovery, reconciliation, halt state, ready alert. 70% coverage."),
  (33,"app.loops","zarabot/app/loops.py","`app.loops` / `app.shutdown`",[],[1,2,21,29,33],"The trading cycle. Exits run before the halt check, which is what implements halt-blocks-entries-only. 70% coverage."),
  (34,"app.shutdown","zarabot/app/shutdown.py","`app.loops` / `app.shutdown`",[],[21,30],"Graceful shutdown. Never cancels or liquidates positions - restarts must have no financial consequence. 70% coverage."),
