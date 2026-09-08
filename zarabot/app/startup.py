@@ -462,6 +462,7 @@ async def start() -> AppContext:
         # stops new entries only, and refusing to start would additionally
         # abandon every open position. A diagnostic must not become the reason
         # the bot is down.
+        stage = "reachability"
         reach = await _reachability(cfg)
         await _report_reachability(reach)
         set_report_builder(build_report)
