@@ -293,6 +293,54 @@ def test_health_unit_treats_a_failed_push_as_failure() -> None:
     assert push_at < fail_at
 
 
+def test_schema_v7_queries_succeed_on_migrated_database(tmp_path: Path) -> None:
+    """Verification from issue #68: a current schema is aggregates, not errors."""
+    mod = _mod()
+    db = tmp_path / "v7.db"
+    conn = sqlite3.connect(db)
+    migrations = sorted(Path("migrations").glob("*.sql"))
+    for sql_file in migrations:
+        conn.executescript(sql_file.read_text(encoding="utf-8"))
+    for sql_file in migrations:
+        version = int(sql_file.name.split("_", 1)[0])
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (version, "2026-01-01T00:00:00+00:00"),
+        )
+    conn.commit()
+    conn.close()
+    info, problems = mod.read_database(db)
+    assert info["present"] is True
+    assert info["schema_version"] == 7
+    assert problems == []
+    assert info["positions_open"] == 0
+    assert info["daily_snapshots_rows"] == 0
+    assert info["orders_in_flight"] == 0
+
+
+def test_emitted_catalog_names_are_counted_not_unknown() -> None:
+    """The four names already on the wire must show up as evidence, not zeros."""
+    mod = _mod()
+    raw = "\n".join(
+        [
+            _line("startup_ok", version="0.1.0", mode="paper", halted=False, adjustments_count=0),
+            _line("db_write_failed", "ERROR", table="orders", critical=True),
+            _line("broker_unavailable", "WARNING", method="post_order", consecutive_failures=2),
+            _line("rate_limited", "WARNING", method="get_orders", retry_after_seconds=1),
+            _line("heartbeat", uptime_seconds=1, open_positions=0, halted=False),
+        ]
+    )
+    events, _errors, unknown, malformed = mod.parse_logs(raw)
+    assert events["startup_ok"] == 1
+    assert events["db_write_failed"] == 1
+    assert events["broker_unavailable"] == 1
+    assert events["rate_limited"] == 1
+    assert events["heartbeat"] == 1
+    assert "unknown" not in events
+    assert unknown is False
+    assert malformed == 0
+
+
 def test_known_events_matches_the_spec_71_table() -> None:
     """The catalogue is a copy of spec §7.1; nothing else notices when it drifts.
 
