@@ -639,6 +639,26 @@ async def test_terminal_partial_exit_reduces_the_position_and_leaves_it_open(
     assert any("partial exit" in text for text in env.alerts)
 
 
+async def test_terminal_partial_exit_emits_partial_fill_from_the_order(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    position = await open_position(_signal(), 5, _instrument())
+    key = await _unresolved_exit(5)
+    env.state[key] = _broker_exit(key, 5, 2, OrderStatus.CANCELLED)
+    with caplog.at_level(logging.WARNING, logger="zarabot.execution.orders"):
+        await resolve_unfinished(NOW)
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "partial_fill"
+    ]
+    assert len(events) == 1
+    assert events[0].key == key
+    assert events[0].requested_lots == 5
+    assert events[0].filled_lots == 2
+    del position
+
+
 async def test_terminal_partial_exit_records_the_adjustment_not_a_close(
     env: _Broker,
 ) -> None:

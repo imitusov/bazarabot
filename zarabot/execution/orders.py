@@ -582,17 +582,9 @@ async def close_position(position: Position, trigger: ExitTrigger) -> Position:
         price = posted.filled_price
         if posted.status is not OrderStatus.FILLED or filled <= 0 or price is None:
             # The remainder of an exit is never abandoned: the caller retries on
-            # the next cycle under rule 4.
-            if 0 < filled < current.lots:
-                _emit(
-                    logging.WARNING,
-                    "partial_fill",
-                    key=key,
-                    ticker=current.ticker,
-                    intent="EXIT",
-                    requested_lots=current.lots,
-                    filled_lots=filled,
-                )
+            # the next cycle under rule 4. Do not emit `partial_fill` from this
+            # unsettled response — the figure is stale (rule 33); recovery
+            # emits after settle.
             _emit(
                 logging.ERROR,
                 "exit_failed",
@@ -807,7 +799,7 @@ async def _apply_terminal_exit(order: OrderRecord, now: datetime) -> None:
         key=order.key,
         ticker=position.ticker,
         intent="EXIT",
-        requested_lots=position.lots,
+        requested_lots=order.lots,
         filled_lots=filled,
     )
     await alert(
