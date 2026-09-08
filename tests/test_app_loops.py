@@ -217,6 +217,9 @@ def _patch_defaults(
     async def _cooldown(*_a: object, **_k: object) -> bool:
         return False
 
+    async def _until(ticker: str, minutes: int) -> datetime:
+        return NOW + timedelta(minutes=minutes)
+
     async def _refresh(days: int) -> None:
         calls.append("schedule_refresh")
 
@@ -245,6 +248,7 @@ def _patch_defaults(
     monkeypatch.setattr(loops, "resolve_unfinished", _resolve)
     monkeypatch.setattr(loops, "list_open", _empty)
     monkeypatch.setattr(loops, "is_active", _cooldown)
+    monkeypatch.setattr(loops, "active_until", _until)
     monkeypatch.setattr(loops, "record", _none)
     monkeypatch.setattr(loops, "alert", _none)
     monkeypatch.setattr(loops, "halt", _none)
@@ -486,17 +490,23 @@ async def test_daily_loss_limit_halts_before_entries(
 
     async def _loss(moment: datetime) -> Decimal:
         calls.append("daily_loss")
-        return Decimal("5")
+        return Decimal("7")
 
     halted_flag = False
 
     async def _is_halted() -> bool:
         return halted_flag
 
-    async def _do_halt(reason: HaltReason, detail: str, at: datetime) -> None:
+    async def _do_halt(
+        reason: HaltReason,
+        detail: str,
+        at: datetime,
+        daily_loss_pct: Decimal | None = None,
+    ) -> None:
         nonlocal halted_flag
         halted_flag = True
         halted.append(reason)
+        calls.append(f"halt_pct={daily_loss_pct}")
 
     async def _candles(
         tickers: list[str], lookback: int, now: datetime
@@ -512,6 +522,7 @@ async def test_daily_loss_limit_halts_before_entries(
     assert HaltReason.DAILY_LOSS_LIMIT in halted
     assert "candles" not in calls
     assert calls.index("daily_loss") >= 0
+    assert "halt_pct=7" in calls
 
 
 async def test_approved_signal_is_recorded_and_executed(
@@ -1931,7 +1942,12 @@ async def test_price_rejected_in_pnl_skips_entries_alerts_once_and_no_halt(
     async def _alert(text: str, urgent: bool = False) -> None:
         alerts.append(text)
 
-    async def _do_halt(reason: HaltReason, detail: str, at: datetime) -> None:
+    async def _do_halt(
+        reason: HaltReason,
+        detail: str,
+        at: datetime,
+        daily_loss_pct: Decimal | None = None,
+    ) -> None:
         halted.append(reason)
 
     _patch_pnl(monkeypatch)
@@ -1968,7 +1984,12 @@ async def test_broker_unavailable_in_pnl_skips_entries_without_halting(
     async def _alert(text: str, urgent: bool = False) -> None:
         alerts.append(text)
 
-    async def _do_halt(reason: HaltReason, detail: str, at: datetime) -> None:
+    async def _do_halt(
+        reason: HaltReason,
+        detail: str,
+        at: datetime,
+        daily_loss_pct: Decimal | None = None,
+    ) -> None:
         halted.append(reason)
 
     _patch_pnl(monkeypatch)
@@ -2044,7 +2065,12 @@ async def test_unmarkable_equity_writes_no_opening_snapshot(
     async def _alert(text: str, urgent: bool = False) -> None:
         alerts.append(text)
 
-    async def _do_halt(reason: HaltReason, detail: str, at: datetime) -> None:
+    async def _do_halt(
+        reason: HaltReason,
+        detail: str,
+        at: datetime,
+        daily_loss_pct: Decimal | None = None,
+    ) -> None:
         halted.append(reason)
 
     _patch_pnl(monkeypatch, equity=PriceRejected("unusable"), rows=[], written=written)
@@ -2195,3 +2221,251 @@ async def test_sustained_throttling_alerts_once_and_names_the_cause(
 
     assert len(alerts) == 1
     assert "rate limit" in alerts[0].lower()
+
+
+def _loop_events(
+    caplog: pytest.LogCaptureFixture, event: str
+) -> list[logging.LogRecord]:
+    return [
+        record for record in caplog.records if getattr(record, "event", None) == event
+    ]
+
+
+async def test_approved_signal_emits_signal_generated_not_rejected(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _fetch_instrument(ticker: str) -> Instrument:
+        return _make_instrument()
+
+    monkeypatch.setattr(loops, "get_instrument", _fetch_instrument)
+    monkeypatch.setattr(
+        loops,
+        "check",
+        lambda *a, **k: RiskDecision(approved=True, lots=1, reason=None),
+    )
+    with caplog.at_level(logging.INFO, logger="zarabot.app.loops"):
+        await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+    generated = _loop_events(caplog, "signal_generated")
+    assert len(generated) == 1
+    assert generated[0].ticker == "SBER"
+    assert generated[0].strategy == "buyer"
+    assert generated[0].reference_price == Decimal("100")
+    assert _loop_events(caplog, "signal_rejected") == []
+
+
+async def test_rejected_signal_emits_signal_generated_then_signal_rejected(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _fetch_instrument(ticker: str) -> Instrument:
+        return _make_instrument()
+
+    monkeypatch.setattr(loops, "get_instrument", _fetch_instrument)
+    monkeypatch.setattr(
+        loops,
+        "check",
+        lambda *a, **k: RiskDecision(
+            approved=False, lots=None, reason=RejectionReason.COOLDOWN_ACTIVE
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="zarabot.app.loops"):
+        await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+    generated = _loop_events(caplog, "signal_generated")
+    rejected = _loop_events(caplog, "signal_rejected")
+    assert len(generated) == 1
+    assert len(rejected) == 1
+    assert rejected[0].rejection_reason == RejectionReason.COOLDOWN_ACTIVE.value
+    assert generated[0].created <= rejected[0].created
+
+
+async def test_duplicate_ticker_in_pass_emits_signal_rejected(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    async def _fetch_instrument(ticker: str) -> Instrument:
+        return _make_instrument()
+
+    monkeypatch.setattr(loops, "get_instrument", _fetch_instrument)
+    monkeypatch.setattr(
+        loops,
+        "check",
+        lambda *a, **k: RiskDecision(approved=True, lots=1, reason=None),
+    )
+    with caplog.at_level(logging.INFO, logger="zarabot.app.loops"):
+        await trading_cycle(_ctx(strategies=(_BuyStrategy(), _BuyStrategy())))
+    generated = _loop_events(caplog, "signal_generated")
+    rejected = _loop_events(caplog, "signal_rejected")
+    assert len(generated) == 2
+    assert [event.rejection_reason for event in rejected] == [
+        RejectionReason.DUPLICATE_TICKER.value
+    ]
+
+
+async def test_close_emits_cooldown_started(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(stop_protection=StopProtection.LOCAL)
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _price(figi: str) -> Decimal:
+        return Decimal("95")
+
+    async def _close(pos: Position, trigger: ExitTrigger) -> Position:
+        return pos
+
+    async def _until(ticker: str, minutes: int) -> datetime:
+        assert ticker == "SBER"
+        assert minutes == 120
+        return NOW + timedelta(minutes=90)
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "get_last_price", _price)
+    monkeypatch.setattr(loops, "close_position", _close)
+    monkeypatch.setattr(loops, "active_until", _until)
+    with caplog.at_level(logging.INFO, logger="zarabot.app.loops"):
+        await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    events = _loop_events(caplog, "cooldown_started")
+    assert len(events) == 1
+    assert events[0].ticker == "SBER"
+    assert events[0].active_until == (NOW + timedelta(minutes=90)).isoformat()
+
+
+async def test_exchange_executed_stop_emits_cooldown_started(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    position = _position(
+        stop_protection=StopProtection.EXCHANGE,
+        stop_order_key="stop-key-1",
+    )
+
+    async def _open() -> list[Position]:
+        return [position]
+
+    async def _stops() -> list[StopOrderRecord]:
+        return []
+
+    async def _executed(pos: Position, fill: OrderRecord) -> Position:
+        return pos
+
+    async def _fills(since: object, until: object) -> dict[str, OrderRecord]:
+        return {"broker-stop": _broker_fill(Decimal("95.00"))}
+
+    async def _active(position_id: int) -> StopOrderRecord | None:
+        return _our_stop()
+
+    async def _until(ticker: str, minutes: int) -> datetime:
+        return NOW + timedelta(minutes=90)
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(loops, "list_stop_orders", _stops)
+    monkeypatch.setattr(loops, "get_executed_stop_fills", _fills)
+    monkeypatch.setattr(loops, "active_for_position", _active)
+    monkeypatch.setattr(loops, "close_executed_stop", _executed)
+    monkeypatch.setattr(loops, "active_until", _until)
+    with caplog.at_level(logging.INFO, logger="zarabot.app.loops"):
+        await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+    events = _loop_events(caplog, "cooldown_started")
+    assert len(events) == 1
+    assert events[0].ticker == "SBER"
+    assert events[0].active_until == (NOW + timedelta(minutes=90)).isoformat()
+
+
+async def test_heartbeat_emits_heartbeat_event(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import _heartbeat_loop
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    loops._started_at = NOW
+    async def _sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    with (
+        caplog.at_level(logging.INFO, logger="zarabot.app.loops"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await _heartbeat_loop(_ctx())
+    events = _loop_events(caplog, "heartbeat")
+    assert len(events) == 1
+    record = events[0]
+    assert record.uptime_seconds == 0
+    assert record.open_positions == 0
+    assert record.halted is False
+
+
+async def test_supervised_crash_emits_task_crashed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import _supervise
+
+    async def _boom() -> None:
+        raise RuntimeError("boom")
+
+    async def _sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    with (
+        caplog.at_level(logging.ERROR, logger="zarabot.app.loops"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await _supervise("trading", _boom)
+    events = _loop_events(caplog, "task_crashed")
+    assert len(events) == 1
+    record = events[0]
+    assert record.task == "trading"
+    assert record.error == "RuntimeError"
+    assert record.restart_in_seconds == 1.0
+
+
+async def test_naive_now_emits_clock_drift_and_does_not_trade(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    monkeypatch.setattr(loops, "now", lambda: datetime(2026, 3, 16, 12, 0))  # noqa: DTZ001
+    with caplog.at_level(logging.WARNING, logger="zarabot.app.loops"):
+        await trading_cycle(_ctx(strategies=(_BuyStrategy(),)))
+    events = _loop_events(caplog, "clock_drift")
+    assert len(events) == 1
+    assert events[0].drift_seconds == 0
+    assert "resolve" not in calls
+    assert "candles" not in calls

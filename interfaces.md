@@ -107,8 +107,9 @@ on a naive input or when `end` precedes `start`.
 
 ## `zarabot.config`
 
-Loads and validates every setting once at startup. Tokens never appear in
-`ConfigError` messages or in `Config`'s `__repr__` / `__str__`.
+Loads and validates every setting once at startup. Tokens and account
+identifiers never appear in `ConfigError` messages or in `Config`'s
+`__repr__` / `__str__`.
 
 **`ConfigError`**
 Raised when a required variable is missing or empty, a numeric value is out of
@@ -878,6 +879,9 @@ prices are missing, never zero-filled.
 Owns order submission, per-ticker and global submission locks, crash recovery,
 and stop-order remedies. Write-then-send. Never resubmits an entry. Never
 passes `confirm_margin_trade=True`. Alerts go through `telegram.notifier.alert`.
+Submission locks are created for the running event loop and replaced when
+that loop changes, so a second `asyncio.run` in the same process does not
+raise `RuntimeError` after contention (#50).
 
 **`ExitFailed`**
 Raised when an exit is rejected or the broker is unreachable. Caller retries.
@@ -1165,6 +1169,15 @@ same pass is skipped before the gate and recorded `DUPLICATE_TICKER`, and
 `OrderRejected`, `PositionStateError` and `DuplicateOrderError` from
 `open_position` are all ordinary outcomes that continue the pass (#24).
 
+The daily-loss halt passes the measured `loss` as `daily_loss_pct` (v1.69).
+Each non-`None` strategy result emits `signal_generated` (`ticker`, `strategy`,
+`reference_price`) before the gate; a rejected decision (including
+`DUPLICATE_TICKER` skipped before the gate) emits `signal_rejected` with
+`rejection_reason` as the enum value. A successful `close_position` emits
+`cooldown_started` (`ticker`, `active_until` from `db.cooldowns.active_until`).
+A naive `clock.now()` emits `clock_drift` (WARNING, `drift_seconds=0`) and
+refuses the cycle without calling `datetime.now()`.
+
 Between cycles the loop waits the **longer** of its own escalation
 (`poll × 2 ** consecutive failures`) and the broker's `retry_after` hint when
 the last failure was a `BrokerRateLimited` carrying one — bounded either way by
@@ -1181,7 +1194,10 @@ Moscow weekly report, daily heartbeat, and the Telegram command listener via
 `telegram.commands.build_application`. Closed-session cycles call
 `cache_exhausted` and alert when the calendar has run out, so exhaustion is
 not mistaken for a quiet close. Each task is restarted with exponential
-backoff after an unhandled exception.
+backoff after an unhandled exception. Heartbeat jobs emit `heartbeat` (INFO)
+with `uptime_seconds`, `open_positions`, `halted`. A supervised crash emits
+`task_crashed` (ERROR) with `task`, `error` (exception type name), and
+`restart_in_seconds` before the backoff sleep.
 
 ## `zarabot.app.shutdown`
 

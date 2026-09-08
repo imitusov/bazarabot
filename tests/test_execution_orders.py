@@ -676,8 +676,12 @@ async def test_second_partial_exit_requested_lots_is_the_order(
     key1 = await _unresolved_exit(5, key="exit-partial-key-00000000001")
     env.state[key1] = _broker_exit(key1, 5, 2, OrderStatus.CANCELLED)
     await resolve_unfinished(NOW)
-    key2 = await _unresolved_exit(3, key="exit-partial-key-00000000002")
-    env.state[key2] = _broker_exit(key2, 3, 1, OrderStatus.CANCELLED)
+    # The order asks for 2 while the position still holds 3, so `order.lots`
+    # and `position.lots` differ at the emit. With both at 3 the assertion
+    # below passes against `requested_lots=position.lots` too, and proves
+    # nothing.
+    key2 = await _unresolved_exit(2, key="exit-partial-key-00000000002")
+    env.state[key2] = _broker_exit(key2, 2, 1, OrderStatus.CANCELLED)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="zarabot.execution.orders"):
         await resolve_unfinished(NOW)
@@ -688,7 +692,7 @@ async def test_second_partial_exit_requested_lots_is_the_order(
     ]
     assert len(events) == 1
     assert events[0].key == key2
-    assert events[0].requested_lots == 3
+    assert events[0].requested_lots == 2
     assert events[0].filled_lots == 1
 
 
@@ -1695,3 +1699,18 @@ async def test_partial_entry_emits_partial_fill(
     assert events[0].requested_lots == 2
     assert events[0].filled_lots == 1
     assert events[0].intent == "ENTRY"
+
+
+def test_contended_locks_work_on_a_second_event_loop() -> None:
+    """Module-level Lock objects bind the first loop once they have waiters (#50)."""
+    import zarabot.execution.orders as orders
+
+    async def contend() -> None:
+        async def hold() -> None:
+            async with orders._locks("SBER"):
+                await asyncio.sleep(0)
+
+        await asyncio.gather(hold(), hold())
+
+    asyncio.run(contend())
+    asyncio.run(contend())
