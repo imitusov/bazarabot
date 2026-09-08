@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -184,3 +185,46 @@ async def test_send_failure_alerts_and_does_not_raise(
     monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
     await send(NOW)
     assert calls
+
+
+async def test_send_failure_does_not_emit_weekly_report_sent(
+    db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _alert(text: str, urgent: bool = False) -> None:
+        raise RuntimeError("network")
+
+    monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
+    with caplog.at_level(logging.INFO, logger="zarabot.reporter.weekly"):
+        await send(NOW)
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "weekly_report_sent"
+    ]
+    assert events == []
+
+
+async def test_successful_send_emits_weekly_report_sent(
+    db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    sent: list[str] = []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        sent.append(text)
+
+    monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
+    with caplog.at_level(logging.INFO, logger="zarabot.reporter.weekly"):
+        await send(NOW)
+    assert sent
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "weekly_report_sent"
+    ]
+    assert len(events) == 1
+    record = events[0]
+    assert record.levelno == logging.INFO
+    assert record.period_start == START.isoformat()
+    assert record.period_end == END.isoformat()
+    assert sent[0] not in caplog.text
+    assert "token" not in caplog.text
