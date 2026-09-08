@@ -71,9 +71,23 @@ _STOP_ATTEMPTS = 3
 # the stored name and so gives it a heading of its own (rule 35).
 _UNATTRIBUTED = "UNATTRIBUTED"
 
-_global_lock = asyncio.Lock()
+_global_lock: asyncio.Lock | None = None
 _ticker_locks: dict[str, asyncio.Lock] = {}
-_registry_lock = asyncio.Lock()
+_registry_lock: asyncio.Lock | None = None
+_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _loop_locks() -> tuple[asyncio.Lock, dict[str, asyncio.Lock], asyncio.Lock]:
+    """Locks for the running loop. Module-level Lock objects bind the first
+    loop that contends them; a later asyncio.run then raises (#50)."""
+    global _global_lock, _ticker_locks, _registry_lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _lock_loop is not loop or _global_lock is None or _registry_lock is None:
+        _global_lock = asyncio.Lock()
+        _registry_lock = asyncio.Lock()
+        _ticker_locks = {}
+        _lock_loop = loop
+    return _global_lock, _ticker_locks, _registry_lock
 
 
 class ExitFailed(Exception):
@@ -95,12 +109,13 @@ async def _halt_on_db_failure(detail: str) -> None:
 
 @asynccontextmanager
 async def _locks(ticker: str) -> AsyncIterator[None]:
-    async with _registry_lock:
-        lock = _ticker_locks.get(ticker)
+    global_lock, ticker_locks, registry = _loop_locks()
+    async with registry:
+        lock = ticker_locks.get(ticker)
         if lock is None:
             lock = asyncio.Lock()
-            _ticker_locks[ticker] = lock
-    async with lock, _global_lock:
+            ticker_locks[ticker] = lock
+    async with lock, global_lock:
         yield
 
 
