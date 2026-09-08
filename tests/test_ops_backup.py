@@ -101,6 +101,8 @@ async def test_failing_backup_alerts_emits_backup_failed_and_does_not_stop_tradi
     record = events[0]
     assert record.levelno == logging.ERROR
     assert record.error
+    assert record.exc_info is not None
+    assert "unable to open database file" in caplog.text
     assert "token" not in caplog.text
     assert "tg" not in caplog.text
 
