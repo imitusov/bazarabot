@@ -54,11 +54,26 @@ async def run(db_path: Path, backup_dir: Path) -> Path:
     dest = _dest_path(backup_dir)
     try:
         await asyncio.to_thread(_copy, db_path, dest)
-        return dest
-    except Exception:
-        _LOG.exception("backup failed")
+    except Exception as exc:
+        _LOG.exception(
+            "backup_failed",
+            extra={"event": "backup_failed", "error": type(exc).__name__},
+        )
         await alert(f"Database backup failed for {dest.name}. Trading continues.")
         return dest
+    try:
+        size = dest.stat().st_size
+    except OSError:
+        size = 0
+    _LOG.info(
+        "backup_ok",
+        extra={
+            "event": "backup_ok",
+            "path": dest.name,
+            "bytes": size,
+        },
+    )
+    return dest
 
 
 async def prune(backup_dir: Path, retention_days: int) -> int:
