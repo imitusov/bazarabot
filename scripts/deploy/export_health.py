@@ -315,7 +315,6 @@ def main(argv: list[str] | None = None) -> int:
     health["events"] = dict(sorted(events.items(), key=lambda kv: -kv[1]))
     health["recent_errors"] = errors
     health["heartbeats"] = events.get("heartbeat", 0)
-    health["expected_heartbeats"] = args.days
     health["unknown"] = unknown
     health["malformed"] = malformed
     health["export_failed"] = failed
@@ -337,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         f"Generated {now:%Y-%m-%d %H:%M} UTC, window {args.days} days.",
         f"Deployed digest: `{health['deployed_digest'] or 'unknown'}`",
         "",
-        f"- Heartbeats: {health['heartbeats']} of ~{health['expected_heartbeats']} expected",
+        f"- Heartbeats observed: {health['heartbeats']}",
         f"- Log export failed: {'yes' if log_failed else 'no'}",
         f"- Unknown catalogue names: {'yes' if unknown else 'no'}",
         f"- Malformed JSON lines: {malformed}",

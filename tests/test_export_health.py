@@ -291,3 +291,29 @@ def test_health_unit_treats_a_failed_push_as_failure() -> None:
     push_at = text.index("git push")
     fail_at = text.index("|| status=1")
     assert push_at < fail_at
+
+
+def test_known_events_matches_the_spec_71_table() -> None:
+    """The catalogue is a copy of spec §7.1; nothing else notices when it drifts.
+
+    Without this, the next §7.1 amendment makes a healthy bot report `unknown`
+    and exit non-zero on the only production evidence path in git — a false
+    alarm on the one signal an operator is meant to trust. A comment reading
+    "Spec §7.1 catalogue" is an intention; this is the check.
+
+    One table row can name two events (`session_open` / `session_closed`), so
+    the cell is split on "/" rather than taken whole.
+    """
+    spec = Path("technical-spec.md").read_text(encoding="utf-8")
+    section = spec[spec.index("| `startup_ok`") : spec.index("`gap_vs_stop` on")]
+    table: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cell = line.split("|")[1]
+        table.update(name.strip().strip("`") for name in cell.split("/"))
+    assert table, "spec §7.1 event table not found — the slice above moved"
+    assert mod.KNOWN_EVENTS == table, (
+        f"only in code: {sorted(mod.KNOWN_EVENTS - table)}; "
+        f"only in spec §7.1: {sorted(table - mod.KNOWN_EVENTS)}"
+    )
