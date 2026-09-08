@@ -217,6 +217,9 @@ def _patch_defaults(
     async def _cooldown(*_a: object, **_k: object) -> bool:
         return False
 
+    async def _until(ticker: str, minutes: int) -> datetime:
+        return NOW + timedelta(minutes=minutes)
+
     async def _refresh(days: int) -> None:
         calls.append("schedule_refresh")
 
@@ -245,6 +248,7 @@ def _patch_defaults(
     monkeypatch.setattr(loops, "resolve_unfinished", _resolve)
     monkeypatch.setattr(loops, "list_open", _empty)
     monkeypatch.setattr(loops, "is_active", _cooldown)
+    monkeypatch.setattr(loops, "active_until", _until)
     monkeypatch.setattr(loops, "record", _none)
     monkeypatch.setattr(loops, "alert", _none)
     monkeypatch.setattr(loops, "halt", _none)
@@ -486,7 +490,7 @@ async def test_daily_loss_limit_halts_before_entries(
 
     async def _loss(moment: datetime) -> Decimal:
         calls.append("daily_loss")
-        return Decimal("5")
+        return Decimal("7")
 
     halted_flag = False
 
@@ -518,7 +522,7 @@ async def test_daily_loss_limit_halts_before_entries(
     assert HaltReason.DAILY_LOSS_LIMIT in halted
     assert "candles" not in calls
     assert calls.index("daily_loss") >= 0
-    assert "halt_pct=5" in calls
+    assert "halt_pct=7" in calls
 
 
 async def test_approved_signal_is_recorded_and_executed(
@@ -2333,15 +2337,21 @@ async def test_close_emits_cooldown_started(
     async def _close(pos: Position, trigger: ExitTrigger) -> Position:
         return pos
 
+    async def _until(ticker: str, minutes: int) -> datetime:
+        assert ticker == "SBER"
+        assert minutes == 120
+        return NOW + timedelta(minutes=90)
+
     monkeypatch.setattr(loops, "list_open", _open)
     monkeypatch.setattr(loops, "get_last_price", _price)
     monkeypatch.setattr(loops, "close_position", _close)
+    monkeypatch.setattr(loops, "active_until", _until)
     with caplog.at_level(logging.INFO, logger="zarabot.app.loops"):
         await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
     events = _loop_events(caplog, "cooldown_started")
     assert len(events) == 1
     assert events[0].ticker == "SBER"
-    assert events[0].active_until == (NOW + timedelta(minutes=120)).isoformat()
+    assert events[0].active_until == (NOW + timedelta(minutes=90)).isoformat()
 
 
 async def test_heartbeat_emits_heartbeat_event(

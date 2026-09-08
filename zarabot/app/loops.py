@@ -22,7 +22,7 @@ from zarabot.broker.client import (
     list_stop_orders,
 )
 from zarabot.clock import moscow_date, now, to_moscow, trading_days_between
-from zarabot.db.cooldowns import is_active
+from zarabot.db.cooldowns import active_until, is_active
 from zarabot.db.job_runs import has_run, mark_run
 from zarabot.db.orders import DuplicateOrderError
 from zarabot.db.positions import PositionStateError, list_open
@@ -312,7 +312,11 @@ async def _submit_exits(
         except (ExitFailed, ValueError):
             _LOG.exception("exit failed for %s trigger=%s", position.ticker, trigger)
             continue
-        until = moment + timedelta(minutes=ctx.config.reentry_cooldown_minutes)
+        until = await active_until(
+            position.ticker, ctx.config.reentry_cooldown_minutes
+        )
+        if until is None:
+            continue
         _LOG.info(
             "cooldown_started",
             extra={

@@ -1162,7 +1162,7 @@ Each non-`None` strategy result emits `signal_generated` (`ticker`, `strategy`,
 `reference_price`) before the gate; a rejected decision (including
 `DUPLICATE_TICKER` skipped before the gate) emits `signal_rejected` with
 `rejection_reason` as the enum value. A successful `close_position` emits
-`cooldown_started` (`ticker`, `active_until` ISO from `moment + reentry_cooldown`).
+`cooldown_started` (`ticker`, `active_until` from `db.cooldowns.active_until`).
 A naive `clock.now()` emits `clock_drift` (WARNING, `drift_seconds=0`) and
 refuses the cycle without calling `datetime.now()`.
 
