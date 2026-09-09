@@ -159,8 +159,105 @@ def test_nested_if_spread_dict_is_one_complete_site(tmp_path: Path) -> None:
     )
     code, lines = check.evaluate(root / "technical-spec.md", root / "zarabot", {})
     assert code == 0, lines
-    joined = "\n".join(lines)
-    assert joined.count("widget_ok") == 0 or "PASS" in joined
+    assert any("PASS" in line for line in lines)
+
+
+def test_nested_for_with_try_spread_dict_is_one_complete_site() -> None:
+    check = _load()
+    for_src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "def f(rows):\n"
+        "    for _ in rows:\n"
+        "        d = {'a': 1, 'b': 2}\n"
+        "        _LOG.info('m', extra={'event': 'w', **d})\n"
+    )
+    with_src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "def f(cm):\n"
+        "    with cm:\n"
+        "        d = {'a': 1, 'b': 2}\n"
+        "        _LOG.info('m', extra={'event': 'w', **d})\n"
+    )
+    try_src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "def f():\n"
+        "    try:\n"
+        "        d = {'a': 1, 'b': 2}\n"
+        "        _LOG.info('m', extra={'event': 'w', **d})\n"
+        "    except Exception:\n"
+        "        pass\n"
+    )
+    assert check.collect_emits(for_src) == {"w": [{"a", "b"}]}
+    assert check.collect_emits(with_src) == {"w": [{"a", "b"}]}
+    assert check.collect_emits(try_src) == {"w": [{"a", "b"}]}
+
+
+def test_nested_function_sees_enclosing_dict(tmp_path: Path) -> None:
+    check = _load()
+    src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "def outer():\n"
+        "    d = {'a': 1, 'b': 2}\n"
+        "    def inner():\n"
+        "        _LOG.info('m', extra={'event': 'w', **d})\n"
+        "    inner()\n"
+    )
+    assert check.collect_emits(src) == {"w": [{"a", "b"}]}
+    root = _tree(
+        tmp_path,
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "def outer():\n"
+        "    d = {'alpha': 1, 'beta': 2}\n"
+        "    def inner():\n"
+        "        _LOG.info('m', extra={'event': 'widget_ok', **d})\n"
+        "    inner()\n",
+    )
+    code, lines = check.evaluate(root / "technical-spec.md", root / "zarabot", {})
+    assert code == 0, lines
+
+
+def test_module_level_dict_spread_inside_function(tmp_path: Path) -> None:
+    check = _load()
+    src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "_D = {'a': 1, 'b': 2}\n"
+        "def f():\n"
+        "    _LOG.info('m', extra={'event': 'w', **_D})\n"
+    )
+    assert check.collect_emits(src) == {"w": [{"a", "b"}]}
+    root = _tree(
+        tmp_path,
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "_D = {'alpha': 1, 'beta': 2}\n"
+        "def f():\n"
+        "    _LOG.info('m', extra={'event': 'widget_ok', **_D})\n",
+    )
+    code, lines = check.evaluate(root / "technical-spec.md", root / "zarabot", {})
+    assert code == 0, lines
+
+
+def test_emit_in_for_header_is_visible(tmp_path: Path) -> None:
+    check = _load()
+    src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "def _emit(level, event, **fields):\n"
+        "    _LOG.log(level, event, extra={'event': event, **fields})\n"
+        "def f():\n"
+        "    for row in _emit(logging.INFO, 'widget_ok', alpha=1, beta=2):\n"
+        "        pass\n"
+    )
+    assert check.collect_emits(src)["widget_ok"] == [{"alpha", "beta"}]
+    root = _tree(tmp_path, src)
+    code, lines = check.evaluate(root / "technical-spec.md", root / "zarabot", {})
+    assert code == 0, lines
 
 
 def test_empty_event_table_fails(tmp_path: Path) -> None:

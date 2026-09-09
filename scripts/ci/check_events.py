@@ -253,6 +253,26 @@ def _is_extra_event_helper(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
+def _compound_headers(stmt: ast.stmt) -> list[ast.AST]:
+    """Expression nodes in a compound statement that are not its body."""
+    if isinstance(stmt, ast.If | ast.While):
+        return [stmt.test]
+    if isinstance(stmt, ast.For | ast.AsyncFor):
+        return [stmt.target, stmt.iter]
+    if isinstance(stmt, ast.With | ast.AsyncWith):
+        return list(stmt.items)
+    if isinstance(stmt, ast.Try):
+        return [h.type for h in stmt.handlers if h.type is not None]
+    if hasattr(ast, "Match") and isinstance(stmt, ast.Match):
+        nodes: list[ast.AST] = [stmt.subject]
+        for case in stmt.cases:
+            nodes.append(case.pattern)
+            if case.guard is not None:
+                nodes.append(case.guard)
+        return nodes
+    return []
+
+
 def collect_emits(source: str) -> dict[str, list[set[str]]]:
     """Map event name to a list of key-sets, one per emit site in this file."""
     tree = ast.parse(source)
@@ -268,11 +288,11 @@ def collect_emits(source: str) -> dict[str, list[set[str]]]:
         emits.setdefault(event, []).append(set(keys))
 
     def visit_calls(
-        stmt: ast.stmt,
+        root: ast.AST,
         assigned: dict[str, object],
         extra_keys: dict[str, set[str]],
     ) -> None:
-        for node in ast.walk(stmt):
+        for node in ast.walk(root):
             if not isinstance(node, ast.Call):
                 continue
             func_name = _call_func_name(node.func)
@@ -315,11 +335,18 @@ def collect_emits(source: str) -> dict[str, list[set[str]]]:
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
                 _record_subscript(assigned, stmt.targets[0], extra_keys)
             if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                visit_block(stmt.body, {})
+                # Copy the enclosing map so closures and module-level dicts
+                # remain visible; inner assigns must not leak outward.
+                visit_block(stmt.body, dict(assigned))
                 continue
-            # Compound statements are owned by visit_block recursion. Walking
-            # them here would record a phantom site with the outer assigned map.
-            if not isinstance(stmt, _COMPOUND):
+            # Compound bodies are owned by visit_block recursion. Walking the
+            # whole statement would record a phantom site with the outer map.
+            # Headers (`for x in _emit(...)`, `with _emit()`, `if _emit()`)
+            # are not in the body and would otherwise be invisible.
+            if isinstance(stmt, _COMPOUND):
+                for header in _compound_headers(stmt):
+                    visit_calls(header, assigned, extra_keys)
+            else:
                 visit_calls(stmt, assigned, extra_keys)
 
             if isinstance(stmt, ast.If):
