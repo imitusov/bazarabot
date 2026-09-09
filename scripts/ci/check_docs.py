@@ -4,14 +4,18 @@
 Six checks that are cheap and catch a whole class of decay:
   1. Every module in dependency-order.md has an interfaces.md entry. A module
      built without one is invisible to every later task.
-  2. Every task file references a module that exists in dependency-order.md.
+  2. Every function specified in spec §4 is recorded by name in interfaces.md.
   3. Every function specified in spec §4 has the same signature in
-     interfaces.md - parameters, defaults and return type.
+     interfaces.md - parameters, defaults and return type. A heading that
+     names two zarabot modules is compared against each module's section.
   4. Every error rule in spec §8 is claimed by a named module in §4.
   5. Every table in spec §5 has exactly one writing module, and is named in
      the contract of the module that owns it.
-  6. The spec's **Version:** header is not older than the amendments its body
-     cites.
+  6. Each of technical-spec.md, business-brief.md and dependency-order.md has a
+     **Version:** header that is not older than that document's own vN.NN
+     citations. This is a proxy (citations present and header ≥ max citation),
+     not a proof that every contract edit bumped the header. Documents are not
+     pooled. Header newer than any citation is allowed.
 
 Checks 3-6 exist because the spec stores one obligation in two normative
 places - §8 rules and §4 contracts, §4 signatures and interfaces.md - and
@@ -33,82 +37,6 @@ import pathlib
 import re
 import sys
 
-dep = pathlib.Path("dependency-order.md").read_text(encoding="utf-8")
-iface = pathlib.Path("interfaces.md").read_text(encoding="utf-8")
-modules = re.findall(r"^\d+[a-z]?\. \*\*([\w\.]+)\*\*", dep, re.M)
-
-missing = [m for m in modules if m not in iface]
-if missing:
-    print("FAIL modules missing from interfaces.md")
-    for m in missing:
-        print(f"  {m}")
-    sys.exit(1)
-
-# Function-level drift. A spec amendment that adds a function to a module and
-# is not followed by re-running that module's task leaves the spec specifying
-# something no code provides. The next agent to need it is blocked mid-task and
-# must either guess it, reimplement it in the wrong module, or stop - and only
-# the third is correct. Catching it here turns that into a failed check
-# immediately after the amendment, naming the task to re-run.
-spec = pathlib.Path("technical-spec.md").read_text(encoding="utf-8")
-try:
-    start = spec.index("## 4. Module contracts")
-    end = spec.index("## 5. Database schema")
-    section = spec[start:end]
-except ValueError:
-    section = ""
-
-# The search is scoped to the module's OWN section of interfaces.md. A plain
-# substring search over the whole file passes as soon as any module anywhere
-# records a function of that name, so `config.get` was satisfied by
-# `db.orders.get` and `broker.client.close` by `db.positions.close` — the check
-# could not fail for any common name.
-iface_sections: dict[str, str] = {}
-current_iface = None
-for line in iface.splitlines():
-    head = re.match(r"^## `([\w\.]+)`", line)
-    if head:
-        current_iface = head.group(1)
-        iface_sections[current_iface] = ""
-        continue
-    if current_iface:
-        iface_sections[current_iface] += line + "\n"
-
-# A heading may name more than one module — `### `a.py`, `b.py`` — and the
-# function may be recorded under either. `sandbox/` is skipped: it is research
-# code that zarabot never imports and it has no interfaces.md section.
-current: list[str] = []
-unimplemented: list[tuple[str, str]] = []
-for line in section.splitlines():
-    if line.startswith("### "):
-        paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
-        current = [
-            p.replace("/", ".") for p in paths if p.startswith("zarabot/")
-        ]
-        continue
-    fn = re.match(r"^\*\*`(?:async\s+)?(\w+)\(", line)
-    if fn and current:
-        wanted = f"{fn.group(1)}("
-        if not any(wanted in iface_sections.get(mod, "") for mod in current):
-            unimplemented.append((current[0], fn.group(1)))
-
-if unimplemented:
-    print("FAIL functions specified but not recorded in interfaces.md")
-    tasks = pathlib.Path("tasks")
-    for mod, fn in unimplemented:
-        stem = mod.replace("zarabot.", "").replace(".", "-")
-        match = sorted(tasks.glob(f"*-{stem}.md")) if tasks.is_dir() else []
-        where = f" — re-run {match[0]}" if match else ""
-        print(f"  {mod}.{fn}{where}")
-    sys.exit(1)
-
-
-# ---------------------------------------------------------------- check 3
-# Signature drift. `AGENTS.md` requires contract signatures to match exactly,
-# "including `| None`" — but nothing compared them, so an amendment could add
-# a parameter to §4 and never reach the code. The check above only asks
-# whether a function of that NAME is recorded.
-
 SIG = re.compile(r"^\*\*`(?:async\s+)?(\w+)\((.*?)\)\s*(?:→|->)\s*(.+?)`\*\*")
 
 
@@ -125,138 +53,120 @@ def signatures(text: str) -> dict[str, tuple[str, str]]:
 
 
 def sections(text: str, pattern: str) -> dict[str, str]:
-    """Split a document into {module: body} on a heading regex."""
+    """Split a document into {module: body} on a heading regex.
+
+    A heading that names more than one zarabot path maps the same body to
+    every path, so a signature recorded only under the second module is still
+    compared. Skip a function only when it is recorded in none of those
+    interfaces.md sections.
+    """
     out: dict[str, str] = {}
-    current: str | None = None
+    current: list[str] = []
     buf: list[str] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        body = "\n".join(buf)
+        for key in current:
+            out[key] = body
+
     for line in text.splitlines():
         head = re.match(pattern, line)
         if head:
-            if current:
-                out[current] = "\n".join(buf)
+            flush()
             paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
             zar = [q.replace("/", ".") for q in paths if q.startswith("zarabot/")]
-            current = zar[0] if zar else head.group(1)
+            current = zar if zar else [head.group(1)]
             buf = []
             continue
         if current:
             buf.append(line)
-    if current:
-        out[current] = "\n".join(buf)
+    flush()
     return out
 
 
-# Divergences present when this gate was written, each keyed on the signature
-# `interfaces.md` actually records. Keying on (module, function) alone would
-# exempt that name from every FUTURE divergence too, not just the recorded one
-# — and several functions here have been amended more than once.
-# Delete an entry with its issue.
-KNOWN_SIGNATURE_DRIFT: dict[tuple[str, str], tuple[str, str]] = {
-    # 116 — Connection vs aiosqlite.Connection
-    ("zarabot.db.migrations", "apply"): ("conn: aiosqlite.Connection", "int"),
-    # 116 — return elided as list[...]
-    ("zarabot.db.signals", "list_for_period"): (
-        "start: date, end: date",
-        "list[tuple[Signal, RiskDecision]]",
-    ),
-    # 116 — protocol self
-    ("zarabot.strategies.base", "evaluate"): (
-        "self, ticker: str, candles: list[Candle], now: datetime",
-        "Signal | None",
-    ),
-    # 116 — ctx untyped in the spec
-    ("zarabot.app.loops", "run"): ("ctx: AppContext", "None"),
-    # 116 — ctx, signal untyped in the spec
-    ("zarabot.app.shutdown", "shutdown"): ("ctx: AppContext, signal: int", "None"),
-}
+# Citations of *another* document name that document first. The brief is senior
+# and amended independently; pooling `brief v1.71` into the spec scan would
+# force a spec header bump the spec never issued. `technical-spec.md` v1.23 in
+# dependency-order.md is the same shape. Do not strip the document under scan:
+# `brief v1.12` in business-brief.md and `` `dependency-order.md` v1.5 `` in
+# that file are own amendments, not foreign citations (#138 stripped others).
+_BRIEF_CITE = r"[`\w.\-]*brief[`\w.\-]*\s+v\d+\.\d+"
+_OTHER_DOC_CITE = r"`[\w.\-]+\.md`\s+v\d+\.\d+"
 
-spec_mods = sections(section, r"^### (.+)")
-iface_mods = sections(iface, r"^## `([\w\.]+)`")
 
-drift = []
-still_diverging = set()
-for mod, body in spec_mods.items():
-    if mod not in iface_mods:
-        continue
-    specified = signatures(body)
-    recorded = signatures(iface_mods[mod])
-    for fn, want in specified.items():
-        got = recorded.get(fn)
-        if got is None or got == want:
+def header_vs_own_citations(
+    text: str,
+    name: str = "",
+) -> tuple[tuple[int, int] | None, tuple[int, int]]:
+    """Return (header version, max own citation), each document scanned alone.
+
+    Proxy only: citations present and header ≥ max citation. An amendment with
+    no marker is invisible. Header newer than any citation is not a failure.
+    `name` is the file being scanned; citations of that file are kept.
+    """
+    header = re.search(r"^\*\*Version:\*\* (\d+)\.(\d+)", text, re.M)
+    declared = (int(header.group(1)), int(header.group(2))) if header else None
+    basename = pathlib.Path(name).name if name else ""
+    own = text
+    if basename != "business-brief.md":
+        own = re.sub(_BRIEF_CITE, "", own)
+    if basename:
+        other = rf"`(?!{re.escape(basename)}`)[\w.\-]+\.md`\s+v\d+\.\d+"
+        own = re.sub(other, "", own)
+    else:
+        own = re.sub(_OTHER_DOC_CITE, "", own)
+    cited = [(int(a), int(b)) for a, b in re.findall(r"\bv(\d+)\.(\d+)\b", own)]
+    highest = max(cited, default=(0, 0))
+    return declared, highest
+
+
+def version_gate_failures(documents: dict[str, str]) -> list[str]:
+    """Run header-vs-own-citations on each document; do not pool markers."""
+    lines: list[str] = []
+    for name, text in documents.items():
+        declared, highest = header_vs_own_citations(text, name)
+        if declared is None:
+            lines.append(f"FAIL {name} has no **Version:** header")
             continue
-        if KNOWN_SIGNATURE_DRIFT.get((mod, fn)) == got:
-            still_diverging.add((mod, fn))
-        else:
-            drift.append((mod, fn, want, got))
+        if declared < highest:
+            lines.append(
+                f"FAIL {name} header is older than the amendments it cites"
+            )
+            lines.append(f"  header **Version:** {declared[0]}.{declared[1]}")
+            lines.append(f"  cites  v{highest[0]}.{highest[1]}")
+    return lines
 
-# An entry whose recorded signature no longer diverges — because it was fixed,
-# because the function is gone, or because it moved on to a DIFFERENT
-# divergence — is an exemption nobody voted for. The third case is why the
-# allowlist stores the signature rather than just the name.
-stale_drift = sorted(set(KNOWN_SIGNATURE_DRIFT) - still_diverging)
 
-if drift or stale_drift:
-    if drift:
-        print("FAIL signatures differ between spec §4 and interfaces.md")
-        for mod, fn, want, got in drift:
-            print(f"  {mod}.{fn}")
-            print(f"    spec       {fn}({want[0]}) → {want[1]}")
-            print(f"    interfaces {fn}({got[0]}) → {got[1]}")
-    if stale_drift:
-        print("FAIL KNOWN_SIGNATURE_DRIFT entries no longer describe a divergence")
-        for mod, fn in stale_drift:
-            print(f"  {mod}.{fn}")
-    sys.exit(1)
-
-# ---------------------------------------------------------------- check 4
-# Rule ownership. §7.1 already requires every log event to be "owed by exactly
-# one module, named in the table". §8 never got the same treatment, so a rule
-# could be superseded by a §4 amendment and left standing — which is how rule 6
-# still orders the adoption that rule 32 forbids (#91).
-
-s8 = spec[spec.index("## 8. Error handling rules") : spec.index("## 9. Dependencies")]
-rules = re.findall(r"^(\d+[a-z]?)\. \*\*", s8, re.M)
-claims = {m.group(1) for m in re.finditer(r"rules?\s+(\d+[a-z]?)", section)}
-
-# Unclaimed when this gate was written (#115). Delete an entry when a §4
-# contract takes the rule, or when the rule itself goes.
-KNOWN_UNCLAIMED_RULES = {
-    "2", "3", "5", "6", "7", "8", "12", "13", "14", "16", "17", "18", "20",
-    "22", "24", "25", "26", "27", "28", "29", "30", "34", "37",
-}
-
-orphans = [r for r in rules if r not in claims and r not in KNOWN_UNCLAIMED_RULES]
-stale = sorted(KNOWN_UNCLAIMED_RULES - set(rules))
-if orphans or stale:
-    if orphans:
-        print("FAIL error rules claimed by no module contract in §4")
-        for r in orphans:
-            print(f"  rule {r}")
-    if stale:
-        print("FAIL KNOWN_UNCLAIMED_RULES names rules that no longer exist")
-        for r in stale:
-            print(f"  rule {r}")
-    sys.exit(1)
-
-# ---------------------------------------------------------------- check 5
-# Table ownership. `AGENTS.md`: "Never write to another module's tables.
-# Ownership is listed in the spec." Nothing checked that a table HAS an owner,
-# so `instruments` was specified, created by a migration, referenced by two
-# error rules, and written by nothing at all (#102).
-
-s5 = spec[spec.index("## 5. Database schema") : spec.index("## 6. Migrations")]
-tables = re.findall(r"^### `(\w+)`", s5, re.M)
-
-# Tables whose ownership the spec does not state, or that nothing writes (#102).
-KNOWN_UNOWNED_TABLES = {
-    "instruments",  # no writer anywhere in zarabot/
-    "schema_version",  # §4 says "schema creation", names no table
-    "daily_snapshots",  # db.signals/snapshots section has no sole-owner line
-    "halt_state",  # §4 says "the halt flag", names no table
-    "reconciliations",  # owner stated only in interfaces.md
-}
-
-WRITE = re.compile(r"(?:insert\s+into|update|delete\s+from)\s+(\w+)", re.I)
+def find_signature_drift(
+    spec_section: str,
+    iface_text: str,
+    known: dict[tuple[str, str], tuple[str, str]] | None = None,
+) -> tuple[
+    list[tuple[str, str, tuple[str, str], tuple[str, str]]],
+    set[tuple[str, str]],
+]:
+    """Compare §4 signatures against interfaces.md. Skip names recorded nowhere."""
+    known = known if known is not None else {}
+    spec_mods = sections(spec_section, r"^### (.+)")
+    iface_mods = sections(iface_text, r"^## `([\w\.]+)`")
+    drift: list[tuple[str, str, tuple[str, str], tuple[str, str]]] = []
+    still_diverging: set[tuple[str, str]] = set()
+    for mod, body in spec_mods.items():
+        if mod not in iface_mods:
+            continue
+        specified = signatures(body)
+        recorded = signatures(iface_mods[mod])
+        for fn, want in specified.items():
+            got = recorded.get(fn)
+            if got is None or got == want:
+                continue
+            if known.get((mod, fn)) == got:
+                still_diverging.add((mod, fn))
+            else:
+                drift.append((mod, fn, want, got))
+    return drift, still_diverging
 
 
 def sql_literals(src: pathlib.Path) -> list[str]:
@@ -276,77 +186,249 @@ def sql_literals(src: pathlib.Path) -> list[str]:
     ]
 
 
-writers: dict[str, set[str]] = {t: set() for t in tables}
-for src in pathlib.Path("zarabot").rglob("*.py"):
-    for literal in sql_literals(src):
-        for table in WRITE.findall(literal):
-            if table in writers:
-                writers[table].add(str(src))
+KNOWN_SIGNATURE_DRIFT: dict[tuple[str, str], tuple[str, str]] = {
+    # 116 — Connection vs aiosqlite.Connection
+    ("zarabot.db.migrations", "apply"): ("conn: aiosqlite.Connection", "int"),
+    # 116 — return elided as list[...]
+    ("zarabot.db.signals", "list_for_period"): (
+        "start: date, end: date",
+        "list[tuple[Signal, RiskDecision]]",
+    ),
+    # 116 — protocol self
+    ("zarabot.strategies.base", "evaluate"): (
+        "self, ticker: str, candles: list[Candle], now: datetime",
+        "Signal | None",
+    ),
+    # 116 — ctx untyped in the spec
+    ("zarabot.app.loops", "run"): ("ctx: AppContext", "None"),
+    # 116 — ctx, signal untyped in the spec
+    ("zarabot.app.shutdown", "shutdown"): ("ctx: AppContext, signal: int", "None"),
+    # 161 — two-module heading; visible once both keys are compared
+    ("zarabot.db.snapshots", "list_for_period"): (
+        "start: date, end: date",
+        "list[DailySnapshot]",
+    ),
+    ("zarabot.db.snapshots", "write_daily"): ("snapshot: DailySnapshot", "None"),
+}
 
-# Same reason as KNOWN_SIGNATURE_DRIFT: an entry naming a table that no longer
-# exists in §5, or one that has since acquired a writer, is an exemption
-# nobody voted for. #102 deletes `instruments`; that must not pass in silence.
-stale_tables = sorted(
-    (KNOWN_UNOWNED_TABLES - set(tables))
-    | {t for t in KNOWN_UNOWNED_TABLES if writers.get(t) and f"`{t}`" in section}
-)
+WRITE = re.compile(r"(?:insert\s+into|update|delete\s+from)\s+(\w+)", re.I)
 
-unowned, shared = [], []
-for table in tables:
-    who = writers[table]
-    if not who and table not in KNOWN_UNOWNED_TABLES:
-        unowned.append(table)
-    elif len(who) > 1:
-        shared.append((table, sorted(who)))
-    elif f"`{table}`" not in section and table not in KNOWN_UNOWNED_TABLES:
-        unowned.append(table)
 
-if unowned or shared or stale_tables:
-    if stale_tables:
-        print("FAIL KNOWN_UNOWNED_TABLES names tables that are gone or now owned")
-        for table in stale_tables:
-            print(f"  {table}")
-    if unowned:
-        print("FAIL §5 tables with no owning module named in §4")
-        for table in unowned:
-            print(f"  {table}")
-    if shared:
-        print("FAIL §5 tables written by more than one module")
-        for table, who in shared:
-            print(f"  {table}: {', '.join(who)}")
-    sys.exit(1)
+def main() -> None:
+    dep = pathlib.Path("dependency-order.md").read_text(encoding="utf-8")
+    iface = pathlib.Path("interfaces.md").read_text(encoding="utf-8")
+    modules = re.findall(r"^\d+[a-z]?\. \*\*([\w\.]+)\*\*", dep, re.M)
 
-# ---------------------------------------------------------------- check 6
-# Version drift. §"Versioning": "A new version is issued when any module
-# contract, schema, error rule, or test contract changes." Nothing enforced it,
-# so the header sat at 1.61 from a3b4b6d through eight contract amendments
-# while the body cited v1.69 in fourteen places. A reader cannot tell which
-# document they have, and neither can a task file.
+    missing = [m for m in modules if m not in iface]
+    if missing:
+        print("FAIL modules missing from interfaces.md")
+        for m in missing:
+            print(f"  {m}")
+        sys.exit(1)
 
-header = re.search(r"^\*\*Version:\*\* (\d+)\.(\d+)", spec, re.M)
-if header is None:
-    print("FAIL technical-spec.md has no **Version:** header")
-    sys.exit(1)
-declared = (int(header.group(1)), int(header.group(2)))
-# Only this spec's own amendment markers. The body cites OTHER documents'
-# versions — "**Implements:** `business-brief.md` v1.11" and three "(brief
-# v1.8)" — and the brief is the senior document, amended independently. Pooling
-# them means a brief bump to v1.71 fails this gate, and the only way to green is
-# to bump the spec header to a version it never issued: the exact drift the gate
-# exists to prevent. Amendment markers are always parenthesised or sentence-
-# initial "vN.NN"; a citation of another document names that document first,
-# so those are stripped before the scan.
-own = re.sub(r"[`\w.\-]*brief[`\w.\-]*\s+v\d+\.\d+", "", spec)
-cited = [(int(a), int(b)) for a, b in re.findall(r"\bv(\d+)\.(\d+)\b", own)]
-highest = max(cited, default=(0, 0))
-if declared < highest:
-    print("FAIL technical-spec.md header is older than the amendments it cites")
-    print(f"  header **Version:** {declared[0]}.{declared[1]}")
-    print(f"  cites  v{highest[0]}.{highest[1]}")
-    sys.exit(1)
+    # Function-level drift. A spec amendment that adds a function to a module and
+    # is not followed by re-running that module's task leaves the spec specifying
+    # something no code provides. The next agent to need it is blocked mid-task and
+    # must either guess it, reimplement it in the wrong module, or stop - and only
+    # the third is correct. Catching it here turns that into a failed check
+    # immediately after the amendment, naming the task to re-run.
+    spec = pathlib.Path("technical-spec.md").read_text(encoding="utf-8")
+    try:
+        start = spec.index("## 4. Module contracts")
+        end = spec.index("## 5. Database schema")
+        section = spec[start:end]
+    except ValueError:
+        # Empty section would skip every signature, rule-claim and table-name
+        # check and still print PASS.
+        print("FAIL technical-spec.md is missing §4 or §5 headings")
+        sys.exit(1)
 
-print(
-    f"PASS docs consistent ({len(modules)} modules recorded, "
-    f"every specified function implemented, {len(rules)} error rules, "
-    f"{len(tables)} tables owned)"
-)
+    # The search is scoped to the module's OWN section of interfaces.md. A plain
+    # substring search over the whole file passes as soon as any module anywhere
+    # records a function of that name, so `config.get` was satisfied by
+    # `db.orders.get` and `broker.client.close` by `db.positions.close` — the check
+    # could not fail for any common name.
+    iface_sections: dict[str, str] = {}
+    current_iface = None
+    for line in iface.splitlines():
+        head = re.match(r"^## `([\w\.]+)`", line)
+        if head:
+            current_iface = head.group(1)
+            iface_sections[current_iface] = ""
+            continue
+        if current_iface:
+            iface_sections[current_iface] += line + "\n"
+
+    # A heading may name more than one module — `### `a.py`, `b.py`` — and the
+    # function may be recorded under either. `sandbox/` is skipped: it is research
+    # code that zarabot never imports and it has no interfaces.md section.
+    current: list[str] = []
+    unimplemented: list[tuple[str, str]] = []
+    for line in section.splitlines():
+        if line.startswith("### "):
+            paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
+            current = [
+                p.replace("/", ".") for p in paths if p.startswith("zarabot/")
+            ]
+            continue
+        fn = re.match(r"^\*\*`(?:async\s+)?(\w+)\(", line)
+        if fn and current:
+            wanted = f"{fn.group(1)}("
+            if not any(wanted in iface_sections.get(mod, "") for mod in current):
+                unimplemented.append((current[0], fn.group(1)))
+
+    if unimplemented:
+        print("FAIL functions specified but not recorded in interfaces.md")
+        tasks = pathlib.Path("tasks")
+        for mod, fn in unimplemented:
+            stem = mod.replace("zarabot.", "").replace(".", "-")
+            match = sorted(tasks.glob(f"*-{stem}.md")) if tasks.is_dir() else []
+            where = f" — re-run {match[0]}" if match else ""
+            print(f"  {mod}.{fn}{where}")
+        sys.exit(1)
+
+    # ---------------------------------------------------------------- check 3
+    # Signature drift. `AGENTS.md` requires contract signatures to match exactly,
+    # "including `| None`" — but nothing compared them, so an amendment could add
+    # a parameter to §4 and never reach the code. The check above only asks
+    # whether a function of that NAME is recorded.
+
+    drift, still_diverging = find_signature_drift(
+        section, iface, known=KNOWN_SIGNATURE_DRIFT
+    )
+
+    # An entry whose recorded signature no longer diverges — because it was fixed,
+    # because the function is gone, or because it moved on to a DIFFERENT
+    # divergence — is an exemption nobody voted for. The third case is why the
+    # allowlist stores the signature rather than just the name.
+    stale_drift = sorted(set(KNOWN_SIGNATURE_DRIFT) - still_diverging)
+
+    if drift or stale_drift:
+        if drift:
+            print("FAIL signatures differ between spec §4 and interfaces.md")
+            for mod, fn, want, got in drift:
+                print(f"  {mod}.{fn}")
+                print(f"    spec       {fn}({want[0]}) → {want[1]}")
+                print(f"    interfaces {fn}({got[0]}) → {got[1]}")
+        if stale_drift:
+            print("FAIL KNOWN_SIGNATURE_DRIFT entries no longer describe a divergence")
+            for mod, fn in stale_drift:
+                print(f"  {mod}.{fn}")
+        sys.exit(1)
+
+    # ---------------------------------------------------------------- check 4
+    # Rule ownership. §7.1 already requires every log event to be "owed by exactly
+    # one module, named in the table". §8 never got the same treatment, so a rule
+    # could be superseded by a §4 amendment and left standing — which is how rule 6
+    # still orders the adoption that rule 32 forbids (#91).
+
+    s8 = spec[
+        spec.index("## 8. Error handling rules") : spec.index("## 9. Dependencies")
+    ]
+    rules = re.findall(r"^(\d+[a-z]?)\. \*\*", s8, re.M)
+    claims = {m.group(1) for m in re.finditer(r"rules?\s+(\d+[a-z]?)", section)}
+
+    # Unclaimed when this gate was written (#115). Delete an entry when a §4
+    # contract takes the rule, or when the rule itself goes.
+    KNOWN_UNCLAIMED_RULES = {
+        "2", "3", "5", "6", "7", "8", "12", "13", "14", "16", "17", "18", "20",
+        "22", "24", "25", "26", "27", "28", "29", "30", "34", "37",
+    }
+
+    orphans = [r for r in rules if r not in claims and r not in KNOWN_UNCLAIMED_RULES]
+    stale = sorted(KNOWN_UNCLAIMED_RULES - set(rules))
+    if orphans or stale:
+        if orphans:
+            print("FAIL error rules claimed by no module contract in §4")
+            for r in orphans:
+                print(f"  rule {r}")
+        if stale:
+            print("FAIL KNOWN_UNCLAIMED_RULES names rules that no longer exist")
+            for r in stale:
+                print(f"  rule {r}")
+        sys.exit(1)
+
+    # ---------------------------------------------------------------- check 5
+    # Table ownership. `AGENTS.md`: "Never write to another module's tables.
+    # Ownership is listed in the spec." Nothing checked that a table HAS an owner,
+    # so `instruments` was specified, created by a migration, referenced by two
+    # error rules, and written by nothing at all (#102).
+
+    s5 = spec[spec.index("## 5. Database schema") : spec.index("## 6. Migrations")]
+    tables = re.findall(r"^### `(\w+)`", s5, re.M)
+
+    # Tables whose ownership the spec does not state, or that nothing writes (#102).
+    KNOWN_UNOWNED_TABLES = {
+        "instruments",  # no writer anywhere in zarabot/
+        "schema_version",  # §4 says "schema creation", names no table
+        "daily_snapshots",  # db.signals/snapshots section has no sole-owner line
+        "halt_state",  # §4 says "the halt flag", names no table
+        "reconciliations",  # owner stated only in interfaces.md
+    }
+
+    writers: dict[str, set[str]] = {t: set() for t in tables}
+    for src in pathlib.Path("zarabot").rglob("*.py"):
+        for literal in sql_literals(src):
+            for table in WRITE.findall(literal):
+                if table in writers:
+                    writers[table].add(str(src))
+
+    # Same reason as KNOWN_SIGNATURE_DRIFT: an entry naming a table that no longer
+    # exists in §5, or one that has since acquired a writer, is an exemption
+    # nobody voted for. #102 deletes `instruments`; that must not pass in silence.
+    stale_tables = sorted(
+        (KNOWN_UNOWNED_TABLES - set(tables))
+        | {t for t in KNOWN_UNOWNED_TABLES if writers.get(t) and f"`{t}`" in section}
+    )
+
+    unowned, shared = [], []
+    for table in tables:
+        who = writers[table]
+        if not who and table not in KNOWN_UNOWNED_TABLES:
+            unowned.append(table)
+        elif len(who) > 1:
+            shared.append((table, sorted(who)))
+        elif f"`{table}`" not in section and table not in KNOWN_UNOWNED_TABLES:
+            unowned.append(table)
+
+    if unowned or shared or stale_tables:
+        if stale_tables:
+            print("FAIL KNOWN_UNOWNED_TABLES names tables that are gone or now owned")
+            for table in stale_tables:
+                print(f"  {table}")
+        if unowned:
+            print("FAIL §5 tables with no owning module named in §4")
+            for table in unowned:
+                print(f"  {table}")
+        if shared:
+            print("FAIL §5 tables written by more than one module")
+            for table, who in shared:
+                print(f"  {table}: {', '.join(who)}")
+        sys.exit(1)
+
+    # ---------------------------------------------------------------- check 6
+    # Version drift. §"Versioning" claims a new version when a contract, schema,
+    # rule or test contract changes. The check is a proxy: header ≥ max own
+    # citation. An unmarked amendment is invisible. A git-diff versioner is a
+    # different gate and is not this one.
+    brief = pathlib.Path("business-brief.md").read_text(encoding="utf-8")
+    version_fails = version_gate_failures(
+        {
+            "technical-spec.md": spec,
+            "business-brief.md": brief,
+            "dependency-order.md": dep,
+        }
+    )
+    if version_fails:
+        print("\n".join(version_fails))
+        sys.exit(1)
+
+    print(
+        f"PASS docs consistent ({len(modules)} modules recorded, "
+        f"every specified function implemented, {len(rules)} error rules, "
+        f"{len(tables)} tables owned)"
+    )
+
+
+if __name__ == "__main__":
+    main()
