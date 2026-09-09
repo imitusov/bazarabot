@@ -43,7 +43,13 @@ jobs:
         run: python scripts/ci/check_coverage.py
 
       - name: Docs consistency
-        run: python scripts/ci/check_docs.py
+        run: |
+          python scripts/ci/check_docs.py
+
+      # §7.1 names one owning module per event. Emitted elsewhere, or missing
+      # a required field, and the log stops answering the question it exists for.
+      - name: Event emission
+        run: python scripts/ci/check_events.py
 
       # Failure class 8: a latch set and never reset is equivalent to no alert.
       - name: Latch resets

@@ -104,6 +104,7 @@ jobs:
           pytest --cov --cov-report=json -q
           python scripts/ci/check_coverage.py
           python scripts/ci/check_docs.py
+          python scripts/ci/check_events.py
           python scripts/make_tasks.py && git diff --exit-code tasks/
 
       - name: Open the PR
