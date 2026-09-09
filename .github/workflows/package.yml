@@ -40,6 +40,9 @@ jobs:
           python scripts/ci/check_events.py
           python scripts/ci/check_latches.py
 
+      - name: Compose log rotation
+        run: python scripts/ci/check_compose.py
+
       - name: Rulebook consistency
         run: python scripts/ci/check_rulebook.py
 
