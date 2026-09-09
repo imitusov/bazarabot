@@ -6,6 +6,10 @@ and a list of fields. The owner must put the event literal in `extra={...}`
 (or the equivalent `extra={"event": event, **fields}` helper) with every
 required field as a key on that emit.
 
+This does not prove exclusivity (only the owning module emits the name),
+that emit dicts have no fields beyond §7.1, or that every produced name is
+in the catalogue (orphan producers). Those need a tree-wide walk.
+
 The allowlist is an inventory of gaps that existed when the gate was written.
 Every entry names the issue that will delete it. A silent skip would hide
 new missing events behind yesterday's holes.
@@ -37,6 +41,16 @@ class EventRow:
 
 _FIELD = re.compile(r"`(\w+)`(\s*\(only [^)]+\))?")
 _EVENT_CELL = re.compile(r"`([^`]+)`")
+
+_COMPOUND: tuple[type[ast.stmt], ...] = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.With,
+    ast.AsyncWith,
+    ast.Try,
+) + ((ast.Match,) if hasattr(ast, "Match") else ())
 
 
 def parse_event_rows(spec: str) -> list[EventRow]:
@@ -97,6 +111,14 @@ def _const_str(node: ast.AST) -> str | None:
 
 def _name(node: ast.AST) -> str | None:
     return node.id if isinstance(node, ast.Name) else None
+
+
+def _call_func_name(func: ast.AST) -> str | None:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
 
 
 def _dict_keys_and_event(
@@ -196,7 +218,7 @@ def _record_subscript(
         stored.values.append(ast.Constant(None))
 
 
-def _is_extra_event_helper(fn: ast.FunctionDef) -> bool:
+def _is_extra_event_helper(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """True when the function logs `extra={"event": event, **fields}`."""
     params = {a.arg for a in fn.args.args} | {a.arg for a in fn.args.kwonlyargs}
     if "event" not in params:
@@ -223,12 +245,49 @@ def collect_emits(source: str) -> dict[str, list[set[str]]]:
     helpers: set[str] = {
         fn.name
         for fn in ast.walk(tree)
-        if isinstance(fn, ast.FunctionDef) and _is_extra_event_helper(fn)
+        if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef)
+        and _is_extra_event_helper(fn)
     }
     emits: dict[str, list[set[str]]] = {}
 
     def add(event: str, keys: set[str]) -> None:
         emits.setdefault(event, []).append(set(keys))
+
+    def visit_calls(
+        stmt: ast.stmt,
+        assigned: dict[str, object],
+        extra_keys: dict[str, set[str]],
+    ) -> None:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            func_name = _call_func_name(node.func)
+            if func_name in helpers:
+                event_lit: str | None = None
+                for arg in node.args:
+                    lit = _const_str(arg)
+                    if lit is not None:
+                        event_lit = lit
+                keys: set[str] = set()
+                for kw in node.keywords:
+                    if kw.arg is None:
+                        nested, _ = _dict_keys_and_event(kw.value, assigned)
+                        if isinstance(kw.value, ast.Name):
+                            keys |= extra_keys.get(kw.value.id, set())
+                        keys |= nested
+                    elif kw.arg != "event":
+                        keys.add(kw.arg)
+                if event_lit is not None:
+                    add(event_lit, keys)
+                continue
+            for kw in node.keywords:
+                if kw.arg != "extra":
+                    continue
+                keys, events = _dict_keys_and_event(kw.value, assigned)
+                if isinstance(kw.value, ast.Name):
+                    keys |= extra_keys.get(kw.value.id, set())
+                for event in events:
+                    add(event, keys)
 
     def visit_block(body: list[ast.stmt], assigned: dict[str, object]) -> None:
         extra_keys: dict[str, set[str]] = {}
@@ -244,36 +303,10 @@ def collect_emits(source: str) -> dict[str, list[set[str]]]:
             if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 visit_block(stmt.body, {})
                 continue
-            for node in ast.walk(stmt):
-                if not isinstance(node, ast.Call):
-                    continue
-                func_name = _name(node.func)
-                if func_name in helpers:
-                    event_lit: str | None = None
-                    for arg in node.args:
-                        lit = _const_str(arg)
-                        if lit is not None:
-                            event_lit = lit
-                    keys: set[str] = set()
-                    for kw in node.keywords:
-                        if kw.arg is None:
-                            nested, _ = _dict_keys_and_event(kw.value, assigned)
-                            if isinstance(kw.value, ast.Name):
-                                keys |= extra_keys.get(kw.value.id, set())
-                            keys |= nested
-                        elif kw.arg != "event":
-                            keys.add(kw.arg)
-                    if event_lit is not None:
-                        add(event_lit, keys)
-                    continue
-                for kw in node.keywords:
-                    if kw.arg != "extra":
-                        continue
-                    keys, events = _dict_keys_and_event(kw.value, assigned)
-                    if isinstance(kw.value, ast.Name):
-                        keys |= extra_keys.get(kw.value.id, set())
-                    for event in events:
-                        add(event, keys)
+            # Compound statements are owned by visit_block recursion. Walking
+            # them here would record a phantom site with the outer assigned map.
+            if not isinstance(stmt, _COMPOUND):
+                visit_calls(stmt, assigned, extra_keys)
 
             if isinstance(stmt, ast.If):
                 then_a = dict(assigned)
@@ -293,6 +326,9 @@ def collect_emits(source: str) -> dict[str, list[set[str]]]:
                     visit_block(handler.body, dict(assigned))
                 visit_block(stmt.orelse, dict(assigned))
                 visit_block(stmt.finalbody, dict(assigned))
+            elif hasattr(ast, "Match") and isinstance(stmt, ast.Match):
+                for case in stmt.cases:
+                    visit_block(case.body, dict(assigned))
 
     visit_block(tree.body, {})
     return emits
@@ -306,6 +342,11 @@ def evaluate(
     """Check §7.1 rows against owner modules. Return (exit code, lines)."""
     spec = spec_path.read_text(encoding="utf-8")
     rows = parse_event_rows(spec)
+    if not rows:
+        return (
+            1,
+            ["FAIL spec §7.1 event table not found — the slice above moved"],
+        )
     missing: list[str] = []
     field_gaps: list[str] = []
     inventory: list[str] = []

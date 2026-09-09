@@ -37,6 +37,7 @@ jobs:
           pytest --cov --cov-report=json -q
           python scripts/ci/check_coverage.py
           python scripts/ci/check_docs.py
+          python scripts/ci/check_events.py
 
       - uses: docker/setup-buildx-action@v3
 

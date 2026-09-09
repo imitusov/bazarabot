@@ -200,9 +200,7 @@ def test_main_missing_database_exits_1(
     mod = _mod()
 
     def _run(*_a: object, **_k: object) -> SimpleNamespace:
-        return SimpleNamespace(
-            returncode=0, stdout=_line("heartbeat"), stderr=""
-        )
+        return SimpleNamespace(returncode=0, stdout=_line("heartbeat"), stderr="")
 
     monkeypatch.setattr(mod.subprocess, "run", _run)
     out = tmp_path / "health"
@@ -229,12 +227,7 @@ def test_main_malformed_line_is_written_into_health_not_a_clean_bill(
 ) -> None:
     """Exit 1 and the committed files must name malformed/unknown, not look healthy."""
     mod = _mod()
-    stdout = (
-        _line("heartbeat")
-        + "\nprefix {not json\n"
-        + _line("session_open")
-        + "\n"
-    )
+    stdout = _line("heartbeat") + "\nprefix {not json\n" + _line("session_open") + "\n"
 
     def _run(*_a: object, **_k: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
@@ -365,18 +358,17 @@ def test_known_events_matches_the_spec_71_table() -> None:
     alarm on the one signal an operator is meant to trust. A comment reading
     "Spec §7.1 catalogue" is an intention; this is the check.
 
-    One table row can name two events (`session_open` / `session_closed`), so
-    the cell is split on "/" rather than taken whole.
+    One table row can name two events (`session_open` / `session_closed`);
+    `parse_event_rows` splits those cells.
     """
     mod = _mod()
+    path = Path("scripts/ci/check_events.py")
+    spec_mod = importlib.util.spec_from_file_location("check_events", path)
+    assert spec_mod is not None and spec_mod.loader is not None
+    check = importlib.util.module_from_spec(spec_mod)
+    spec_mod.loader.exec_module(check)
     spec = Path("technical-spec.md").read_text(encoding="utf-8")
-    section = spec[spec.index("| `startup_ok`") : spec.index("`gap_vs_stop` on")]
-    table: set[str] = set()
-    for line in section.splitlines():
-        if not line.startswith("| `"):
-            continue
-        cell = line.split("|")[1]
-        table.update(name.strip().strip("`") for name in cell.split("/"))
+    table = {row.name for row in check.parse_event_rows(spec)}
     assert table, "spec §7.1 event table not found — the slice above moved"
     assert table == mod.KNOWN_EVENTS, (
         f"only in code: {sorted(mod.KNOWN_EVENTS - table)}; "
