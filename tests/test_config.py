@@ -119,6 +119,18 @@ def test_missing_required_var_sets_variable_to_the_env_name(
     assert exc.value.variable == "TINVEST_TOKEN"
 
 
+def test_config_error_omitting_variable_is_type_error() -> None:
+    # Required keyword is the guarantee a raise site cannot drop `variable=`.
+    # Asserting the attribute alone would still pass against a hardcoded literal.
+    with pytest.raises(TypeError):
+        ConfigError("msg")
+
+
+def test_config_error_variable_cannot_be_positional() -> None:
+    with pytest.raises(TypeError):
+        ConfigError("msg", "TINVEST_TOKEN")  # type: ignore[misc]
+
+
 def test_position_size_pct_zero_or_above_100_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
