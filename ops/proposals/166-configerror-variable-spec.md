@@ -25,8 +25,29 @@ The second case is the one worth having. #164 has a test for the first; the
 weaker of its two tests would stay green against `variable="TINVEST_TOKEN"`
 hardcoded inside `_require`, because that message also begins with that word.
 
-**Modules to re-run:** none. The code already does this; the spec is catching
-up to it.
+**Modules to re-run:** `01-config`, tests only — for the `TypeError` case below.
+The implementation already does this; the spec is catching up to it, but the
+§3.2 case this proposal calls "the one worth having" has no test today
+(`grep -c TypeError tests/test_config.py` is 0). An amendment that adds a §3.2
+case and dispatches nobody to write it leaves an obligation with no code line,
+which is the thing §3.2 cases exist to prevent.
+
+Nothing mechanical will catch a `config` re-run that drops `variable=`. Check 3
+compares §4 against `interfaces.md` — two documents; it never reads Python, and
+its `SIG` regex requires an arrow return type a constructor bullet does not
+have. That `TypeError` test is the only guard, so it must be dispatched here.
+
+**Placement:** make the signature a `**\`ConfigError(message: str, *, variable:
+str)\`**` sub-heading under §4 `zarabot/config.py`, not another prose bullet
+under `load()`. Not because check 3 would then see it — it would not — but so a
+re-run reads it as a signature to match rather than commentary.
+
+**Also amend `strategies.registry`.** `registry.py:31` raises
+`ConfigError(..., variable="ENABLED_STRATEGIES")`, while §4's registry sentence
+says only "raising `ConfigError` on an unknown name". A re-run of that task from
+the spec alone writes the two-argument call and hits `TypeError`. Either add the
+clause there or state that §4's `config` bullet governs every raise site
+project-wide.
 
 **Do not:** implement `app.startup` here. #135 is still open — `app.startup`
 reads `exc.variable` and `_config_variable` goes. That leftover is a later
