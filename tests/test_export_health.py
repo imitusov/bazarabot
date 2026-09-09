@@ -309,7 +309,10 @@ def test_schema_v7_queries_succeed_on_migrated_database(tmp_path: Path) -> None:
         )
     conn.commit()
     conn.close()
-    info, problems = mod.read_database(db)
+    # `since` is passed rather than defaulted: with None, read_database falls
+    # through to datetime.now(), and the rulebook forbids a test relying on the
+    # wall clock. It is also the parameter the window queries filter on.
+    info, problems = mod.read_database(db, since=NOW.isoformat())
     assert info["present"] is True
     assert info["schema_version"] == 7
     assert problems == []
@@ -323,10 +326,23 @@ def test_emitted_catalog_names_are_counted_not_unknown() -> None:
     mod = _mod()
     raw = "\n".join(
         [
-            _line("startup_ok", version="0.1.0", mode="paper", halted=False, adjustments_count=0),
+            _line(
+                "startup_ok",
+                version="0.1.0",
+                mode="paper",
+                halted=False,
+                adjustments_count=0,
+            ),
             _line("db_write_failed", "ERROR", table="orders", critical=True),
-            _line("broker_unavailable", "WARNING", method="post_order", consecutive_failures=2),
-            _line("rate_limited", "WARNING", method="get_orders", retry_after_seconds=1),
+            _line(
+                "broker_unavailable",
+                "WARNING",
+                method="post_order",
+                consecutive_failures=2,
+            ),
+            _line(
+                "rate_limited", "WARNING", method="get_orders", retry_after_seconds=1
+            ),
             _line("heartbeat", uptime_seconds=1, open_positions=0, halted=False),
         ]
     )
