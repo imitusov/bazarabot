@@ -52,6 +52,36 @@ def test_two_module_heading_fails_when_second_module_signature_disagrees() -> No
     assert ("zarabot.db.snapshots", "write_daily") in names
 
 
+def test_two_module_heading_unimplemented_names_second_module() -> None:
+    """Check 2 must not pin a missing function to the first heading module.
+
+    A two-module §4 heading whose second module does not record a specified
+    name must FAIL as that second module (and its task), not as the first.
+    """
+    check = _load()
+    spec = (
+        "### `zarabot/db/signals.py`, `zarabot/db/snapshots.py`\n"
+        "\n"
+        "**`async write_daily(snapshot: DailySnapshot) → None`**\n"
+    )
+    iface_sections = {
+        "zarabot.db.signals": (
+            "**`async record(signal: Signal, decision: RiskDecision) → None`**\n"
+        ),
+        "zarabot.db.snapshots": "",
+    }
+    missing = check.unimplemented_specified_functions(spec, iface_sections)
+    named = {(mod, fn) for mod, fn in missing}
+    assert ("zarabot.db.snapshots", "write_daily") in named
+    assert named != {("zarabot.db.signals", "write_daily")}
+    tasks = Path(__file__).resolve().parents[1] / "tasks"
+    lines = check.format_unimplemented(missing, tasks)
+    assert any(
+        "zarabot.db.snapshots.write_daily" in line and "11-db-snapshots.md" in line
+        for line in lines
+    )
+
+
 def test_function_recorded_in_neither_section_is_skipped_not_failed() -> None:
     check = _load()
     spec = (
