@@ -92,12 +92,47 @@ not add `purge_old` to production documents to write that test; a fixture
 heading pair is enough once the gate no longer unions modules.
 
 **Modules to re-run:** none until the spec is amended. After the amendment:
-possibly **none** if it is docs-only (headings and existing bullets moved, no
-new behaviour). Then `scripts/ci/check_docs.py` tests that still fixture the
-combined heading (`tests/test_check_docs.py`) need updating when the `any()`
-comes out — those tests, not `zarabot/db/signals.py` or `zarabot/db/snapshots.py`.
-Do not re-run tasks 10/11 for a heading split that matches what
-`interfaces.md` already records.
+none in `zarabot/` — headings and existing bullets move, no new behaviour. Do
+not re-run tasks 10/11 for a heading split that matches what `interfaces.md`
+already records.
+
+**But the amendment is not docs-only, and following this document literally
+reds CI.** Three things move with it, in the same commit:
+
+1. **Delete two `KNOWN_SIGNATURE_DRIFT` entries** in
+   `scripts/ci/check_docs.py`: `("zarabot.db.signals", "list_for_period")` and
+   `("zarabot.db.snapshots", "list_for_period")`. Giving each heading its own
+   per-module return type is exactly what stops those two describing a
+   divergence, and check 3's staleness arm hard-fails on an entry that no
+   longer does:
+
+   ```
+   FAIL KNOWN_SIGNATURE_DRIFT entries no longer describe a divergence
+     zarabot.db.signals.list_for_period
+     zarabot.db.snapshots.list_for_period
+   ```
+
+   **Keep** the third, `("zarabot.db.snapshots", "write_daily")` — this
+   amendment keeps the untyped `snapshot` wording, so that entry still
+   describes a real divergence and deleting it fails the other way.
+2. **Regenerate `tasks/`.** Both `tasks/10-db-signals.md` and
+   `tasks/11-db-snapshots.md` change (+5/-9), and `make drift` runs
+   `make_tasks.py && git diff --exit-code tasks/`.
+3. **`tests/test_check_docs.py`** fixtures that still use the combined heading,
+   when the `any()` comes out.
+
+**`scripts/make_tasks.py` needs no edit.** Its §4 marker field is already
+per-module — `zarabot/db/signals.py` and `zarabot/db/snapshots.py` — and both
+task files paste the same §4 body today only because `section()` matches the
+shared heading by substring. What rows 10 and 11 share is field 4, the §3.2
+test-contract key, and that is not what this amendment touches.
+
+**§3.2 stays as it is.** `technical-spec.md:514`'s `` **`db.signals` /
+`db.snapshots`** `` heading is not the anomaly — `:1192` has
+`` **`app.loops` / `app.shutdown`** `` with separate §4 headings, so a shared
+§3.2 key alongside split §4 headings is the established pattern. Splitting it
+too would force `M`'s field 4 to change for rows 10/11 and dirty `tasks/`
+further than this proposal predicts.
 
 `make_tasks.py` currently labels task 10 as `` `db.signals` / `db.snapshots` ``
 and both `tasks/10-db-signals.md` and `tasks/11-db-snapshots.md` paste the
