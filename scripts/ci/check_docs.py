@@ -2,15 +2,17 @@
 """Fail when the documents and the code have drifted apart.
 
 Six checks that are cheap and catch a whole class of decay:
-  1. Every module in dependency-order.md has an interfaces.md entry. A module
-     built without one is invisible to every later task.
+  1. Every module in dependency-order.md has a ``## `module` `` heading in
+     interfaces.md (the keys of the parsed sections). A prose mention is not
+     an entry. dependency-order.md writes ``db.cooldowns``; the heading is
+     ``zarabot.db.cooldowns``. Sandbox modules match the heading as written.
   2. Every function specified in spec §4 is recorded by name in interfaces.md.
-     A heading naming two zarabot modules satisfies this if EITHER module's
-     section records the name, so a function implemented in the wrong module of
-     a shared heading passes — and a miss is reported against both modules, so
-     one absent function yields two FAIL lines and two task files. Written down
-     because a gate that reads as resolving shared-heading attribution and
-     resolves half of it is failure class 6 (see #161's successor).
+     A shared heading is satisfied if any listed module records the name; a
+     name that appears in exactly one of those sections is therefore OK for
+     "exists". Wrong-module implementation is green. A NEW name recorded only
+     under signals cannot be attributed to snapshots without an ownership
+     convention in the spec; splitting the heading is the spec-side fix.
+     A miss is reported against both modules. Sandbox headings are skipped.
   3. Every function specified in spec §4 has the same signature in
      interfaces.md - parameters, defaults and return type. A heading that
      names two zarabot modules is compared against each module's section.
@@ -185,26 +187,44 @@ def unimplemented_specified_functions(
 ) -> list[tuple[str, str]]:
     """§4 names recorded in none of the heading's interfaces.md sections.
 
-    A heading that lists more than one zarabot path is not attributed to the
-    first path. When a function is missing from every listed section, report
-    each module in the heading so the missing interfaces.md section (and its
-    task) is named, not current[0].
+    Uses `sections()` for the heading split. Headings with no `zarabot/` path
+    (sandbox) are skipped. A shared heading is satisfied if any listed module
+    records the name, including when that is exactly one module — wrong-module
+    implementation is therefore green. When the name is in none of them,
+    report each heading module so the miss is not pinned to current[0].
     """
-    current: list[str] = []
-    unimplemented: list[tuple[str, str]] = []
-    for line in spec_section.splitlines():
-        if line.startswith("### "):
-            paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
-            current = [
-                p.replace("/", ".") for p in paths if p.startswith("zarabot/")
-            ]
+    spec_mods = sections(spec_section, r"^### (.+)")
+    grouped: dict[str, list[str]] = {}
+    for mod, body in spec_mods.items():
+        if not mod.startswith("zarabot."):
             continue
-        fn = re.match(r"^\*\*`(?:async\s+)?(\w+)\(", line)
-        if fn and current:
+        grouped.setdefault(body, []).append(mod)
+    unimplemented: list[tuple[str, str]] = []
+    for body, current in grouped.items():
+        seen: set[str] = set()
+        for line in body.splitlines():
+            fn = re.match(r"^\*\*`(?:async\s+)?(\w+)\(", line)
+            if not fn or fn.group(1) in seen:
+                continue
+            seen.add(fn.group(1))
             wanted = f"{fn.group(1)}("
             if not any(wanted in iface_sections.get(mod, "") for mod in current):
                 unimplemented.extend((mod, fn.group(1)) for mod in current)
     return unimplemented
+
+
+def modules_missing_interface_headings(
+    modules: list[str],
+    iface: str,
+) -> list[str]:
+    """Modules with no ``## `...` `` heading in interfaces.md.
+
+    Keys of `sections()` are the headings. Dep-order names without the
+    `zarabot.` prefix match `zarabot.{module}`. A substring in prose is not
+    a heading.
+    """
+    keys = set(sections(iface, r"^## `([\w\.]+)`"))
+    return [m for m in modules if m not in keys and f"zarabot.{m}" not in keys]
 
 
 def format_unimplemented(
@@ -271,7 +291,8 @@ def main() -> None:
     iface = pathlib.Path("interfaces.md").read_text(encoding="utf-8")
     modules = re.findall(r"^\d+[a-z]?\. \*\*([\w\.]+)\*\*", dep, re.M)
 
-    missing = [m for m in modules if m not in iface]
+    iface_sections = sections(iface, r"^## `([\w\.]+)`")
+    missing = modules_missing_interface_headings(modules, iface)
     if missing:
         print("FAIL modules missing from interfaces.md")
         for m in missing:
@@ -295,27 +316,12 @@ def main() -> None:
         print("FAIL technical-spec.md is missing §4 or §5 headings")
         sys.exit(1)
 
-    # The search is scoped to the module's OWN section of interfaces.md. A plain
+    # The search is scoped to each module's OWN interfaces.md section (parsed
+    # once via `sections()`, same helper as check 1 and check 3). A plain
     # substring search over the whole file passes as soon as any module anywhere
     # records a function of that name, so `config.get` was satisfied by
     # `db.orders.get` and `broker.client.close` by `db.positions.close` — the check
     # could not fail for any common name.
-    iface_sections: dict[str, str] = {}
-    current_iface = None
-    for line in iface.splitlines():
-        head = re.match(r"^## `([\w\.]+)`", line)
-        if head:
-            current_iface = head.group(1)
-            iface_sections[current_iface] = ""
-            continue
-        if current_iface:
-            iface_sections[current_iface] += line + "\n"
-
-    # A heading may name more than one module — `### `a.py`, `b.py`` — and the
-    # function may be recorded under either. `sandbox/` is skipped: it is research
-    # code that zarabot never imports and it has no interfaces.md section.
-    # Attribute a miss to every heading module, not current[0]: otherwise a
-    # missing db.snapshots function is reported as zarabot.db.signals.
     unimplemented = unimplemented_specified_functions(section, iface_sections)
 
     if unimplemented:
