@@ -67,7 +67,7 @@ KNOWN_EVENTS = frozenset(
         "task_crashed",
         "clock_drift",
         "heartbeat",
-        "weekly_report_sent",
+        "weekly_report_built",
     }
 )
 

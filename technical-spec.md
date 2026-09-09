@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.71
+**Version:** 1.72
 **Date:** 2026-09-08
 **Implements:** `business-brief.md` v1.11
 
@@ -1126,8 +1126,11 @@ Additionally, on exits booked from an exchange stop:
   (proves the undefined-metric path).
 - A report exceeding the message limit drops the least important section and
   notes the omission (proves the documented trimming order).
-- A successful send emits `weekly_report_sent` with `period_start` and
-  `period_end` (v1.61).
+- The event emitted after the send is `weekly_report_built` with `period_start`
+  and `period_end` (v1.61, renamed v1.72). It fires once `alert` has returned,
+  including when the notifier swallowed a send failure under rule 13 — the
+  module witnesses composition and hand-off, never delivery. Delivery is
+  `telegram_send_failed` **absent**, not `weekly_report_built` **present**.
 
 **`app.startup`**
 - Startup with valid config, a reachable broker and a clean database completes
@@ -3300,8 +3303,16 @@ One handler per command in the brief's command table.
   distribution, cooldown counts, worst trade — and the omission is noted.
 
 **`async send(now: datetime) → None`** — builds and sends; failure alerts but does not raise.
-- **On a successful send, emit `weekly_report_sent` (INFO) with `period_start`
-  and `period_end` (v1.61).** A failed send emits nothing of this name.
+- **After `alert` returns, emit `weekly_report_built` (INFO) with
+  `period_start` and `period_end` (v1.61, renamed from `weekly_report_sent`
+  in v1.72).** The event names what this module can observe: the report was
+  composed and handed to the notifier. Rule 13 makes a Telegram send failure
+  retry, log and never propagate, so `alert` returning is not evidence of
+  delivery and this module must not claim it. It therefore fires even when the
+  notifier swallowed a send failure, and it is never emitted when `build` or
+  `alert` raises. Delivery is observed by the **absence** of
+  `telegram_send_failed`, not by the presence of this event; `reporter.weekly`
+  neither receives nor infers a send-success flag.
 
 ### `zarabot/app/startup.py`
 
@@ -4317,7 +4328,7 @@ implementation gap.
 | `task_crashed` | `app.loops` | ERROR | `task`, `error`, `restart_in_seconds` |
 | `clock_drift` | `app.loops` | WARNING | `drift_seconds` |
 | `heartbeat` | `app.loops` | INFO | `uptime_seconds`, `open_positions`, `halted` |
-| `weekly_report_sent` | `reporter.weekly` | INFO | `period_start`, `period_end` |
+| `weekly_report_built` | `reporter.weekly` | INFO | `period_start`, `period_end` |
 
 `gap_vs_stop` on `position_closed` is populated only for `STOP_LOSS` exits and
 carries the difference between the actual exit price and the stop price. It is
