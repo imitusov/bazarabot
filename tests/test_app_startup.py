@@ -180,6 +180,40 @@ async def test_invalid_config_emits_config_invalid_and_not_startup_ok(
     assert "tinvest-secret-token" not in caplog.text
 
 
+async def test_config_invalid_uses_variable_attribute_not_message_split(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """config_invalid.variable is ConfigError.variable, not str(exc).split()[0]."""
+    from zarabot.app.startup import StartupError, start
+    from zarabot.config import ConfigError
+
+    def _load() -> object:
+        raise ConfigError(
+            "Missing required setting for this environment",
+            variable="ALLOCATED_CAPITAL",
+        )
+
+    monkeypatch.setattr("zarabot.app.startup.load", _load)
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr("zarabot.app.startup.alert", _alert)
+    with (
+        caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"),
+        pytest.raises(StartupError),
+    ):
+        await start()
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "config_invalid"
+    ]
+    assert len(events) == 1
+    assert events[0].variable == "ALLOCATED_CAPITAL"
+
+
 async def test_ssl_tbank_verify_is_present_before_first_broker_call(
     env: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
