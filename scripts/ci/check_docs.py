@@ -15,7 +15,11 @@ Six checks that are cheap and catch a whole class of decay:
      **Version:** header that is not older than that document's own vN.NN
      citations. This is a proxy (citations present and header ≥ max citation),
      not a proof that every contract edit bumped the header. Documents are not
-     pooled. Header newer than any citation is allowed.
+     pooled. Header newer than any citation is allowed. Only technical-spec.md
+     carries own-document markers today, so the brief and dependency-order arms
+     are dormant (they cannot fail). A gate that reads as covering three
+     documents and covers one is failure class 6 unless that limit is written
+     down. Do not fail a document that has zero markers.
 
 Checks 3-6 exist because the spec stores one obligation in two normative
 places - §8 rules and §4 contracts, §4 signatures and interfaces.md - and
@@ -169,6 +173,48 @@ def find_signature_drift(
     return drift, still_diverging
 
 
+def unimplemented_specified_functions(
+    spec_section: str,
+    iface_sections: dict[str, str],
+) -> list[tuple[str, str]]:
+    """§4 names recorded in none of the heading's interfaces.md sections.
+
+    A heading that lists more than one zarabot path is not attributed to the
+    first path. When a function is missing from every listed section, report
+    each module in the heading so the missing interfaces.md section (and its
+    task) is named, not current[0].
+    """
+    current: list[str] = []
+    unimplemented: list[tuple[str, str]] = []
+    for line in spec_section.splitlines():
+        if line.startswith("### "):
+            paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
+            current = [
+                p.replace("/", ".") for p in paths if p.startswith("zarabot/")
+            ]
+            continue
+        fn = re.match(r"^\*\*`(?:async\s+)?(\w+)\(", line)
+        if fn and current:
+            wanted = f"{fn.group(1)}("
+            if not any(wanted in iface_sections.get(mod, "") for mod in current):
+                unimplemented.extend((mod, fn.group(1)) for mod in current)
+    return unimplemented
+
+
+def format_unimplemented(
+    unimplemented: list[tuple[str, str]],
+    tasks: pathlib.Path,
+) -> list[str]:
+    """One FAIL line per (module, function), naming that module's task file."""
+    lines: list[str] = []
+    for mod, fn in unimplemented:
+        stem = mod.replace("zarabot.", "").replace(".", "-")
+        match = sorted(tasks.glob(f"*-{stem}.md")) if tasks.is_dir() else []
+        where = f" — re-run {match[0]}" if match else ""
+        lines.append(f"  {mod}.{fn}{where}")
+    return lines
+
+
 def sql_literals(src: pathlib.Path) -> list[str]:
     """Every string constant in the file, and nothing else.
 
@@ -262,29 +308,13 @@ def main() -> None:
     # A heading may name more than one module — `### `a.py`, `b.py`` — and the
     # function may be recorded under either. `sandbox/` is skipped: it is research
     # code that zarabot never imports and it has no interfaces.md section.
-    current: list[str] = []
-    unimplemented: list[tuple[str, str]] = []
-    for line in section.splitlines():
-        if line.startswith("### "):
-            paths = re.findall(r"`([\w/\.]+?)(?:\.py)?`", line)
-            current = [
-                p.replace("/", ".") for p in paths if p.startswith("zarabot/")
-            ]
-            continue
-        fn = re.match(r"^\*\*`(?:async\s+)?(\w+)\(", line)
-        if fn and current:
-            wanted = f"{fn.group(1)}("
-            if not any(wanted in iface_sections.get(mod, "") for mod in current):
-                unimplemented.append((current[0], fn.group(1)))
+    # Attribute a miss to every heading module, not current[0]: otherwise a
+    # missing db.snapshots function is reported as zarabot.db.signals.
+    unimplemented = unimplemented_specified_functions(section, iface_sections)
 
     if unimplemented:
         print("FAIL functions specified but not recorded in interfaces.md")
-        tasks = pathlib.Path("tasks")
-        for mod, fn in unimplemented:
-            stem = mod.replace("zarabot.", "").replace(".", "-")
-            match = sorted(tasks.glob(f"*-{stem}.md")) if tasks.is_dir() else []
-            where = f" — re-run {match[0]}" if match else ""
-            print(f"  {mod}.{fn}{where}")
+        print("\n".join(format_unimplemented(unimplemented, pathlib.Path("tasks"))))
         sys.exit(1)
 
     # ---------------------------------------------------------------- check 3
@@ -410,7 +440,9 @@ def main() -> None:
     # Version drift. §"Versioning" claims a new version when a contract, schema,
     # rule or test contract changes. The check is a proxy: header ≥ max own
     # citation. An unmarked amendment is invisible. A git-diff versioner is a
-    # different gate and is not this one.
+    # different gate and is not this one. Only technical-spec.md carries
+    # own-document markers today; the brief and dependency-order arms are
+    # dormant. Do not fail a document with zero markers.
     brief = pathlib.Path("business-brief.md").read_text(encoding="utf-8")
     version_fails = version_gate_failures(
         {
