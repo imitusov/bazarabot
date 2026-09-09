@@ -61,6 +61,10 @@ _REDACT = "***"
 class ConfigError(Exception):
     """Invalid or missing configuration. Message names the variable, never a token."""
 
+    def __init__(self, message: str, *, variable: str) -> None:
+        super().__init__(message)
+        self.variable = variable
+
 
 def _raw(name: str) -> str | None:
     value = os.environ.get(name)
@@ -73,7 +77,7 @@ def _raw(name: str) -> str | None:
 def _require(name: str) -> str:
     value = _raw(name)
     if value is None:
-        raise ConfigError(f"{name} is missing or empty")
+        raise ConfigError(f"{name} is missing or empty", variable=name)
     return value
 
 
@@ -82,7 +86,7 @@ def _optional(name: str) -> str:
     if value is not None:
         return value
     if name in _RISK_VARS and name not in _DEFAULTS:
-        raise ConfigError(f"{name} is missing or empty")
+        raise ConfigError(f"{name} is missing or empty", variable=name)
     return _DEFAULTS[name]
 
 
@@ -90,7 +94,7 @@ def _decimal(name: str, raw: str) -> Decimal:
     try:
         value = Decimal(raw)
     except InvalidOperation as exc:
-        raise ConfigError(f"{name} is not a valid number") from exc
+        raise ConfigError(f"{name} is not a valid number", variable=name) from exc
     return value
 
 
@@ -98,13 +102,13 @@ def _int(name: str, raw: str) -> int:
     try:
         return int(raw)
     except ValueError as exc:
-        raise ConfigError(f"{name} is not a valid integer") from exc
+        raise ConfigError(f"{name} is not a valid integer", variable=name) from exc
 
 
 def _pct(name: str, raw: str) -> Decimal:
     value = _decimal(name, raw)
     if value <= 0 or value > 100:
-        raise ConfigError(f"{name} is out of range")
+        raise ConfigError(f"{name} is out of range", variable=name)
     return value
 
 
@@ -112,14 +116,14 @@ def _pct_inclusive(name: str, raw: str, low: Decimal, high: Decimal) -> Decimal:
     """A percentage whose bounds are both inclusive, unlike `_pct`."""
     value = _decimal(name, raw)
     if value < low or value > high:
-        raise ConfigError(f"{name} is out of range")
+        raise ConfigError(f"{name} is out of range", variable=name)
     return value
 
 
 def _positive_int(name: str, raw: str) -> int:
     value = _int(name, raw)
     if value <= 0:
-        raise ConfigError(f"{name} is out of range")
+        raise ConfigError(f"{name} is out of range", variable=name)
     return value
 
 
@@ -132,7 +136,7 @@ def _bool(name: str, raw: str) -> bool:
         return True
     if raw == "false":
         return False
-    raise ConfigError(f"{name} is out of range")
+    raise ConfigError(f"{name} is out of range", variable=name)
 
 
 @dataclass(frozen=True)
@@ -207,7 +211,7 @@ def load() -> Config:
     telegram_token = _require("TELEGRAM_BOT_TOKEN")
     trading_mode = _optional("TRADING_MODE")
     if trading_mode not in {"live", "sandbox"}:
-        raise ConfigError("TRADING_MODE is out of range")
+        raise ConfigError("TRADING_MODE is out of range", variable="TRADING_MODE")
 
     # Sandbox is a separate broker environment, not a flag on the live one: its
     # accounts do not exist on the live endpoint and are usually reached with a
@@ -221,7 +225,9 @@ def load() -> Config:
 
     allocated = _decimal("ALLOCATED_CAPITAL", _require("ALLOCATED_CAPITAL"))
     if allocated <= 0:
-        raise ConfigError("ALLOCATED_CAPITAL is out of range")
+        raise ConfigError(
+            "ALLOCATED_CAPITAL is out of range", variable="ALLOCATED_CAPITAL"
+        )
 
     # MAX_POSITION_PCT was withdrawn in v1.30 (#15) along with its cross-field
     # check against POSITION_SIZE_PCT. The check guaranteed
@@ -234,22 +240,30 @@ def load() -> Config:
     stop_loss = _pct("STOP_LOSS_PCT", _optional("STOP_LOSS_PCT"))
     take_profit = _pct("TAKE_PROFIT_PCT", _optional("TAKE_PROFIT_PCT"))
     if take_profit <= stop_loss:
-        raise ConfigError("TAKE_PROFIT_PCT must be greater than STOP_LOSS_PCT")
+        raise ConfigError(
+            "TAKE_PROFIT_PCT must be greater than STOP_LOSS_PCT",
+            variable="TAKE_PROFIT_PCT",
+        )
 
     max_open = _positive_int("MAX_OPEN_POSITIONS", _optional("MAX_OPEN_POSITIONS"))
     if max_open * position_size > 100:
-        raise ConfigError("MAX_OPEN_POSITIONS × POSITION_SIZE_PCT exceeds 100")
+        raise ConfigError(
+            "MAX_OPEN_POSITIONS × POSITION_SIZE_PCT exceeds 100",
+            variable="MAX_OPEN_POSITIONS",
+        )
 
     watchlist = _csv(_require("WATCHLIST"))
     if not watchlist:
-        raise ConfigError("WATCHLIST is missing or empty")
+        raise ConfigError("WATCHLIST is missing or empty", variable="WATCHLIST")
 
     ml_raw = _raw("ML_MODEL_PATH")
     ml_path: Path | None
     if ml_raw:
         ml_path = Path(ml_raw)
         if not ml_path.is_file() or not os.access(ml_path, os.R_OK):
-            raise ConfigError("ML_MODEL_PATH is set but unreadable")
+            raise ConfigError(
+                "ML_MODEL_PATH is set but unreadable", variable="ML_MODEL_PATH"
+            )
     else:
         ml_path = None
 
