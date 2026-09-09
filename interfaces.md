@@ -114,6 +114,10 @@ identifiers never appear in `ConfigError` messages or in `Config`'s
 **`ConfigError`**
 Raised when a required variable is missing or empty, a numeric value is out of
 range, or a cross-field rule fails. The message names the offending variable.
+`ConfigError(message: str, *, variable: str)` — `variable` is the env var name
+set at the raise site, never parsed from the message. Cross-field:
+`TAKE_PROFIT_PCT` (vs `STOP_LOSS_PCT`), `MAX_OPEN_POSITIONS` (vs
+`POSITION_SIZE_PCT`).
 
 **`Config`** (frozen)
 `tinvest_token: str`, `tinvest_account_id: str`, `trading_mode: str`,

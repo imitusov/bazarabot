@@ -23,6 +23,7 @@ cover:
 
 docs:
 	@$(PY) scripts/ci/check_docs.py
+	@$(PY) scripts/ci/check_latches.py
 	@$(PY) scripts/ci/check_events.py
 
 # If tasks/ changes when regenerated, the spec and the tasks an agent is fed

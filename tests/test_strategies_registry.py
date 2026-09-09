@@ -81,8 +81,10 @@ def test_enabled_returns_configured_rule_based_strategies() -> None:
 
 
 def test_unknown_strategy_name_raises_config_error() -> None:
-    with pytest.raises(ConfigError, match="ENABLED_STRATEGIES"):
+    with pytest.raises(ConfigError, match="ENABLED_STRATEGIES") as exc:
         enabled(_config(enabled_strategies=("not_a_strategy",)))
+    assert "not_a_strategy" in str(exc.value)
+    assert exc.value.variable == "ENABLED_STRATEGIES"
 
 
 def test_ml_model_absent_when_path_unset() -> None:

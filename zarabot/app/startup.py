@@ -103,10 +103,6 @@ def _env_secrets() -> list[str]:
     ]
 
 
-def _config_variable(exc: ConfigError) -> str:
-    return str(exc).split()[0]
-
-
 async def _abort(
     message: str,
     cause: BaseException | None = None,
@@ -428,7 +424,7 @@ async def start() -> AppContext:
             "config_invalid",
             extra={
                 "event": "config_invalid",
-                "variable": _config_variable(exc),
+                "variable": exc.variable,
             },
         )
         await _abort(f"Startup aborted: {exc}", exc)

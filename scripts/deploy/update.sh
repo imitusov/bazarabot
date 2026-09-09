@@ -35,10 +35,37 @@ fi
 # An order in SUBMITTING means the broker's answer is unknown. Restarting is
 # recoverable by design, but there is no reason to spend that margin on a
 # routine update - wait for the next window instead.
-if [ -f "$DB" ]; then
-  inflight=$(sqlite3 "$DB" "SELECT COUNT(*) FROM orders WHERE status IN ('SUBMITTING','SUBMITTED');" 2>/dev/null || echo 0)
-  [ "$inflight" = "0" ] || die "$inflight order(s) in flight"
-fi
+#
+# This reads the database through python3, not the sqlite3 CLI. python3 is
+# already a hard dependency of the stack; the sqlite3 binary is not installed
+# and is named as a prerequisite nowhere, so `sqlite3 ... || echo 0` reported
+# "no orders in flight" whether or not that was true (#171).
+#
+# It fails CLOSED. Every branch below either produces a real count or refuses:
+# a count is the only thing that lets a deploy through. `die` exits 0 - "not an
+# error, just not now" - so refusing costs one skipped window, not an alert.
+[ -f "$DB" ] || die "database not found at $DB"
+
+inflight=$(python3 - "$DB" <<'PYEOF' 2>&1
+import sqlite3
+import sys
+
+db = sys.argv[1]
+conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+try:
+    row = conn.execute(
+        "SELECT COUNT(*) FROM orders WHERE status IN ('SUBMITTING','SUBMITTED')"
+    ).fetchone()
+finally:
+    conn.close()
+print(row[0])
+PYEOF
+) || die "could not read the order table: $inflight"
+
+case "$inflight" in
+  ''|*[!0-9]*) die "order count was not a number: $inflight" ;;
+esac
+[ "$inflight" = "0" ] || die "$inflight order(s) in flight"
 
 docker pull -q "$IMAGE:$TAG" >/dev/null
 new_digest=$(docker image inspect "$IMAGE:$TAG" --format '{{index .RepoDigests 0}}' 2>/dev/null || echo "")
