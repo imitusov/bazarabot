@@ -41,7 +41,11 @@
   grouping is an *input* (`sector_of: dict[str, str]` plus `max_per_sector`),
   not a lookup. New `RejectionReason` (name TBD). 95% coverage on every
   branch. If that re-opens: `business-brief` (human), then `config` (the map)
-  and `risk.gate` (new input; `app.loops` is the only `gate.check` call site).
+  and `risk.gate` (new input). `gate.check` is reachable from three places, not
+  one: `app/loops.py:63`, `scripts/diagnose/entry_funnel.py:74` (the real gate,
+  dry run) and `sandbox/backtest.py` transitively through `trading_cycle` —
+  `_seams` does not patch the gate. A new gate parameter changes the signature
+  at all three.
 
 **§3.2 (when the brief names a cap value):**
 
