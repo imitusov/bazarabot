@@ -179,7 +179,15 @@ def _check_claude(root: pathlib.Path, lines: list[str]) -> None:
 
 
 def _check_rules(spec: str, agents: str, lines: list[str]) -> None:
-    high, spec_9b, lettered = spec_ordinals(spec)
+    # Wrapped like `agents_range` below: a renamed §8 heading is a FAIL line,
+    # not a traceback. Every other failure here reports through `lines`, and a
+    # gate that exits on a stack trace when its input moves reads as a crash
+    # rather than as the finding it is.
+    try:
+        high, spec_9b, lettered = spec_ordinals(spec)
+    except ValueError as exc:
+        lines.append(f"FAIL {exc}")
+        return
     extra = lettered - {"9b"}
     if extra:
         lines.append(
@@ -256,7 +264,22 @@ def _check_tree(
         )
 
 
-def _check_coverage(agents: str, coverage_src: str, lines: list[str]) -> None:
+_FAIL_UNDER = re.compile(r"(?m)^fail_under\s*=\s*(\d+(?:\.\d+)?)")
+
+
+def _fail_under(pyproject: str) -> float | None:
+    """coverage's overall gate, from pyproject.toml.
+
+    The rulebook's "N% overall" is enforced here, not by check_coverage's
+    per-module DEFAULT. Two numbers, one sentence in AGENTS.md.
+    """
+    hit = _FAIL_UNDER.search(pyproject)
+    return float(hit.group(1)) if hit else None
+
+
+def _check_coverage(
+    agents: str, coverage_src: str, pyproject: str, lines: list[str]
+) -> None:
     try:
         consts = coverage_constants(coverage_src)
         overall, relaxed, strict, modules = agents_coverage(agents)
@@ -266,10 +289,25 @@ def _check_coverage(agents: str, coverage_src: str, lines: list[str]) -> None:
     default = float(consts["DEFAULT"])  # type: ignore[arg-type]
     relaxed_c = float(consts["RELAXED"])  # type: ignore[arg-type]
     strict_c = float(consts["STRICT"])  # type: ignore[arg-type]
-    if overall != default:
+    # "80% overall" is enforced by coverage's own `fail_under`, NOT by
+    # check_coverage.DEFAULT — that is the PER-MODULE floor for a file in
+    # neither STRICT_MODULES nor RELAXED_PREFIXES (check_coverage.py's `else`
+    # branch). The two are equal today by coincidence, and comparing the
+    # rulebook's overall figure against DEFAULT left `fail_under` free to
+    # drift: dropping it to 60 passed this gate. Compare both, separately.
+    fail_under = _fail_under(pyproject)
+    if fail_under is None:
+        lines.append("FAIL pyproject.toml has no [tool.coverage.report] fail_under")
+    elif overall != fail_under:
         lines.append(
             f"FAIL AGENTS.md overall {overall:g}% != "
-            f"check_coverage DEFAULT {default:g}%"
+            f"pyproject fail_under {fail_under:g}%"
+        )
+    if default != fail_under and fail_under is not None:
+        lines.append(
+            f"FAIL check_coverage DEFAULT {default:g}% != "
+            f"pyproject fail_under {fail_under:g}% — the per-module default and "
+            "the overall floor have drifted apart; AGENTS.md states one number"
         )
     if relaxed != relaxed_c:
         lines.append(
@@ -315,10 +353,11 @@ def evaluate(
     coverage_src = (root / "scripts" / "ci" / "check_coverage.py").read_text(
         encoding="utf-8"
     )
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     _check_claude(root, lines)
     _check_rules(spec, agents, lines)
     _check_tree(root, agents, lines, extras, missing)
-    _check_coverage(agents, coverage_src, lines)
+    _check_coverage(agents, coverage_src, pyproject, lines)
     failed = [line for line in lines if line.startswith("FAIL")]
     if failed:
         return 1, lines

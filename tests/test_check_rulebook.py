@@ -72,12 +72,18 @@ def _load():
     return mod
 
 
+_PYPROJECT = """[tool.coverage.report]
+fail_under = 80
+"""
+
+
 def _tree(
     tmp_path: Path,
     *,
     agents: str = _AGENTS,
     spec: str = _SPEC,
     coverage: str = _COVERAGE_SRC,
+    pyproject: str = _PYPROJECT,
     extra_zarabot_pkg: str | None = None,
     extra_py: bool = False,
     skip_dirs: frozenset[str] = frozenset(),
@@ -88,6 +94,7 @@ def _tree(
     cov = tmp_path / "scripts" / "ci" / "check_coverage.py"
     cov.parent.mkdir(parents=True, exist_ok=True)
     cov.write_text(coverage, encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     named = [
         "zarabot/db",
         "sandbox",
@@ -281,3 +288,84 @@ def test_live_repo_passes() -> None:
     check = _load()
     code, lines = check.evaluate(ROOT)
     assert code == 0, lines
+
+
+def test_overall_tracks_pyproject_fail_under_not_the_per_module_default() -> None:
+    """`N% overall` is coverage's `fail_under`, not check_coverage.DEFAULT.
+
+    DEFAULT is the per-module floor for a file in neither STRICT_MODULES nor
+    RELAXED_PREFIXES. They are equal today by coincidence, and comparing the
+    rulebook's overall figure against DEFAULT left `fail_under` free to drift —
+    dropping it to 60 passed this gate before this test existed.
+    """
+    check = _load()
+    assert check._fail_under(_PYPROJECT) == 80.0
+    assert check._fail_under("[tool.coverage.report]\nfail_under = 60\n") == 60.0
+    assert check._fail_under("[tool.coverage.report]\n") is None
+
+
+def test_pyproject_fail_under_drift_fails(tmp_path: Path) -> None:
+    check = _load()
+    code, lines = check.evaluate(
+        _tree(tmp_path, pyproject="[tool.coverage.report]\nfail_under = 60\n")
+    )
+    assert code == 1
+    assert any("fail_under" in line for line in lines)
+
+
+def test_missing_fail_under_fails(tmp_path: Path) -> None:
+    check = _load()
+    code, lines = check.evaluate(
+        _tree(tmp_path, pyproject="[tool.coverage.report]\nshow_missing = true\n")
+    )
+    assert code == 1
+    assert any("fail_under" in line for line in lines)
+
+
+# --- anti-vacuity: a gate whose input moves must fail, not pass ---------------
+# check_events.py (#165) and check_docs.py (pre-#163) both shipped a silent PASS
+# when the section they parse was renamed. The code here already fails loudly on
+# each; nothing pinned it, so a refactor to `if hit is None: return []` would
+# restore that defect with a green suite.
+
+
+def test_renamed_file_structure_heading_fails(tmp_path: Path) -> None:
+    check = _load()
+    agents = _AGENTS.replace("## File structure", "## Repository layout")
+    code, lines = check.evaluate(_tree(tmp_path, agents=agents))
+    assert code == 1
+    assert any("File structure" in line for line in lines)
+
+
+def test_missing_sketch_fence_fails(tmp_path: Path) -> None:
+    check = _load()
+    start = _AGENTS.index("## File structure")
+    agents = _AGENTS[:start] + "## File structure\n\nno fence here\n"
+    code, lines = check.evaluate(_tree(tmp_path, agents=agents))
+    assert code == 1
+    assert any("File structure" in line for line in lines)
+
+
+def test_renamed_coverage_paragraph_fails(tmp_path: Path) -> None:
+    check = _load()
+    agents = _AGENTS.replace("**Coverage.**", "**Coverage floors.**")
+    code, lines = check.evaluate(_tree(tmp_path, agents=agents))
+    assert code == 1
+    assert any("Coverage" in line for line in lines)
+
+
+def test_missing_rule_range_sentence_fails(tmp_path: Path) -> None:
+    check = _load()
+    agents = "\n".join(
+        line for line in _AGENTS.splitlines() if "numbered error rules" not in line
+    )
+    code, lines = check.evaluate(_tree(tmp_path, agents=agents))
+    assert code == 1
+
+
+def test_renamed_section_8_heading_is_a_fail_not_a_traceback(tmp_path: Path) -> None:
+    check = _load()
+    spec = _SPEC.replace("## 8. Error handling rules", "## 8. Error rules")
+    code, lines = check.evaluate(_tree(tmp_path, spec=spec))
+    assert code == 1
+    assert any(line.startswith("FAIL") for line in lines), lines
