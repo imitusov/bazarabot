@@ -108,6 +108,10 @@ jobs:
           python scripts/ci/check_latches.py
           python scripts/make_tasks.py && git diff --exit-code tasks/
 
+      - name: Compose log rotation
+        if: steps.pick.outputs.task != ''
+        run: python scripts/ci/check_compose.py
+
       - name: Rulebook consistency
         if: steps.pick.outputs.task != ''
         run: python scripts/ci/check_rulebook.py

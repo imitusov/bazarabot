@@ -60,6 +60,12 @@ jobs:
       - name: Latch resets
         run: python scripts/ci/check_latches.py
 
+      # Issue #183: the deployed compose file kept three log files while the
+      # brief promised five. Own step — the retained window is the only
+      # evidence path the health export has.
+      - name: Compose log rotation
+        run: python scripts/ci/check_compose.py
+
       # If tasks/ changes when regenerated, the spec and the tasks an agent is
       # fed have diverged. That divergence is how a spec quietly becomes fiction.
       - name: Spec drift
