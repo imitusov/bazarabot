@@ -61,6 +61,12 @@ run **one module per session**, test-first, two commits, never edit the spec.
 | #44 V12 `get_operations` | live broker measurement first |
 | #13 #14 sandbox/ML | research last |
 
+### Theme F — Spec / interfaces drift
+
+| Issue | Next |
+|---|---|
+| #166 S-34 `ConfigError.variable` | **amender** — see `166-configerror-variable-spec.md`; modules to re-run: none; #135 leftover is `app.startup` (do not implement here) |
+
 ### Implementer dispatch order (after amendments)
 
 1. `logging_setup` (#56)
