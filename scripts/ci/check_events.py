@@ -21,8 +21,20 @@ completeness must enumerate what it leaves out (failure class 6):
     `order_rejected` at WARNING passes.
 
 The first three need a tree-wide walk this design never does; the fourth is a
-few lines once one exists. So a green run here means "every §7.1 event is
-emitted by its owner with the required fields", not "§7.1 is enforced".
+few lines once one exists.
+
+  * Assignment-map soundness. Name bindings are a flow-insensitive,
+    shadow-aware approximation of scope (parameter names are popped before
+    descending into a `def`; inner writes copy key-sets and do not mutate
+    the enclosing map). Before nested-scope descent landed, the map was
+    shadow-blind: a parameter named like an outer dict inherited that dict's
+    keys, and string event names unioned across a `def`, inventing sites.
+    `if`/`else` still unions competing bindings; that is not a full dataflow
+    analysis.
+
+A green run here means every §7.1 event has a resolved emit site in its
+owner that carries the required fields on that site — not that §7.1 is
+enforced, and not that the assignment map is a precise interpreter.
 
 The allowlist is an inventory of gaps that existed when the gate was written.
 Every entry names the issue that will delete it. A silent skip would hide
@@ -51,6 +63,14 @@ class EventRow:
     owner: str
     required: tuple[str, ...]
     optional: tuple[str, ...]
+
+
+@dataclass
+class BoundDict:
+    """Keys and event names from a dict assignment; never a live AST node."""
+
+    keys: set[str]
+    events: set[str]
 
 
 _FIELD = re.compile(r"`(\w+)`(\s*\(only [^)]+\))?")
@@ -135,17 +155,44 @@ def _call_func_name(func: ast.AST) -> str | None:
     return None
 
 
+def _copy_assigned(assigned: dict[str, object]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, value in assigned.items():
+        if isinstance(value, BoundDict):
+            out[key] = BoundDict(keys=set(value.keys), events=set(value.events))
+        elif isinstance(value, set):
+            out[key] = set(value)
+        else:
+            out[key] = value
+    return out
+
+
+def _fn_param_names(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    args = fn.args
+    names = {a.arg for a in args.posonlyargs}
+    names |= {a.arg for a in args.args}
+    names |= {a.arg for a in args.kwonlyargs}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    return names
+
+
 def _dict_keys_and_event(
-    node: ast.AST,
+    node: ast.AST | BoundDict,
     assigned: dict[str, object],
 ) -> tuple[set[str], set[str]]:
     """Return (field keys, event names) for a dict expression.
 
     Event names come from a Constant `"event"` value, or from a Name that
     this function assigned a string to (possibly in more than one branch).
+    Dict assignments are stored as BoundDict key-sets, not live AST nodes.
     """
     keys: set[str] = set()
     events: set[str] = set()
+    if isinstance(node, BoundDict):
+        return set(node.keys), set(node.events)
     if isinstance(node, ast.Name) and node.id in assigned:
         return _dict_keys_and_event(assigned[node.id], assigned)  # type: ignore[arg-type]
     if not isinstance(node, ast.Dict):
@@ -185,19 +232,24 @@ def _record_assign(
         return
     literal = _const_str(value)
     if literal is not None:
-        existing = assigned.get(target.id)
-        if isinstance(existing, set):
-            existing.add(literal)
-        elif isinstance(existing, str):
-            assigned[target.id] = {existing, literal}
-        else:
-            assigned[target.id] = literal
+        # Replace, do not union. Competing branch bindings are merged by
+        # `_merge_assigned`; a `def` body must not invent the outer name.
+        assigned[target.id] = literal
         return
     if isinstance(value, ast.Dict):
-        assigned[target.id] = value
+        keys, events = _dict_keys_and_event(value, assigned)
+        assigned[target.id] = BoundDict(keys=keys, events=events)
         return
     if isinstance(value, ast.Name) and value.id in assigned:
-        assigned[target.id] = assigned[value.id]
+        bound = assigned[value.id]
+        if isinstance(bound, BoundDict):
+            assigned[target.id] = BoundDict(
+                keys=set(bound.keys), events=set(bound.events)
+            )
+        elif isinstance(bound, set):
+            assigned[target.id] = set(bound)
+        else:
+            assigned[target.id] = bound
 
 
 def _merge_assigned(into: dict[str, object], src: dict[str, object]) -> None:
@@ -214,6 +266,9 @@ def _merge_assigned(into: dict[str, object], src: dict[str, object]) -> None:
             into[key] = value | {current}
         elif isinstance(value, set) and isinstance(current, set):
             current |= value
+        elif isinstance(value, BoundDict) and isinstance(current, BoundDict):
+            current.keys |= value.keys
+            current.events |= value.events
 
 
 def _record_subscript(
@@ -227,9 +282,8 @@ def _record_subscript(
         return
     extra_keys.setdefault(name, set()).add(key)
     stored = assigned.get(name)
-    if isinstance(stored, ast.Dict):
-        stored.keys.append(ast.Constant(key))
-        stored.values.append(ast.Constant(None))
+    if isinstance(stored, BoundDict):
+        stored.keys.add(key)
 
 
 def _is_extra_event_helper(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
@@ -334,10 +388,17 @@ def collect_emits(source: str) -> dict[str, list[set[str]]]:
                 pass
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
                 _record_subscript(assigned, stmt.targets[0], extra_keys)
-            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                # Copy the enclosing map so closures and module-level dicts
-                # remain visible; inner assigns must not leak outward.
-                visit_block(stmt.body, dict(assigned))
+            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                # Copy key-sets (not live AST) so closures remain visible and
+                # inner subscripts cannot leak outward. Pop parameters so a
+                # shadowed name does not inherit the enclosing dict.
+                inner = _copy_assigned(assigned)
+                for param in _fn_param_names(stmt):
+                    inner.pop(param, None)
+                visit_block(stmt.body, inner)
+                continue
+            if isinstance(stmt, ast.ClassDef):
+                visit_block(stmt.body, _copy_assigned(assigned))
                 continue
             # Compound bodies are owned by visit_block recursion. Walking the
             # whole statement would record a phantom site with the outer map.
@@ -350,26 +411,26 @@ def collect_emits(source: str) -> dict[str, list[set[str]]]:
                 visit_calls(stmt, assigned, extra_keys)
 
             if isinstance(stmt, ast.If):
-                then_a = dict(assigned)
-                else_a = dict(assigned)
+                then_a = _copy_assigned(assigned)
+                else_a = _copy_assigned(assigned)
                 visit_block(stmt.body, then_a)
                 visit_block(stmt.orelse, else_a)
                 _merge_assigned(assigned, then_a)
                 _merge_assigned(assigned, else_a)
             elif isinstance(stmt, ast.For | ast.AsyncFor | ast.While):
-                visit_block(stmt.body, dict(assigned))
-                visit_block(stmt.orelse, dict(assigned))
+                visit_block(stmt.body, _copy_assigned(assigned))
+                visit_block(stmt.orelse, _copy_assigned(assigned))
             elif isinstance(stmt, ast.With | ast.AsyncWith):
-                visit_block(stmt.body, dict(assigned))
+                visit_block(stmt.body, _copy_assigned(assigned))
             elif isinstance(stmt, ast.Try):
-                visit_block(stmt.body, dict(assigned))
+                visit_block(stmt.body, _copy_assigned(assigned))
                 for handler in stmt.handlers:
-                    visit_block(handler.body, dict(assigned))
-                visit_block(stmt.orelse, dict(assigned))
-                visit_block(stmt.finalbody, dict(assigned))
+                    visit_block(handler.body, _copy_assigned(assigned))
+                visit_block(stmt.orelse, _copy_assigned(assigned))
+                visit_block(stmt.finalbody, _copy_assigned(assigned))
             elif hasattr(ast, "Match") and isinstance(stmt, ast.Match):
                 for case in stmt.cases:
-                    visit_block(case.body, dict(assigned))
+                    visit_block(case.body, _copy_assigned(assigned))
 
     visit_block(tree.body, {})
     return emits

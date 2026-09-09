@@ -304,6 +304,50 @@ def test_emit_helper_counts_as_extra_event(tmp_path: Path) -> None:
     assert code == 0, lines
 
 
+def test_inner_subscript_does_not_leak_to_outer_emit() -> None:
+    """Inner `d["leak"]=1` must not satisfy an outer `**d` site."""
+    check = _load()
+    src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "d = {'a': 1}\n"
+        "def inner():\n"
+        "    d['leak'] = 1\n"
+        "_LOG.info('m', extra={'event': 'w', **d})\n"
+    )
+    assert check.collect_emits(src) == {"w": [{"a"}]}
+
+
+def test_parameter_shadow_does_not_inherit_outer_dict_keys() -> None:
+    """`def inner(d)` rebinds `d`; `**d` must not carry the outer keys."""
+    check = _load()
+    src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "d = {'a': 1, 'b': 2}\n"
+        "def inner(d):\n"
+        "    _LOG.info('m', extra={'event': 'w', **d})\n"
+    )
+    assert check.collect_emits(src) == {"w": [set()]}
+
+
+def test_inner_rebind_of_event_name_does_not_invent_outer_event() -> None:
+    """Rebinding `E` inside `def` must not emit the outer string as a site."""
+    check = _load()
+    src = (
+        "import logging\n"
+        "_LOG = logging.getLogger(__name__)\n"
+        "E = 'w1'\n"
+        "def f():\n"
+        "    E = 'w2'\n"
+        "    extra = {'event': E, 'a': 1}\n"
+        "    _LOG.info('m', extra=extra)\n"
+    )
+    sites = check.collect_emits(src)
+    assert sites == {"w2": [{"a"}]}
+    assert "w1" not in sites
+
+
 def test_check_events_module_is_importable() -> None:
     if not _CHECK.is_file():
         pytest.fail("scripts/ci/check_events.py is missing")
