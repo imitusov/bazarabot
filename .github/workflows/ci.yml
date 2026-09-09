@@ -46,6 +46,11 @@ jobs:
         run: |
           python scripts/ci/check_docs.py
 
+      # Issue #118 item 7: AGENTS.md range, sketch dirs, coverage floors.
+      # Own step so a red docs gate cannot hide this one under bash -e.
+      - name: Rulebook consistency
+        run: python scripts/ci/check_rulebook.py
+
       # §7.1 names one owning module per event. Emitted elsewhere, or missing
       # a required field, and the log stops answering the question it exists for.
       - name: Event emission
