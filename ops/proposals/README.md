@@ -67,6 +67,7 @@ run **one module per session**, test-first, two commits, never edit the spec.
 |---|---|
 | #166 S-34 `ConfigError.variable` | **amender** — see `166-configerror-variable-spec.md`; modules to re-run: none; #135 leftover is `app.startup` (do not implement here) |
 | #177 S-36 table ownership outside `db/` | **owner decision** — see `177-table-ownership-outside-db.md`; two coherent readings, code already implements one; do not touch `state/halt.py` or `broker/reconcile.py` until it is made |
+| #179 S-37 check 2 `any()` | **amender** — see `179-split-signals-snapshots-heading.md`; split the only shared §4 heading; do not patch the gate first; modules to re-run: none until the spec is amended |
 
 ### Implementer dispatch order (after amendments)
 
