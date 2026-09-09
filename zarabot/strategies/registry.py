@@ -28,6 +28,9 @@ def enabled(config: Config) -> list[Strategy]:
             continue
         factory = _RULE_BASED.get(name)
         if factory is None:
-            raise ConfigError(f"ENABLED_STRATEGIES contains unknown name {name}")
+            raise ConfigError(
+                f"ENABLED_STRATEGIES contains unknown name {name}",
+                variable="ENABLED_STRATEGIES",
+            )
         active.append(factory())
     return active
