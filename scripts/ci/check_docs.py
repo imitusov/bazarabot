@@ -86,27 +86,37 @@ def sections(text: str, pattern: str) -> dict[str, str]:
     return out
 
 
-# Citations of another document name that document first. The brief is senior
+# Citations of *another* document name that document first. The brief is senior
 # and amended independently; pooling `brief v1.71` into the spec scan would
 # force a spec header bump the spec never issued. `technical-spec.md` v1.23 in
-# dependency-order.md is the same shape. Keep this sub — a brief bump must not
-# fail the spec.
+# dependency-order.md is the same shape. Do not strip the document under scan:
+# `brief v1.12` in business-brief.md and `` `dependency-order.md` v1.5 `` in
+# that file are own amendments, not foreign citations (#138 stripped others).
 _BRIEF_CITE = r"[`\w.\-]*brief[`\w.\-]*\s+v\d+\.\d+"
 _OTHER_DOC_CITE = r"`[\w.\-]+\.md`\s+v\d+\.\d+"
 
 
 def header_vs_own_citations(
     text: str,
+    name: str = "",
 ) -> tuple[tuple[int, int] | None, tuple[int, int]]:
     """Return (header version, max own citation), each document scanned alone.
 
     Proxy only: citations present and header ≥ max citation. An amendment with
     no marker is invisible. Header newer than any citation is not a failure.
+    `name` is the file being scanned; citations of that file are kept.
     """
     header = re.search(r"^\*\*Version:\*\* (\d+)\.(\d+)", text, re.M)
     declared = (int(header.group(1)), int(header.group(2))) if header else None
-    own = re.sub(_BRIEF_CITE, "", text)
-    own = re.sub(_OTHER_DOC_CITE, "", own)
+    basename = pathlib.Path(name).name if name else ""
+    own = text
+    if basename != "business-brief.md":
+        own = re.sub(_BRIEF_CITE, "", own)
+    if basename:
+        other = rf"`(?!{re.escape(basename)}`)[\w.\-]+\.md`\s+v\d+\.\d+"
+        own = re.sub(other, "", own)
+    else:
+        own = re.sub(_OTHER_DOC_CITE, "", own)
     cited = [(int(a), int(b)) for a, b in re.findall(r"\bv(\d+)\.(\d+)\b", own)]
     highest = max(cited, default=(0, 0))
     return declared, highest
@@ -116,7 +126,7 @@ def version_gate_failures(documents: dict[str, str]) -> list[str]:
     """Run header-vs-own-citations on each document; do not pool markers."""
     lines: list[str] = []
     for name, text in documents.items():
-        declared, highest = header_vs_own_citations(text)
+        declared, highest = header_vs_own_citations(text, name)
         if declared is None:
             lines.append(f"FAIL {name} has no **Version:** header")
             continue

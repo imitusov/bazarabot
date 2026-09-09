@@ -126,3 +126,51 @@ def test_version_gate_does_not_pool_across_documents() -> None:
         }
     )
     assert failures == []
+
+
+def test_brief_parenthesised_own_citation_fails() -> None:
+    check = _load()
+    body = "**Version:** 1.11\n\nAmended (v1.12)\n"
+    declared, highest = check.header_vs_own_citations(body, "business-brief.md")
+    assert declared == (1, 11)
+    assert highest == (1, 12)
+    assert declared < highest
+
+
+def test_brief_bare_brief_v_citation_is_own_and_fails() -> None:
+    check = _load()
+    body = "**Version:** 1.11\n\nAmended in brief v1.12\n"
+    declared, highest = check.header_vs_own_citations(body, "business-brief.md")
+    assert declared == (1, 11)
+    assert highest == (1, 12)
+    assert declared < highest
+
+
+def test_brief_filename_citation_is_own_and_fails() -> None:
+    check = _load()
+    body = "**Version:** 1.11\n\nAmended in `business-brief.md` v1.12\n"
+    declared, highest = check.header_vs_own_citations(body, "business-brief.md")
+    assert declared == (1, 11)
+    assert highest == (1, 12)
+    assert declared < highest
+
+
+def test_dep_order_filename_citation_is_own_and_fails() -> None:
+    check = _load()
+    body = "**Version:** 1.4\n\n`dependency-order.md` v1.5\n"
+    declared, highest = check.header_vs_own_citations(body, "dependency-order.md")
+    assert declared == (1, 4)
+    assert highest == (1, 5)
+    assert declared < highest
+
+
+def test_version_gate_fails_on_brief_own_filename_citation() -> None:
+    check = _load()
+    failures = check.version_gate_failures(
+        {
+            "business-brief.md": (
+                "**Version:** 1.11\n\nAmended in `business-brief.md` v1.12\n"
+            ),
+        }
+    )
+    assert any("business-brief.md" in line for line in failures)
