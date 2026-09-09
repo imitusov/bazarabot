@@ -185,10 +185,13 @@ async def send(now: datetime) -> None:
         start, end = _week_bounds(now)
         text = await build(start, end)
         await alert(text)
+        # Rule 13 makes `alert` swallow a send failure, so its return is not
+        # evidence of delivery. This event names only what is observable here:
+        # the report was composed and handed to the notifier.
         _LOG.info(
-            "weekly_report_sent",
+            "weekly_report_built",
             extra={
-                "event": "weekly_report_sent",
+                "event": "weekly_report_built",
                 "period_start": start.isoformat(),
                 "period_end": end.isoformat(),
             },
