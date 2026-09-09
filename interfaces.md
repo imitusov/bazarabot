@@ -1047,9 +1047,10 @@ distribution, cooldown-blocked signal count, gapped intended-vs-actual exits.
 
 **`async send(now: datetime) → None`**
 Builds the Moscow week containing `now` and sends via `telegram.notifier.alert`.
-On success, emits `weekly_report_sent` (INFO) with `period_start` and
-`period_end`. Failure alerts and never raises. Raises `ValueError` on naive
-`now`.
+After `alert` returns, emits `weekly_report_built` (INFO) with `period_start`
+and `period_end` — composition and hand-off, not delivery: it fires even when
+the notifier swallowed a send failure. Failure alerts and never raises. Raises
+`ValueError` on naive `now`.
 
 ## `zarabot.ops.backup`
 

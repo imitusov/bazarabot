@@ -187,7 +187,7 @@ async def test_send_failure_alerts_and_does_not_raise(
     assert calls
 
 
-async def test_send_failure_does_not_emit_weekly_report_sent(
+async def test_send_raising_does_not_emit_weekly_report_built(
     db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def _alert(text: str, urgent: bool = False) -> None:
@@ -199,12 +199,12 @@ async def test_send_failure_does_not_emit_weekly_report_sent(
     events = [
         record
         for record in caplog.records
-        if getattr(record, "event", None) == "weekly_report_sent"
+        if getattr(record, "event", None) == "weekly_report_built"
     ]
     assert events == []
 
 
-async def test_successful_send_emits_weekly_report_sent(
+async def test_send_emits_weekly_report_built(
     db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     sent: list[str] = []
@@ -219,7 +219,7 @@ async def test_successful_send_emits_weekly_report_sent(
     events = [
         record
         for record in caplog.records
-        if getattr(record, "event", None) == "weekly_report_sent"
+        if getattr(record, "event", None) == "weekly_report_built"
     ]
     assert len(events) == 1
     record = events[0]
@@ -228,3 +228,47 @@ async def test_successful_send_emits_weekly_report_sent(
     assert record.period_end == END.isoformat()
     assert sent[0] not in caplog.text
     assert "token" not in caplog.text
+
+
+async def test_event_fires_when_notifier_swallows_send_failure(
+    db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Production `alert` never raises: §8 rule 13 retries, logs and swallows.
+
+    So the production failure path is `alert` returning after a total Telegram
+    outage. `weekly_report_built` names composition and hand-off, so it fires
+    here. Delivery is `telegram_send_failed` absent, not this event present —
+    and that event belongs to `telegram.notifier`, never to this module.
+    """
+    notifier_log = logging.getLogger("zarabot.telegram.notifier")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        for attempt in range(1, 4):
+            notifier_log.warning(
+                "telegram_send_failed",
+                extra={
+                    "event": "telegram_send_failed",
+                    "attempt": attempt,
+                    "error": "network",
+                },
+            )
+
+    monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
+    with caplog.at_level(logging.INFO):
+        await send(NOW)
+    built = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "weekly_report_built"
+    ]
+    assert len(built) == 1
+    assert built[0].levelno == logging.INFO
+    assert built[0].period_start == START.isoformat()
+    assert built[0].period_end == END.isoformat()
+    failures = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "telegram_send_failed"
+    ]
+    assert len(failures) == 3
+    assert all(record.name == "zarabot.telegram.notifier" for record in failures)
