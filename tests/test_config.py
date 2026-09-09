@@ -103,6 +103,20 @@ def test_missing_tinvest_token_raises_naming_the_variable(
     with pytest.raises(ConfigError, match="TINVEST_TOKEN") as exc:
         load()
     assert "tinvest-secret-token" not in str(exc.value)
+    assert exc.value.variable == "TINVEST_TOKEN"
+
+
+def test_missing_required_var_sets_variable_to_the_env_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `variable` is set at the raise site from the env name, not by splitting
+    # the message. Startup currently takes str(exc).split()[0]; the attribute
+    # is what that splitter was approximating.
+    _env(monkeypatch)
+    monkeypatch.delenv("TINVEST_TOKEN")
+    with pytest.raises(ConfigError) as exc:
+        load()
+    assert exc.value.variable == "TINVEST_TOKEN"
 
 
 def test_position_size_pct_zero_or_above_100_raises(
@@ -169,6 +183,18 @@ def test_take_profit_not_greater_than_stop_loss_raises(
     _env(monkeypatch, {"STOP_LOSS_PCT": "10", "TAKE_PROFIT_PCT": "5"})
     with pytest.raises(ConfigError, match="TAKE_PROFIT_PCT"):
         load()
+
+
+def test_take_profit_stop_loss_sets_variable_to_the_field_being_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The message names two variables. Split-luck would still yield
+    # TAKE_PROFIT_PCT today; the attribute must be that name by construction.
+    _env(monkeypatch, {"STOP_LOSS_PCT": "10", "TAKE_PROFIT_PCT": "10"})
+    with pytest.raises(ConfigError) as exc:
+        load()
+    assert exc.value.variable == "TAKE_PROFIT_PCT"
+    assert str(exc.value) == "TAKE_PROFIT_PCT must be greater than STOP_LOSS_PCT"
 
 
 def test_empty_watchlist_raises(monkeypatch: pytest.MonkeyPatch) -> None:
