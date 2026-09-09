@@ -1,6 +1,6 @@
 # Zarabot — Business Brief
 
-**Version:** 1.11
+**Version:** 1.12
 **Date:** 2026-08-28
 **Status:** Ready for technical spec
 
@@ -843,6 +843,14 @@ depends on the bot being profitable.
 | Web dashboard | Telegram covers monitoring from a phone. A dashboard means a web stack, authentication, and a public surface for a single reader. |
 | Automatic model retraining on the server | A model that changes without review can start trading differently for reasons nobody examined. Training stays deliberate and offline. |
 | Manual trading through the bot | The bot's record must reflect its own decisions. Discretionary trades belong in the broker's app, where they do not pollute strategy performance data. |
+| Multiple brokers | One broker's API is the learning objective. A second adds an abstraction layer with no educational return. |
+| Tax reporting | The broker produces the statements that matter for tax. Duplicating them risks producing a confidently wrong number. |
+| News and sentiment analysis | An entire data-acquisition and NLP problem in its own right, with no clean way to validate that it helped. |
+| Automated deployment pipeline | Deploys are infrequent and manual. CI plumbing would be built before the bot exists and maintained for one user. |
+| Backtesting user interface | Backtests run in notebooks on the laptop, where the tooling already exists and is better. |
+| Driving the bot through the broker's MCP server | The broker offers an MCP server that lets an AI agent trade in natural language. It is the wrong tool for this loop: the strategies are exact calculations that gain nothing from a language model, an MCP call cannot be replayed in a backtest, and the interface is unlikely to expose the idempotency key the crash-recovery design depends on. The broker also disclaims responsibility for AI-driven losses and reserves the right to withdraw access. **It is, however, a good research tool**: connecting a desktop AI client to it with a **read-only** token is a supported way to ask questions about the portfolio, and requires no code and no change to this project. |
+
+### The trading account is the bot's alone
 
 **The trading account is the bot's alone, and this is now enforced rather than
 assumed.** "Manual trading is out of scope" was written as a scope boundary and
@@ -863,12 +871,6 @@ selling something the owner chose to hold, at a price they did not choose, and
 recording it as strategy performance. A bot that will not start is an
 inconvenience the owner notices immediately; a bot that quietly liquidates a
 long-term holding is discovered afterwards.
-| Multiple brokers | One broker's API is the learning objective. A second adds an abstraction layer with no educational return. |
-| Tax reporting | The broker produces the statements that matter for tax. Duplicating them risks producing a confidently wrong number. |
-| News and sentiment analysis | An entire data-acquisition and NLP problem in its own right, with no clean way to validate that it helped. |
-| Automated deployment pipeline | Deploys are infrequent and manual. CI plumbing would be built before the bot exists and maintained for one user. |
-| Backtesting user interface | Backtests run in notebooks on the laptop, where the tooling already exists and is better. |
-| Driving the bot through the broker's MCP server | The broker offers an MCP server that lets an AI agent trade in natural language. It is the wrong tool for this loop: the strategies are exact calculations that gain nothing from a language model, an MCP call cannot be replayed in a backtest, and the interface is unlikely to expose the idempotency key the crash-recovery design depends on. The broker also disclaims responsibility for AI-driven losses and reserves the right to withdraw access. **It is, however, a good research tool**: connecting a desktop AI client to it with a **read-only** token is a supported way to ask questions about the portfolio, and requires no code and no change to this project. |
 
 ---
 
@@ -882,7 +884,6 @@ record, the following were open during drafting and are now settled:
 | Approve trades manually, or execute automatically? | Automatic execution within hard risk limits. Approval friction was judged not worth it at this trade rate. |
 | Sandbox first, or real money immediately? | Real money from day one, with a small deliberately expendable allocation. Sandbox remains available by configuration for testing. |
 | Daily loss limit | 5% of allocated capital. |
-| Maximum position size | 20% of allocated capital. |
 | Capital amount | Not fixed in this document. Set as configuration at deploy time; every limit is a percentage of it. |
 | Interface | Telegram only. |
 | Database | SQLite. |
