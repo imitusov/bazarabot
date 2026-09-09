@@ -6,9 +6,23 @@ and a list of fields. The owner must put the event literal in `extra={...}`
 (or the equivalent `extra={"event": event, **fields}` helper) with every
 required field as a key on that emit.
 
-This does not prove exclusivity (only the owning module emits the name),
-that emit dicts have no fields beyond §7.1, or that every produced name is
-in the catalogue (orphan producers). Those need a tree-wide walk.
+WHAT THIS DOES NOT COVER, stated because a guard described as proving
+completeness must enumerate what it leaves out (failure class 6):
+
+  * Exclusivity. §7.1 says in bold "Each event is owed by exactly one module,
+    named in the table (v1.60)", and this checks only that the owner emits it.
+    A second module emitting the same name passes.
+  * Fields beyond §7.1. An emit carrying keys the table does not list passes.
+  * Orphan producers. A name emitted anywhere and absent from §7.1 passes.
+    `export_health.py` catches this one at runtime by exiting non-zero on an
+    unknown name; nothing catches it at review time.
+  * The Level column. It is parsed and discarded — §7.1's prose obligation is
+    about fields, so a row's INFO/ERROR/CRITICAL is not enforced. Emitting
+    `order_rejected` at WARNING passes.
+
+The first three need a tree-wide walk this design never does; the fourth is a
+few lines once one exists. So a green run here means "every §7.1 event is
+emitted by its owner with the required fields", not "§7.1 is enforced".
 
 The allowlist is an inventory of gaps that existed when the gate was written.
 Every entry names the issue that will delete it. A silent skip would hide
