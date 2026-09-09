@@ -204,3 +204,86 @@ def test_version_gate_fails_on_brief_own_filename_citation() -> None:
         }
     )
     assert any("business-brief.md" in line for line in failures)
+
+
+def test_zero_marker_document_passes() -> None:
+    """#169: a document with no own version markers must not fail the gate."""
+    check = _load()
+    failures = check.version_gate_failures(
+        {
+            "business-brief.md": "**Version:** 1.11\n\nOperating assumptions only.\n",
+            "dependency-order.md": "**Version:** 1.4\n",
+        }
+    )
+    assert failures == []
+
+
+def test_module_named_only_in_prose_fails_check_1() -> None:
+    """Check 1 requires a ## heading, not a whole-file substring."""
+    check = _load()
+    iface = (
+        "## `zarabot.db.signals`\n"
+        "\n"
+        "Cooldown is `db.cooldowns.active_until` until the window ends.\n"
+    )
+    missing = check.modules_missing_interface_headings(["db.cooldowns"], iface)
+    assert missing == ["db.cooldowns"]
+
+
+def test_module_heading_satisfies_check_1() -> None:
+    check = _load()
+    iface = "## `zarabot.db.cooldowns`\n\n**`async get(ticker: str) → date | None`**\n"
+    missing = check.modules_missing_interface_headings(["db.cooldowns"], iface)
+    assert missing == []
+
+
+def test_shared_heading_function_recorded_in_one_module_passes() -> None:
+    """Wrong-module recording is green; a shared heading has no owner in the gate."""
+    check = _load()
+    spec = (
+        "### `zarabot/db/signals.py`, `zarabot/db/snapshots.py`\n"
+        "\n"
+        "**`async purge_old(before: date) → int`**\n"
+    )
+    iface_sections = {
+        "zarabot.db.signals": "**`async purge_old(before: date) → int`**\n",
+        "zarabot.db.snapshots": (
+            "**`async write_daily(snapshot: DailySnapshot) → None`**\n"
+        ),
+    }
+    missing = check.unimplemented_specified_functions(spec, iface_sections)
+    assert missing == []
+
+
+def test_shared_heading_function_in_neither_section_fails() -> None:
+    check = _load()
+    spec = (
+        "### `zarabot/db/signals.py`, `zarabot/db/snapshots.py`\n"
+        "\n"
+        "**`async purge_old(before: date) → int`**\n"
+    )
+    iface_sections = {
+        "zarabot.db.signals": (
+            "**`async record(signal: Signal, decision: RiskDecision) → None`**\n"
+        ),
+        "zarabot.db.snapshots": (
+            "**`async write_daily(snapshot: DailySnapshot) → None`**\n"
+        ),
+    }
+    missing = check.unimplemented_specified_functions(spec, iface_sections)
+    named = {(mod, fn) for mod, fn in missing}
+    assert named == {
+        ("zarabot.db.signals", "purge_old"),
+        ("zarabot.db.snapshots", "purge_old"),
+    }
+
+
+def test_sandbox_heading_is_skipped_by_check_2() -> None:
+    check = _load()
+    spec = (
+        "### `sandbox/data.py`\n"
+        "\n"
+        "**`async download() → None`**\n"
+    )
+    missing = check.unimplemented_specified_functions(spec, {"sandbox.data": ""})
+    assert missing == []
