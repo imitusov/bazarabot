@@ -45,6 +45,10 @@ jobs:
       - name: Docs consistency
         run: python scripts/ci/check_docs.py
 
+      # Failure class 8: a latch set and never reset is equivalent to no alert.
+      - name: Latch resets
+        run: python scripts/ci/check_latches.py
+
       # If tasks/ changes when regenerated, the spec and the tasks an agent is
       # fed have diverged. That divergence is how a spec quietly becomes fiction.
       - name: Spec drift
