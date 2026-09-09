@@ -5,6 +5,12 @@ Six checks that are cheap and catch a whole class of decay:
   1. Every module in dependency-order.md has an interfaces.md entry. A module
      built without one is invisible to every later task.
   2. Every function specified in spec §4 is recorded by name in interfaces.md.
+     A heading naming two zarabot modules satisfies this if EITHER module's
+     section records the name, so a function implemented in the wrong module of
+     a shared heading passes — and a miss is reported against both modules, so
+     one absent function yields two FAIL lines and two task files. Written down
+     because a gate that reads as resolving shared-heading attribution and
+     resolves half of it is failure class 6 (see #161's successor).
   3. Every function specified in spec §4 has the same signature in
      interfaces.md - parameters, defaults and return type. A heading that
      names two zarabot modules is compared against each module's section.
