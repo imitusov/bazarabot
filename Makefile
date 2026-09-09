@@ -23,6 +23,7 @@ cover:
 
 docs:
 	@$(PY) scripts/ci/check_docs.py
+	@$(PY) scripts/ci/check_rulebook.py
 	@$(PY) scripts/ci/check_latches.py
 	@$(PY) scripts/ci/check_events.py
 

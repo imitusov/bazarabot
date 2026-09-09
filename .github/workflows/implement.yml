@@ -108,6 +108,10 @@ jobs:
           python scripts/ci/check_latches.py
           python scripts/make_tasks.py && git diff --exit-code tasks/
 
+      - name: Rulebook consistency
+        if: steps.pick.outputs.task != ''
+        run: python scripts/ci/check_rulebook.py
+
       - name: Open the PR
         if: steps.pick.outputs.task != ''
         run: |

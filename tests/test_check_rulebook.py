@@ -10,8 +10,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 _CHECK = ROOT / "scripts" / "ci" / "check_rulebook.py"
 
@@ -105,7 +103,9 @@ def _tree(
     if extra_zarabot_pkg:
         (tmp_path / "zarabot" / extra_zarabot_pkg).mkdir(parents=True, exist_ok=True)
     if extra_py:
-        (tmp_path / "zarabot" / "clock.py").write_text("# extra file not in sketch as a path\n")
+        (tmp_path / "zarabot" / "clock.py").write_text(
+            "# extra file not in sketch as a path\n"
+        )
         (tmp_path / "sandbox" / "exchange.py").write_text("# known unlisted module\n")
     return tmp_path
 
@@ -122,7 +122,9 @@ def test_agents_range_behind_spec_fails(tmp_path: Path) -> None:
     agents = _AGENTS.replace("(1–3, plus 9b)", "(1–29)")
     code, lines = check.evaluate(_tree(tmp_path, agents=agents))
     assert code == 1
-    assert any("1–3" in line or "1-3" in line or "range" in line.lower() for line in lines)
+    assert any(
+        "1–3" in line or "1-3" in line or "range" in line.lower() for line in lines
+    )
 
 
 def test_agents_range_ahead_of_spec_fails(tmp_path: Path) -> None:
@@ -197,11 +199,15 @@ def test_claude_symlink_is_not_parsed_twice(tmp_path: Path) -> None:
     assert not any("CLAUDE.md" in line and "FAIL" in line for line in lines)
 
 
-def test_claude_regular_file_fails_as_identity_not_as_second_range(tmp_path: Path) -> None:
+def test_claude_regular_file_fails_as_identity_not_as_second_range(
+    tmp_path: Path,
+) -> None:
     check = _load()
     root = _tree(tmp_path)
     (root / "CLAUDE.md").unlink()
-    (root / "CLAUDE.md").write_text(_AGENTS.replace("(1–3, plus 9b)", "(1–1)"), encoding="utf-8")
+    (root / "CLAUDE.md").write_text(
+        _AGENTS.replace("(1–3, plus 9b)", "(1–1)"), encoding="utf-8"
+    )
     code, lines = check.evaluate(root)
     assert code == 1
     assert any("symlink" in line.lower() for line in lines)
@@ -251,7 +257,9 @@ def test_coverage_numbers_must_match_constants(tmp_path: Path) -> None:
     agents = _AGENTS.replace("80% overall", "81% overall")
     code, lines = check.evaluate(_tree(tmp_path, agents=agents))
     assert code == 1
-    assert any("80" in line or "81" in line or "overall" in line.lower() for line in lines)
+    assert any(
+        "80" in line or "81" in line or "overall" in line.lower() for line in lines
+    )
 
 
 def test_coverage_strict_modules_must_match(tmp_path: Path) -> None:
