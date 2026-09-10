@@ -2,7 +2,7 @@
 
 ## Product context
 
-Sole owner of the halt flag. A halt suspends ENTRIES ONLY - exits keep running, and the halt survives restarts.
+Sole owner of the halt flag and of the halt_state table, which it writes itself - there is no db.halt_state repository. A halt suspends ENTRIES ONLY - exits keep running, and the halt survives restarts.
 
 ## Build order position
 
@@ -30,7 +30,16 @@ Module **24** of 42 in `dependency-order.md`. Everything before it is complete a
 
 ### `zarabot/state/halt.py`
 
-**Sole owner of the halt flag.**
+**Sole owner of the halt flag, and sole owner of the `halt_state` table
+(v1.77).** This module writes `halt_state` with its own SQL and there is no
+`db.halt_state` repository: the table holds one row with `CHECK (id = 1)`, this
+module is its only writer, and a repository over it would be a pass-through.
+The rulebook permits that — a module may own its own table — and the price is
+every obligation a `db.*` repository carries, restated below. `halt_state` is
+**created and seeded** by `migrations/001_initial.sql`, which inserts the
+singleton row `(id = 1, halted = 0)`; that is the migration carve-out, not a
+second writer, and this module must therefore `UPDATE` the row rather than
+assume it must insert it.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract

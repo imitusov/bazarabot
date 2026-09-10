@@ -25,7 +25,10 @@ Module **5** of 42 in `dependency-order.md`. Everything before it is complete an
 
 ### `zarabot/db/migrations.py`
 
-Owns schema creation and version tracking.
+Owns schema creation and version tracking. **Sole owner of the `schema_version`
+table (v1.77)** — it is the only module that inserts a row there, one per
+applied migration, and the highest row is the schema version every other module
+reads through `apply`'s return value.
 
 **`async apply(conn: aiosqlite.Connection) → int`**
 - Applies every migration whose version exceeds the database's recorded version,

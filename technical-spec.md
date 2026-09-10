@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.76
+**Version:** 1.77
 **Date:** 2026-09-10
 **Implements:** `business-brief.md` v1.13
 
@@ -1709,7 +1709,10 @@ Configures structured logging and enforces secret redaction.
 
 ### `zarabot/db/migrations.py`
 
-Owns schema creation and version tracking.
+Owns schema creation and version tracking. **Sole owner of the `schema_version`
+table (v1.77)** — it is the only module that inserts a row there, one per
+applied migration, and the highest row is the schema version every other module
+reads through `apply`'s return value.
 
 **`async apply(conn: aiosqlite.Connection) → int`**
 - Applies every migration whose version exceeds the database's recorded version,
@@ -2253,6 +2256,34 @@ returns domain types, never SDK types. The SDK's own services — `OrdersService
 `MarketDataService`, `InstrumentsService`, `OperationsService`, `SandboxService`
 — are reachable only from inside this module.
 
+**Owner of the `instruments` table — specified, unimplemented (v1.77).** §5
+specifies `instruments`, `migrations/001_initial.sql` creates it, and rule 12
+and `db.connection`'s `critical=False` list both name "the instruments cache" as
+a writer. That writer does not exist: no file under `zarabot/` reads or writes
+the table, and this module holds instrument metadata in process memory only, for
+the lifetime of the process. The obligation is recorded here because this module
+is the only one that fetches instrument metadata at all — `share_by` and
+`get_instrument` are its calls, so a durable cache could have no other owner —
+and a table specified in §5 with no named module reaches no task at all (#102).
+
+**Nothing may be built from this paragraph.** It states an owner so the
+obligation has an address, not a contract to implement. Nothing in the bot reads
+the table today, so writing it would change no behaviour, and the memory cache
+is not a defect: the metadata this module needs is re-read cheaply on each
+process start and rule 8 already covers metadata that is unavailable
+mid-session.
+
+**Open decision — not settled here.** Either (a) `instruments` is dead schema:
+drop the table in a forward migration and strike "instruments cache" from rule
+12 and from `db.connection`'s rule-12 caller list, leaving this module's memory
+cache as the whole design; or (b) the durable cache is genuinely wanted — to
+survive a broker outage at startup, which is the only thing it would buy — in
+which case this module gains the write, on `db.connection.transaction(critical=False)`
+per rule 12, and §5 gains its refresh cadence and its staleness rule. The
+project has never chosen, and the two references to a writer that does not exist
+are the residue of assuming (b). Until the owner chooses, the table stays,
+unwritten, and this paragraph is why. Neither branch is in scope for any task.
+
 **Sandbox is selected by endpoint, never by a different method family.** The SDK
 exposes a `SandboxService` with a parallel set of methods — `post_sandbox_order`,
 `get_sandbox_order_state`, `cancel_sandbox_order` and so on. This module must
@@ -2585,6 +2616,15 @@ violation. **Every write runs inside `db.connection.transaction()`**; this modul
 never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
 its own (rule 31). This module is not a `db.*` repository, but it
 was one of the eight sites opening its own connection.
+
+**Sole owner of the `reconciliations` table (v1.77).** This module writes it
+with its own SQL — one `INSERT` per run, from `_persist` — and there is no
+`db.reconciliations` repository. It is the only module that can produce the
+row, because the row is the record of the comparison only this module performs.
+The rulebook permits a module to own its own table; ownership was previously
+recorded only in `interfaces.md`, which `make_tasks.py` does not read, so this
+module's own task never carried it (#177). No other module writes
+`reconciliations`; readers go through this module.
 
 **`async reconcile(now: datetime) → ReconciliationReport`**
 - Compares `broker.client.get_portfolio()` against `db.positions.list_open()`.
@@ -3451,7 +3491,16 @@ that submits:
 
 ### `zarabot/state/halt.py`
 
-**Sole owner of the halt flag.**
+**Sole owner of the halt flag, and sole owner of the `halt_state` table
+(v1.77).** This module writes `halt_state` with its own SQL and there is no
+`db.halt_state` repository: the table holds one row with `CHECK (id = 1)`, this
+module is its only writer, and a repository over it would be a pass-through.
+The rulebook permits that — a module may own its own table — and the price is
+every obligation a `db.*` repository carries, restated below. `halt_state` is
+**created and seeded** by `migrations/001_initial.sql`, which inserts the
+singleton row `(id = 1, halted = 0)`; that is the migration carve-out, not a
+second writer, and this module must therefore `UPDATE` the row rather than
+assume it must insert it.
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
@@ -4577,6 +4626,11 @@ the exchange sold the position; the corresponding position must be closed with
 
 ### `instruments`
 
+Owner: `broker.client` — **specified and unimplemented**. Nothing in `zarabot/`
+reads or writes this table today; §4's `broker.client` contract carries the
+obligation and the open decision about whether it is built or dropped (v1.77,
+#102). Do not write it from another module.
+
 | Column | Type | Notes |
 |---|---|---|
 | `figi` | TEXT | Primary key |
@@ -4595,14 +4649,47 @@ the exchange sold the position; the corresponding position must be closed with
 | `ran_at` | TEXT NOT NULL | |
 | `adjustments` | TEXT NOT NULL | JSON array. Empty array means agreement |
 
-**Content structure** of `adjustments` — one object per adjustment:
+**Content structure** of `adjustments` — one object per adjustment. **These ten
+types are all of them (v1.77).** Until v1.77 this list held four, and the six it
+omitted are exactly the ones §4 defines under `broker.reconcile`; `reporter` and
+`app.startup` branch on `type`, and "an adjustment with no branch is silently
+dropped" is what already happened to `STOP_DUPLICATE` (#35, #101). Every value
+that is money or a price is a **decimal string**, never a number; `position_id`
+and `lots` are integers; stop identifiers are the broker's `stop_order_id` where
+it is known and our own key otherwise.
 
 ```
 - closed externally: {"type": "CLOSED_EXTERNALLY", "ticker": "...", "position_id": 12, "exit_price": "123.45", "exit_at": "...", "exit_commission": "1.25"}
 - exit unresolved:   {"type": "EXIT_UNRESOLVED", "ticker": "...", "position_id": 12, "reason": "..."}
 - adopted:           {"type": "ADOPTED", "ticker": "...", "lots": 3, "average_price": "123.45"}
+- foreign holding:   {"type": "FOREIGN_HOLDING", "ticker": "...", "lots": 3, "average_price": "123.45"}
 - lot mismatch:      {"type": "LOTS_ADJUSTED", "ticker": "...", "position_id": 12, "from": 3, "to": 2}
+- stop missing:      {"type": "STOP_MISSING", "ticker": "...", "position_id": 12}
+- stop orphaned:     {"type": "STOP_ORPHAN", "ticker": "...", "stop_order_id": "..." | null, "key": "..."}
+- stop mispriced:    {"type": "STOP_MISPRICED", "ticker": "...", "position_id": 12, "expected": "123.45", "actual": "123.40"}
+- stop adoptable:    {"type": "STOP_ADOPTABLE", "ticker": "...", "position_id": 12, "stop_order_id": "..." | null}
+- duplicate stops:   {"type": "STOP_DUPLICATE", "ticker": "...", "position_id": 12, "keep": "...", "cancel": ["...", "..."]}
 ```
+
+- `ADOPTED` and `FOREIGN_HOLDING` carry the same fields and mean opposite
+  things. `ADOPTED` is the crash-recovery case of rule 6 — a holding the bot
+  recognises from its own unresolved `ENTRY` order, adopted into `positions`.
+  `FOREIGN_HOLDING` is rule 32 — a holding the bot does not recognise, reported
+  and **never** adopted, which `app.startup` names in its refusal. A reader that
+  treats them alike undoes rule 32 (#91).
+- `STOP_ORPHAN` names no `position_id`: the defining condition is that no open
+  position matches it. It carries both identifiers, because `stop_order_id` is
+  null for a stop that never reached the broker and `key` is then the only name
+  it has. `STOP_ADOPTABLE`'s `stop_order_id` is null on the same terms.
+- `STOP_DUPLICATE` is the only type carrying a list. `keep` is the single
+  identifier to retain — the one matching the position's `stop_order_key`, or
+  the oldest by `created_at` — and `cancel` holds every other identifier for that
+  position. Both are identifiers in the sense above. The keeper is named here
+  rather than derived by the caller, because the rule lives in `broker.reconcile`
+  and a caller re-deriving it is how this type came to be skipped entirely (#35).
+- No type carries a remedy, an instruction, or a broker call. Every one of them
+  is an observation; `app.startup` step 7 performs the remedies through
+  `execution.orders`.
 
 **Retention.** No table is ever pruned. Growth is a few megabytes a year and the
 historical record is the purpose of the project. Backups are retained 30 days.
