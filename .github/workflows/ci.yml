@@ -66,6 +66,17 @@ jobs:
       - name: Test-contract reachability
         run: python scripts/ci/check_test_contracts.py
 
+      # Issue #118 gate 4: §4 headings, `M` in make_tasks.py and
+      # dependency-order.md must name the same modules. A contract in the spec
+      # and absent from `M` reaches no agent. Own step, like the two above.
+      - name: Module-set completeness
+        run: python scripts/ci/check_module_set.py
+
+      # Issue #118 gate 7, third clause: every .py under zarabot/ and sandbox/
+      # named in the AGENTS.md sketch. check_rulebook.py gates directories only.
+      - name: Rulebook file tree
+        run: python scripts/ci/check_file_tree.py
+
       # Issue #183: the deployed compose file kept three log files while the
       # brief promised five. Own step — the retained window is the only
       # evidence path the health export has.
