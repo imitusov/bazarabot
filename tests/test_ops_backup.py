@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -151,3 +152,48 @@ async def test_stat_failure_after_copy_returns_backup_ok_not_backup_failed(
     events = _events(caplog, "backup_ok")
     assert len(events) == 1
     assert events[0].bytes == 0
+
+
+# --- Rule 18 (v1.75): the catch is narrow. ------------------------------------
+# "A backup failure is `sqlite3.Error` or `OSError`, and only those ... Every
+# other exception propagates under rule 21 rather than being reported to the
+# owner as "backup failed", which is a message that sends the reader to look at
+# the disk when the fault is in the code."
+
+
+async def test_sqlite_error_during_copy_is_reported_as_backup_failed(
+    env: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    alerts: list[str] = []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    def _copy(src: Path, dest: Path) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("zarabot.ops.backup.alert", _alert)
+    monkeypatch.setattr("zarabot.ops.backup._copy", _copy)
+    with caplog.at_level(logging.ERROR, logger="zarabot.ops.backup"):
+        await run(env / "zarabot.db", env / "backups")
+    assert alerts
+    assert len(_events(caplog, "backup_failed")) == 1
+
+
+async def test_non_backup_exception_propagates(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: red against `except Exception`."""
+    alerts: list[str] = []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        alerts.append(text)
+
+    def _copy(src: Path, dest: Path) -> None:
+        raise AttributeError("Connection.backup renamed")
+
+    monkeypatch.setattr("zarabot.ops.backup.alert", _alert)
+    monkeypatch.setattr("zarabot.ops.backup._copy", _copy)
+    with pytest.raises(AttributeError):
+        await run(env / "zarabot.db", env / "backups")
+    assert alerts == []

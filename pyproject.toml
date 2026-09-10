@@ -21,7 +21,12 @@ line-length = 88
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "DTZ", "S", "RET", "SIM"]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "DTZ", "S", "RET", "SIM", "BLE"]
+# BLE001 bans `except Exception` (failure class 5: a defensive fallback that
+# turns a loud failure into a plausible-looking silent one). It is the
+# mechanical companion to the v1.75 narrowing of error rules 9, 11, 12, 13, 17
+# and 18, and could not be enabled before the code matched them. Every
+# remaining `# noqa: BLE001` must name the contract that licenses it.
 # DTZ bans naive datetimes; S catches common security slips; ASYNC catches
 # blocking calls on the event loop. All three enforce project rules mechanically
 # rather than by review.

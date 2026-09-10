@@ -290,7 +290,14 @@ async def _reachability(cfg: Config) -> _Reachability:
             instrument = await get_instrument(ticker)
             price = await get_last_price(instrument.figi)
             lot_cost = Decimal(instrument.lot) * price
-        except Exception:
+        except Exception:  # noqa: BLE001 — step 8a never prevents startup
+            # §4 `app.startup` step 8a: "a ticker whose instrument or price
+            # cannot be read is excluded from the judgement and named
+            # separately", and "this step never raises `StartupError`, and
+            # never prevents startup". A diagnostic that refused to run would
+            # abandon every open position, its exits and its stops, so this
+            # one catch stays blind by contract. The tickers it excludes are
+            # reported as `unknown`, never folded into either count.
             unknown.append(ticker)
             continue
         if lot_cost <= 0:
@@ -492,7 +499,11 @@ async def start() -> AppContext:
             stage=stage,
             reason=type(exc).__name__,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — the startup boundary, rule 15
+        # Rule 15: startup refuses to start, alerts, sleeps and exits
+        # non-zero. This is the outermost frame of the startup path, so
+        # nothing above it could act on a narrower class; letting an exception
+        # escape here would leave the container restarting with no alert.
         await _abort(
             f"Startup aborted: {exc}",
             exc,

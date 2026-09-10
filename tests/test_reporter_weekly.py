@@ -10,6 +10,7 @@ from pathlib import Path
 
 import aiosqlite
 import pytest
+from telegram.error import NetworkError
 
 from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
@@ -180,7 +181,7 @@ async def test_send_failure_alerts_and_does_not_raise(
 
     async def _alert(text: str, urgent: bool = False) -> None:
         calls.append(text)
-        raise RuntimeError("network")
+        raise NetworkError("network")
 
     monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
     await send(NOW)
@@ -191,7 +192,7 @@ async def test_send_raising_does_not_emit_weekly_report_built(
     db: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def _alert(text: str, urgent: bool = False) -> None:
-        raise RuntimeError("network")
+        raise NetworkError("network")
 
     monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
     with caplog.at_level(logging.INFO, logger="zarabot.reporter.weekly"):
@@ -272,3 +273,73 @@ async def test_event_fires_when_notifier_swallows_send_failure(
     ]
     assert len(failures) == 3
     assert all(record.name == "zarabot.telegram.notifier" for record in failures)
+
+
+# --- Narrow catches (issue #195). ---------------------------------------------
+# `send` swallows what rule 12 (v1.75) licenses on this non-critical path -
+# "Non-propagation covers `aiosqlite.Error` and only `aiosqlite.Error` ... Any
+# other exception propagates and reaches rule 21's supervisor with its
+# traceback" - plus rule 13's `TelegramError` from the `alert` leg.
+
+
+async def test_send_swallows_a_database_error_from_build(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        calls.append(text)
+
+    async def _closed() -> list[Position]:
+        raise aiosqlite.OperationalError("database is locked")
+
+    monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
+    monkeypatch.setattr("zarabot.reporter.weekly.list_closed", _closed)
+    await send(NOW)
+    assert calls == ["Weekly report failed to send."]
+
+
+async def test_send_propagates_a_non_database_exception_from_build(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: red against `except Exception`."""
+
+    async def _closed() -> list[Position]:
+        raise AttributeError("list_closed renamed")
+
+    monkeypatch.setattr("zarabot.reporter.weekly.list_closed", _closed)
+    with pytest.raises(AttributeError):
+        await send(NOW)
+
+
+async def test_send_propagates_a_non_telegram_exception_from_the_alert_leg(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A defect inside the notifier must reach rule 21, not be logged away."""
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        raise TypeError("alert signature changed")
+
+    monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
+    with pytest.raises(TypeError):
+        await send(NOW)
+
+
+async def test_send_propagates_a_defect_from_the_failure_alert_leg(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inner catch is narrow too: only rule 13's class is swallowed there."""
+    calls: list[str] = []
+
+    async def _closed() -> list[Position]:
+        raise aiosqlite.OperationalError("database is locked")
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        calls.append(text)
+        raise TypeError("alert signature changed")
+
+    monkeypatch.setattr("zarabot.reporter.weekly.list_closed", _closed)
+    monkeypatch.setattr("zarabot.reporter.weekly.alert", _alert)
+    with pytest.raises(TypeError):
+        await send(NOW)
+    assert calls == ["Weekly report failed to send."]

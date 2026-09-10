@@ -10,7 +10,9 @@ from typing import Any
 
 import aiosqlite
 import pytest
+from telegram.error import NetworkError
 
+from zarabot.broker.client import BrokerUnavailable
 from zarabot.config import Config, get, load
 from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
@@ -56,13 +58,16 @@ class _FakeChat:
 class _FakeMessage:
     def __init__(self, text: str = "") -> None:
         self.replies: list[str] = []
+        self.attempts = 0
         self.fail_times = 0
+        self.failure: BaseException = NetworkError("network")
         self.text = text
 
     async def reply_text(self, text: str, **kwargs: object) -> None:
+        self.attempts += 1
         if self.fail_times > 0:
             self.fail_times -= 1
-            raise RuntimeError("network")
+            raise self.failure
         self.replies.append(text)
 
 
@@ -460,3 +465,71 @@ async def test_configuration_is_read_through_the_memoised_accessor(
     intruder = _FakeUpdate(777)
     await status(intruder, None)
     assert intruder.message.replies == []
+
+
+# --- Narrow catches (issue #195). ---------------------------------------------
+# `_reply` sends over Telegram, so §8 rule 13 (v1.75) governs it: "A send
+# failure is `telegram.error.TelegramError`, and only that ... Any other
+# exception propagates to the caller and thence to rule 21."
+# `_position_line` calls the broker, so §8 rule 9 governs it: "Only
+# `BrokerUnavailable`, `BrokerRateLimited` and `InstrumentNotFound` are handled
+# as failures; every other exception propagates under rule 21."
+
+
+def _patch_one_open_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    open_pos = _position()
+
+    async def _open() -> list[Position]:
+        return [open_pos]
+
+    monkeypatch.setattr("zarabot.telegram.commands.list_open", _open)
+
+
+async def test_reply_swallows_a_telegram_send_failure(
+    env: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    update = _FakeUpdate(AUTH_CHAT, "status")
+    update.message.fail_times = 10
+    update.message.failure = NetworkError("network")
+    with caplog.at_level(logging.ERROR, logger="zarabot.telegram.commands"):
+        await status(update, None)
+    assert update.message.replies == []
+    assert update.message.attempts == 3
+
+
+async def test_reply_propagates_a_non_telegram_exception(env: Path) -> None:
+    """The other direction: red against `except Exception`."""
+    update = _FakeUpdate(AUTH_CHAT, "status")
+    update.message.fail_times = 10
+    update.message.failure = AttributeError("reply_text renamed")
+    with pytest.raises(AttributeError):
+        await status(update, None)
+    assert update.message.attempts == 1
+
+
+async def test_position_line_reports_na_when_the_broker_is_unavailable(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_one_open_position(monkeypatch)
+
+    async def _price(figi: str) -> Decimal:
+        raise BrokerUnavailable("broker down")
+
+    monkeypatch.setattr("zarabot.telegram.commands.get_last_price", _price)
+    text = await _reply(positions)
+    assert "N/A" in text
+
+
+async def test_position_line_propagates_a_non_broker_exception(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: a defect must not be rendered as `N/A`."""
+    _patch_one_open_position(monkeypatch)
+
+    async def _price(figi: str) -> Decimal:
+        raise AttributeError("get_last_price renamed")
+
+    monkeypatch.setattr("zarabot.telegram.commands.get_last_price", _price)
+    update = _FakeUpdate(AUTH_CHAT, "positions")
+    with pytest.raises(AttributeError):
+        await positions(update, None)

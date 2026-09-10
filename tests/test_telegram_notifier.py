@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 from zarabot.telegram.notifier import alert
 
@@ -22,6 +23,7 @@ class _FakeBot:
     calls: list[dict[str, object]] = []
     fail_times = 0
     send_attempts = 0
+    failure: BaseException = NetworkError("network")
 
     def __init__(self, token: str) -> None:
         self.token = token
@@ -30,7 +32,7 @@ class _FakeBot:
         _FakeBot.send_attempts += 1
         if _FakeBot.fail_times > 0:
             _FakeBot.fail_times -= 1
-            raise RuntimeError("network")
+            raise _FakeBot.failure
         _FakeBot.calls.append(kwargs)
 
 
@@ -41,6 +43,7 @@ def env(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeBot.calls = []
     _FakeBot.fail_times = 0
     _FakeBot.send_attempts = 0
+    _FakeBot.failure = NetworkError("network")
     monkeypatch.setattr("zarabot.telegram.notifier.Bot", _FakeBot)
 
 
@@ -64,7 +67,7 @@ async def test_failed_send_is_retried_then_emits_telegram_send_failed(
     record = events[0]
     assert record.levelno == logging.WARNING
     assert record.attempt == 3
-    assert record.error == "RuntimeError"
+    assert record.error == "NetworkError"
     assert "tinvest-secret-token" not in caplog.text
     assert "telegram-secret-token" not in caplog.text
     assert "tinvest-account-id-secret" not in caplog.text
@@ -121,3 +124,81 @@ async def test_alert_body_containing_account_id_is_dropped_and_emits_secret_reda
     body = str(_FakeBot.calls[-1]["text"])
     assert "tinvest-account-id-secret" not in body
     assert body != "leak tinvest-account-id-secret please"
+
+
+# --- Rule 13 (v1.75): the catch is narrow. ------------------------------------
+# "A send failure is `telegram.error.TelegramError` and only that; the retries
+#  - three - are for `telegram.error.NetworkError` (including `TimedOut`) and
+#  `telegram.error.RetryAfter` ... `BadRequest`, `Forbidden` and `InvalidToken`
+#  ... logged once, not retried. **Every other exception propagates** out of
+#  `alert` to the caller, and thence to rule 21."
+
+
+async def test_timed_out_is_retried_three_times(
+    env: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`TimedOut` is a `NetworkError`: a transport failure a retry can fix."""
+    _FakeBot.failure = TimedOut()
+    _FakeBot.fail_times = 10
+    with caplog.at_level(logging.WARNING, logger="zarabot.telegram.notifier"):
+        await alert("hello")
+    assert _FakeBot.send_attempts == 3
+    assert len(_events(caplog, "telegram_send_failed")) == 1
+
+
+async def test_retry_after_is_retried_three_times(
+    env: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    _FakeBot.failure = RetryAfter(1)
+    _FakeBot.fail_times = 10
+    with caplog.at_level(logging.WARNING, logger="zarabot.telegram.notifier"):
+        await alert("hello")
+    assert _FakeBot.send_attempts == 3
+
+
+async def test_bad_request_is_logged_once_and_never_retried(
+    env: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A settings failure is just as wrong on the third attempt.
+
+    `BadRequest` subclasses `NetworkError` in python-telegram-bot, so a retry
+    predicate written as `isinstance(exc, NetworkError)` would retry it. It
+    must not.
+    """
+    _FakeBot.failure = BadRequest("chat not found")
+    _FakeBot.fail_times = 10
+    with caplog.at_level(logging.WARNING, logger="zarabot.telegram.notifier"):
+        await alert("hello")
+    assert _FakeBot.send_attempts == 1
+    events = _events(caplog, "telegram_send_failed")
+    assert len(events) == 1
+    assert events[0].error == "BadRequest"
+    assert events[0].attempt == 1
+
+
+async def test_non_telegram_exception_propagates_out_of_alert(env: None) -> None:
+    """The other direction, and the point of the amendment.
+
+    A rename inside the library, or an `AttributeError` in the message-building
+    code, is not a send failure. It must reach rule 21's supervisor with its
+    traceback rather than be absorbed by the rule that exists for network
+    flakiness. This test is red against `except Exception`.
+    """
+    _FakeBot.failure = AttributeError("Bot has no attribute send_message")
+    _FakeBot.fail_times = 10
+    with pytest.raises(AttributeError):
+        await alert("hello")
+    assert _FakeBot.send_attempts == 1
+
+
+async def test_defect_in_alert_itself_propagates(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outer catch in `alert` is narrow too, not only `_send`'s."""
+
+    def _boom() -> tuple[str, ...]:
+        raise TypeError("config renamed")
+
+    monkeypatch.setattr("zarabot.telegram.notifier._secrets", _boom)
+    with pytest.raises(TypeError):
+        await alert("hello")

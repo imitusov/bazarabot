@@ -8,7 +8,14 @@ from decimal import Decimal
 from t_tech.invest.schemas import CandleInterval
 
 from zarabot import config
-from zarabot.broker.client import get_candles, get_instrument, get_last_price
+from zarabot.broker.client import (
+    BrokerRateLimited,
+    BrokerUnavailable,
+    InstrumentNotFound,
+    get_candles,
+    get_instrument,
+    get_last_price,
+)
 from zarabot.clock import moscow_date
 from zarabot.db.positions import list_closed, list_open
 from zarabot.db.snapshots import list_for_period
@@ -122,7 +129,12 @@ async def benchmark_return(start: date, end: date) -> Decimal | None:
                 since,
                 until,
             )
-        except Exception:
+        except (BrokerUnavailable, BrokerRateLimited, InstrumentNotFound):
+            # Rule 9: "Only `BrokerUnavailable`, `BrokerRateLimited` and
+            # `InstrumentNotFound` are handled as failures; every other
+            # exception propagates under rule 21." The §4 contract then makes
+            # the benchmark unavailable rather than zero. A rename reported as
+            # "benchmark unavailable" is failure class 5.
             return None
         if len(candles) < 2 or candles[0].close == 0:
             return None
