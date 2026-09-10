@@ -166,6 +166,22 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   `lifecycle.exits` enforces that position's stop by polling instead. Force
   selling a sound position because a secondary order failed would convert an
   operational problem into a realised loss.
+- **Slippage is alerted, never unwound (v1.74).** After the entry settles, this
+  module — the only one that sees both `signal.reference_price` and the actual
+  fill price — compares them. When
+  `abs(fill_price - signal.reference_price) / signal.reference_price` exceeds
+  `config.fill_slippage_alert_pct`, it calls `telegram.notifier.alert` naming the
+  ticker, the reference price, the fill price and the difference as a percentage.
+  The position is opened, stopped and managed exactly as any other. It is **not**
+  sold back, under any tolerance: unwinding is a second real trade (cancel the
+  stop, market sell, start a cooldown) and the brief's policy is alert-and-keep.
+  Stop and target are already derived from the fill, so the percentage risk is
+  correct; what is wrong is the position's rouble size, which is reportable, not
+  tradeable. The comparison is a pure `Decimal` calculation on values already in
+  hand — no extra broker call — and a failure to send the alert must never fail
+  the entry, which has already executed. There is no §7.1 event for this: the
+  numbers are already in `order_filled` and `position_opened`, and the obligation
+  is that the owner is told.
 - Raises `OrderRejected` after recording the rejection. The entry is **not**
   retried.
 - Ordering constraint: the database write strictly precedes the broker call.
@@ -453,6 +469,13 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (v1.61).
 - A rejected entry emits `order_rejected` and no `position_opened`.
 - A `LOCAL` degrade after three stop failures emits `stop_protection_degraded`.
+- An entry whose fill price differs from `signal.reference_price` by more than
+  `FILL_SLIPPAGE_ALERT_PCT` alerts the owner, and the position is still opened,
+  still has its stop placed, and is **not** sold back — no cancel, no sell, no
+  cooldown, and `close_position` is never called (proves the brief's alert-only
+  policy; unwinding here would be a second real trade).
+- A fill inside the tolerance raises no such alert, and the alert never changes
+  the outcome of the entry either way (proves it is an alert, not a control).
 
 **stop-order lifecycle** (`execution.orders`, `broker.reconcile`)
 - Opening a position places exactly one stop order at the computed price

@@ -37,6 +37,12 @@ Loads and validates every setting once at startup.
 - Adds `cash_reserve_pct`, default **1**, the slice of cash `risk.sizing` holds
   back so fees and rounding cannot make an approved order unaffordable. Bounded
   0–50; a reserve above half of cash is a configuration error, not a preference.
+- Adds `fill_slippage_alert_pct`, default **2** (v1.74), from
+  `FILL_SLIPPAGE_ALERT_PCT`. It is how far an entry fill may land from the
+  signal's reference price before `execution.orders` alerts the owner. Bounded
+  0–100. It is an **alert threshold, not a risk limit**: nothing rejects an
+  order or unwinds a position because of it, `risk.gate` never reads it, and a
+  missing value therefore takes its default rather than failing the load.
 - Adds `allow_foreign_holdings`, defaulting to **false**. The trading account is
   the bot's alone (brief v1.8); this flag is the owner's explicit acknowledgement
   that it is not, and it is deliberately awkward to set by accident. It is not a
