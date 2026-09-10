@@ -242,7 +242,10 @@ def test_live_headings_match_make_tasks_lookup() -> None:
     # tracked directory can mask the drift gate it shares a tree with.
     source = (ROOT / "scripts" / "make_tasks.py").read_text("utf-8")
     head = source.split("OUT.mkdir(")[0]
-    namespace: dict[str, object] = {"__name__": "make_tasks_head"}
+    namespace: dict[str, object] = {
+        "__name__": "make_tasks_head",
+        "__file__": str(ROOT / "scripts" / "make_tasks.py"),
+    }
     exec(compile(head, "make_tasks.py", "exec"), namespace)  # noqa: S102
     test_block = namespace["test_block"]
     headings = check.spec_headings((ROOT / "technical-spec.md").read_text("utf-8"))
