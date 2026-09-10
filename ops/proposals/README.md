@@ -58,7 +58,7 @@ run **one module per session**, test-first, two commits, never edit the spec.
 | #30 F-30 coverage floors | likely **stale** (ratchet already ≥80%) |
 | #16 F-16 portfolio risk | **owner decision applied** — sector/correlation cap **declined**, out of scope in brief §11; the axis is strategy, with no number set. Proposal deleted. No `risk.gate` change, no sector map, no new `RejectionReason`. Close referencing the brief amendment |
 | #25 F-25 backup volume | **amender** / deploy |
-| #44 V12 `get_operations` | live broker measurement first |
+| #44 V12 `get_operations` | **done** — `scripts/verify/verify_operations.py`, measured 2026-09-10 into §2.1. Fee attribution verified; the SELL check fails until the account sells once, and #44 stays open on that |
 | #13 #14 sandbox/ML | research last |
 
 ### Theme F — Spec / interfaces drift
