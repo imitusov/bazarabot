@@ -182,6 +182,31 @@ module's own task never carried it (#177). No other module writes
   The close still passes `order = None`. This module records **no** order row: it
   did not submit one, and inventing one would contradict its own prohibition on
   trading.
+
+  **This close starts the ticker's cooldown, and that is a write this contract
+  now admits (v1.78).** `db.cooldowns.start(position.ticker, sale.occurred_at)`
+  is called immediately after the close, from the instant of the *sale* and not
+  the instant of detection, for the same reason the exit price comes from the
+  operations feed. A position that left the account is a position the bot just
+  exited, and every other exit path starts a cooldown; skipping it here would let
+  the next cycle re-enter a ticker the account sold minutes ago. Until v1.78 the
+  write was in the code and in no contract (#110, failure class 2), which is the
+  worst arrangement available: the next agent rebuilding this module from its
+  contract deletes the line, and nothing says it was ever required.
+
+  **A failed cooldown write is not remedied here — it propagates (v1.78).**
+  Cooldowns are rule 11, and this module has no halt path of its own. The
+  `aiosqlite.Error` leaves `reconcile`, `app.startup` fails at the `reconcile`
+  stage and refuses to start, which satisfies rule 11's "stop opening anything"
+  by the strongest means available: the bot does not run. This is sound **only
+  while reconciliation runs exclusively at startup**, which is what rule 25's
+  open decision (a) currently fixes. **Open decision — not settled here.** If
+  rule 25 is ever resolved as (b), a named `app.loops` task calling reconcile on
+  a cadence, then a propagating cooldown failure mid-session is an exception in a
+  supervised loop and not a halt, and this module needs an explicit rule-11
+  remedy of the shape `execution.orders` has. That is a money-path decision, it
+  is the owner's, and it is bound to rule 25's: whoever settles rule 25 settles
+  this. No agent may add a halt path here on its own reading.
 - **A sale that cannot be resolved is reported, not booked.** When the feed
   returns no covering sale, or is unavailable, the position **stays open** and
   the report carries
@@ -233,8 +258,18 @@ module's own task never carried it (#177). No other module writes
   a stop at the wrong price, **or more than one live stop on the same position** —
   and the caller performs the remedy through
   `execution.orders`, which is the only module permitted to place or cancel
-  orders. Keeping reconciliation observational is what allows it to run
-  anywhere, including read-only diagnostics, without financial side effects.
+  orders. Keeping the *order* paths out of this module is what allows every
+  remedy to be applied by the one module permitted to trade.
+
+  **"Observational" means it places no orders. It is not read-only (v1.78).**
+  This module closes positions, adopts them, adjusts lot counts, starts
+  cooldowns and writes `reconciliations` — it is a writer of trading-critical
+  state under rule 11, and running it is not a diagnostic. The earlier claim
+  that it could "run anywhere, including read-only diagnostics, without
+  financial side effects" was true of the class it checked, orders, and read as
+  covering all writes (#110, failure class 6). Only the never-place-or-cancel
+  line below is binding; nothing in this module is safe to run against a live
+  account for a look.
 - On restart an existing stop is **adopted** rather than replaced — two stops on
   one position would sell it twice.
 - **A stop is mispriced only when it differs from the position's stop by a full

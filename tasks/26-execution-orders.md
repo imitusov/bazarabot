@@ -242,6 +242,20 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
 **`async close_executed_stop(position: Position, fill: OrderRecord) → Position`**
 - Books the close of a position whose **exchange** stop fired. Never submits a
   sell — the exchange already did.
+- **Starts the cooldown for the position's ticker, exactly as `close_position`
+  does (v1.78).** Rule 26 has always required it — "close the position from the
+  fill with `exit_trigger = STOP_LOSS`, start the cooldown, alert" — but this
+  contract never said so, and the obligation reached the code only because both
+  functions happen to share a private helper (#109, failure class 2). A rebuild
+  of this function from this contract alone would drop the cooldown, and the bot
+  would re-enter on the next cycle the ticker the exchange had just stopped it
+  out of. The cooldown is started from the same instant the close is booked at.
+- **A failed cooldown write halts but does not fail the close**, on exactly the
+  terms `close_position` states above: the position row is already `CLOSED` and
+  the exchange has already sold, so raising here would report a completed exit
+  as failed. Cooldowns are rule 11, so the failure takes the rule-11 remedy —
+  alert and halt — and this function returns the closed position, because it did
+  close.
 - **`fill` is the broker's own record of that execution**, obtained from
   `broker.client.get_executed_stop_fills`. The exit price is
   `fill.filled_price` and the exit commission is `fill.commission`. Neither may
