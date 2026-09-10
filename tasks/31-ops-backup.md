@@ -25,12 +25,32 @@ Module **31** of 42 in `dependency-order.md`. Everything before it is complete a
 
 - Failure alerts and returns; it must never stop trading.
 
+**This module owns rule 18 (v1.75), and the catch is narrow.** A backup failure
+is `sqlite3.Error` or `OSError` and only those: the database refusing the copy,
+or the filesystem refusing the destination — a full disk, a missing mount, a
+permission. Note `sqlite3`, not `aiosqlite`: this path deliberately opens its own
+synchronous connections in a worker thread rather than using the shared one, so
+rule 30 does not apply to it. **Every other exception propagates** under rule 21
+rather than being reported as "backup failed", which is a message that sends the
+reader to inspect a disk when the fault is in the code.
+
 ## Relevant error handling rules
 
 From `technical-spec.md` §8. Handle each exactly as written.
 
 18. **Backup failure** → ERROR, alert, trading continues. A missing backup is not
     worth stopping trading over; it is worth knowing about.
+
+    **A backup failure is `sqlite3.Error` or `OSError`, and only those
+    (v1.75).** `ops.backup` runs `sqlite3.Connection.backup` in a worker thread
+    over a live database file, so those two classes are the whole surface it can
+    legitimately fail on: the database refusing the copy, and the filesystem
+    refusing the destination — a full disk, a missing mount, a permission. Note
+    it is `sqlite3`, not `aiosqlite`: this path deliberately opens its own
+    synchronous connections rather than the shared one, and rule 30 does not
+    apply to it. **Every other exception propagates** under rule 21 rather than
+    being reported to the owner as "backup failed", which is a message that sends
+    the reader to look at the disk when the fault is in the code.
 
 ## Test cases
 

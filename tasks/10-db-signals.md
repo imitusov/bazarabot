@@ -44,6 +44,15 @@ its own (rule 31).
 
 **`async write_daily(snapshot) → None`** — upserts on the Moscow date; a second write for the same date updates rather than duplicates.
 
+**These two modules own rule 12 (v1.75).** Signals, snapshots and the instruments
+cache are the non-critical write paths: a failed write here is logged at ERROR
+and does not propagate, because losing an analytics row must not stop trading.
+The swallow is `aiosqlite.Error` and nothing wider — every other exception
+propagates and reaches rule 21's supervisor with its traceback. An analytics
+path is where a silently dropped `TypeError` survives longest, since nothing
+downstream misses the row until a weekly report is composed without it. Contrast
+`db.cooldowns` above, which is rule 11 and propagates everything.
+
 ## Relevant error handling rules
 
 From `technical-spec.md` §8. Handle each exactly as written.
@@ -51,6 +60,14 @@ From `technical-spec.md` §8. Handle each exactly as written.
 12. **Database write failure on a non-critical path** (signals, snapshots,
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
+
+    **Non-propagation covers `aiosqlite.Error` and only `aiosqlite.Error`
+    (v1.75)** The swallow exists for a database that will not take the row, not
+    for every way the call site can be wrong. Any other exception propagates and
+    reaches rule 21's supervisor with its traceback. Unqualified, this rule reads
+    as `except Exception: pass` on the analytics path, and an analytics path is
+    exactly where a silently dropped `TypeError` survives longest — nothing
+    downstream misses the row until a weekly report is composed from it.
 
 30. **Database accessed before `db.connection.connect`, or after
     `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback

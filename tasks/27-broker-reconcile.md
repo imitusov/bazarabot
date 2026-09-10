@@ -275,6 +275,30 @@ was one of the eight sites opening its own connection.
   observes and records; it does not trade. Every remedy it identifies is carried
   out by `app.startup` through `execution.orders`.
 
+**This module owns rules 7, 24 and 25 as their detector (v1.75).** All three are
+disagreements between broker truth and local belief, and this is the only module
+that compares the two:
+
+- **Rule 7** — broker and database disagree on a position or a quantity. The
+  broker wins, the local record is corrected, and the report names specifics so
+  the owner's alert says which ticker moved from what to what. A quantity
+  mismatch is `LOTS_ADJUSTED`; a position the broker does not hold is the
+  operations-feed path above.
+- **Rule 24** — a stop order with no matching open position is reported
+  `STOP_ORPHAN` and alerted. A live stop against a position that no longer exists
+  can sell stock the account does not hold, which is why it is remedied rather
+  than merely noted.
+- **Rule 25** — an open `EXCHANGE`-protected position with no live stop is
+  reported `STOP_MISSING`. Rule 25's own text carries the open decision about
+  *when* the replacement happens and it is not settled here.
+
+The cancel in rule 24 and the placement in rule 25 are **not** performed here:
+this module's never-place-or-cancel line is binding and older than either rule.
+`app.startup` step 7 applies both remedies through `execution.orders`. The
+detector owns the rule because the detector is the module that can be wrong about
+whether the condition exists at all — the remedy is a call it names, and step 7
+already names it.
+
 ## Relevant error handling rules
 
 From `technical-spec.md` §8. Handle each exactly as written.
@@ -346,6 +370,47 @@ From `technical-spec.md` §8. Handle each exactly as written.
     placed, no exit evaluated, no sale made. Never adopt one — adoption derived a
     stop and target from the holding's average cost, which handed the next cycle
     a position already past its take-profit.
+
+33. **A recorded price comes from the broker, or the record stays pending.**
+    Realised P&L, exit prices and commissions are written from what the broker
+    reports it did — an order state, an executed stop, an operation — and never
+    from a quote, a stop price, an entry price, or any other number the bot has
+    to hand. Where the broker's own record is not yet available, the position
+    stays open and the read is retried on the next cycle; **after three
+    consecutive cycles in which the read is still unavailable, the owner is
+    alerted once for that order, and the alert re-arms when the order settles
+    (v1.75)**. A position closed a minute late is
+    recoverable and a position closed at an invented number is not, because
+    nothing downstream can tell the invented one from a real one. This rule
+    generalises #4, #5, #8 and #11, which are four instances of the same
+    mistake.
+
+    **Where the bound applies, and where "cycle" is the wrong unit (v1.75).**
+    "A bounded number of cycles" named no bound until v1.75, which is precisely
+    what rule 2's own post-mortem calls the defect it was rewritten to remove —
+    "a threshold no code implemented and no test could fail" — live one rule
+    family over, on the path that decides whether a position stays open with real
+    money in it (#112). Three, matching rules 1, 2 and 9, because they are the
+    same shape and a second threshold in the same system is a second thing to
+    remember. **The counted path is `execution.orders.resolve_unfinished`**,
+    which runs once per cycle, already logs `order_unresolved` with an
+    `age_seconds` computed from the order's own `created_at`, and already
+    distinguishes "the broker cannot be reached" from "the broker says this order
+    was never placed". That is the full set of three parts rule 36 requires:
+    threshold, one alert, reset on settlement.
+
+    **`broker.reconcile`'s `EXIT_UNRESOLVED` is not on this counter and is not
+    a cycle.** Reconciliation runs at `app.startup` step 7 and appears in no
+    `app.loops` task list, so its retry cadence is one per process start, not one
+    per minute, and it alerts once per pass by construction. Suppressing it
+    across *restarts* would require durable state — restarts are routine (failure
+    class 15) — and whether an operator should stop being told about an
+    unresolved exit because the process has bounced is a judgement about a real
+    money-path alert, not a bug to be fixed in passing. **It is left alerting
+    once per pass**, and the question of a durable, restart-surviving latch is
+    recorded here as open and unowned. It is entangled with rule 25's open
+    decision, which is what would put a reconciliation task on a cadence in the
+    first place, and should be settled with it rather than before it.
 
 ## Test cases
 

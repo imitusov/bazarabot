@@ -52,6 +52,12 @@ inherit whichever file the previous importer happened to open.
 - Must never open a connection as a side effect of being called. A silent
   reconnect would hide a missing `app.startup` step and would let a test inherit
   a file it did not create.
+- **This module owns rule 30 (v1.75).** Every access to the database before
+  `connect` or after `disconnect` fails here, with `DatabaseNotOpenError` and no
+  fallback connection, because this is the only module that knows whether the
+  connection is open. No caller handles it: like rules 22 and 31 it is a
+  programming defect that must reach a traceback, and a module that caught it
+  would be choosing to run without a database rather than say so.
 
 **`transaction(*, critical: bool = True) → async context manager yielding aiosqlite.Connection`**
 - **The sole transaction owner.** Every write in the system runs inside it:
@@ -128,6 +134,16 @@ From `technical-spec.md` §8. Handle each exactly as written.
 11. **Database write failure on a trading-critical path** (orders, positions,
     halt state, **cooldowns** — v1.63) → hard error: halt trading, alert, stop opening anything. The bot
     must never trade what it cannot record.
+
+    **A write failure is `aiosqlite.Error`, and only that (v1.75)** That is the
+    class `db.connection.transaction()` already emits `db_write_failed` for
+    before re-raising, and the class a repository's caller may act on. **Every
+    other exception propagates unchanged** — an `AttributeError` from a rename is
+    not a database that is unavailable, and a `halt trading` path that cannot
+    tell the two apart converts a programming error into a plausible degraded
+    state (failure class 5). This is the narrowing already applied at the §4
+    level to `db.connection` (v1.61) and `market.session` (v1.59) and never
+    carried into §8, which is the text agents implement from (#107).
 
 30. **Database accessed before `db.connection.connect`, or after
     `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback

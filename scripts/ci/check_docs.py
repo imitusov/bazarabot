@@ -372,12 +372,14 @@ def main() -> None:
 
     # Unclaimed when this gate was written (#115). Delete an entry when a §4
     # contract takes the rule, or when the rule itself goes.
-    KNOWN_UNCLAIMED_RULES = {
-        # "6" removed in v1.73 (#91): broker.reconcile's §4 contract now names
-        # rule 6 as the subject of its recognised-order adopt path.
-        "2", "3", "5", "7", "8", "12", "13", "14", "16", "17", "18", "20",
-        "22", "24", "25", "26", "27", "28", "29", "30", "34", "37",
-    }
+    #
+    # EMPTY as of spec v1.75 (#115). The twenty-two entries that stood here were
+    # taken by §4 contracts in one amendment: each rule is now restated as an
+    # obligation under the heading of the module that owes it, which is what
+    # `make_tasks.py` actually delivers to an agent. An empty allowlist means the
+    # next rule added to §8 without an owner fails this gate on the commit that
+    # adds it, rather than joining a list.
+    KNOWN_UNCLAIMED_RULES: set[str] = set()
 
     orphans = [r for r in rules if r not in claims and r not in KNOWN_UNCLAIMED_RULES]
     stale = sorted(KNOWN_UNCLAIMED_RULES - set(rules))

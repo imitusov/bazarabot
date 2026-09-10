@@ -86,8 +86,24 @@ From `technical-spec.md` §8. Handle each exactly as written.
    The two must share a counter, or a ticker alternating between them crosses no
    threshold ever.
 9b. **A quote is rejected as non-positive, stale, or an implausible move** →
-    WARNING, omit that instrument for the cycle, alert once per cycle with the
-    count. It is **not** a broker outage: it must not increment the consecutive
+    WARNING, omit that instrument for the cycle, and **alert once, latched, with
+    the count** (v1.75): one alert on the first cycle that rejects anything, and
+    none further until a cycle rejects nothing, which re-arms it. The count is
+    named in the alert that does fire, because every price rejected at once is a
+    different event from one instrument going quiet. `app.loops` owns this and
+    implements it in the price refresh of step 2.
+
+    Until v1.75 this rule read "alert once per cycle with the count", which the
+    `app.loops` contract had already argued against in the next paragraph and
+    which no code has ever done (#106). Read literally it is roughly 510 messages
+    in an 8.5-hour session for one permanently stale instrument — the
+    repeating-alert failure rule 36 exists to forbid, written into the rule an
+    agent is told to implement from. Both texts were internally plausible and no
+    test could be red for both. The latch is now stated here as well as in §4:
+    the set-site is the first rejecting cycle, the reset-site is a cycle that
+    rejects nothing, and the alert is one.
+
+    It is **not** a broker outage: it must not increment the consecutive
     failure counter of rule 1, and it must not be retried, because the next
     reading arrives on the next cycle anyway. Treating bad data as an outage is
     how a malformed field becomes an alert about the network.

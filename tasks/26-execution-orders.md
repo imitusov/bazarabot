@@ -369,6 +369,48 @@ recorded is a different kind of thing from a wrong number that looks right.
 - Ordering constraint: completes before any new order is submitted in the
   process's lifetime.
 - Must never resubmit an order.
+- **Rule 33's bound lands here (v1.75).** An order this function cannot settle
+  because the broker cannot be reached stays unresolved and is retried on the
+  next cycle; on the **third consecutive cycle** in which it is still unknown,
+  alert **once** for that order key, and re-arm when the order settles by any
+  route — a fill, a rejection, or `OrderNotFound`. The count and the alert are
+  per order key, not per cycle: two stuck orders are two alerts, and one stuck
+  order is one. Nothing new needs recording to do it. `order_unresolved` already
+  carries `age_seconds`, computed from the order's own `created_at`, so the
+  age is in hand at the site that would alert. Three matches rules 1, 2 and 9
+  deliberately; a second threshold in this system would be a second number to
+  remember.
+
+**This module owns rules 3, 5, 26, 27 and 34 (v1.75).** All five are the same
+subject from different sides — what the bot does when the broker's answer to a
+submission is a refusal, a silence, or a fraction — and this is the only module
+that submits:
+
+- **Rule 3** — an entry the broker rejects is recorded with its `broker_reason`,
+  alerted, and opens no position. It is **never retried**, on this cycle or any
+  later one. The strategy that produced the signal will produce another if the
+  condition still holds, and a retry loop on an entry is how a rejection becomes
+  a position nobody decided to take.
+- **Rule 4 is the documented exception to that**, and it is already stated above
+  under `close_position`: an exit is retried on every following cycle until the
+  position closes.
+- **Rule 5** — a submission that times out or whose outcome is unknown leaves the
+  row `SUBMITTING` and is resolved by `resolve_unfinished` querying with the
+  idempotency key, which is the whole of rule 5's remedy, on the next cycle or at the next startup. **Never resubmit**,
+  and note that resubmission is not merely forbidden but useless: §2.1 measured
+  that a duplicate key is refused with `INVALID_ARGUMENT`/`30057` rather than
+  returning the existing order.
+- **Rule 26** — a stop the exchange executed is not an error. The position is
+  closed from the fill with `exit_trigger = STOP_LOSS`, the cooldown starts, and
+  the owner is alerted; rule 26 is a normal outcome with a bookkeeping remedy,
+  not a failure path. The fill is the source of the exit price, per rule 33;
+  the stop price the bot asked for is not.
+- **Rules 27 and 34** — a partial fill, whose remedy depends on direction and is
+  specified in full under `open_position` and `close_position` above: an entry
+  remainder is cancelled and the position written from a re-read, an exit
+  remainder is never abandoned and the position stays open reduced to the lots
+  still held. rule 27 is a pointer to rule 34's exit clause and adds nothing of
+  its own. A partial fill is alerted either way.
 
 ## Relevant error handling rules
 
@@ -388,6 +430,16 @@ From `technical-spec.md` §8. Handle each exactly as written.
 11. **Database write failure on a trading-critical path** (orders, positions,
     halt state, **cooldowns** — v1.63) → hard error: halt trading, alert, stop opening anything. The bot
     must never trade what it cannot record.
+
+    **A write failure is `aiosqlite.Error`, and only that (v1.75)** That is the
+    class `db.connection.transaction()` already emits `db_write_failed` for
+    before re-raising, and the class a repository's caller may act on. **Every
+    other exception propagates unchanged** — an `AttributeError` from a rename is
+    not a database that is unavailable, and a `halt trading` path that cannot
+    tell the two apart converts a programming error into a plausible degraded
+    state (failure class 5). This is the narrowing already applied at the §4
+    level to `db.connection` (v1.61) and `market.session` (v1.59) and never
+    carried into §8, which is the text agents implement from (#107).
 
 23. **Protective stop order rejected or unplaceable** → retry three times, then
     mark the position `stop_protection = 'LOCAL'`, alert, and enforce the stop by
@@ -413,23 +465,57 @@ From `technical-spec.md` §8. Handle each exactly as written.
     still-open money question; it is not settled by this amendment, and nothing
     here authorises a slicing loop in `close_position`.
 
-28. **Any code path that would set `confirm_margin_trade=True`** → rejected in
-    review, not at runtime. There is no runtime condition under which this is
-    correct; it is listed here because the failure mode it would produce —
-    losses exceeding allocated capital — is the one failure the brief promises
-    cannot happen.
-
 33. **A recorded price comes from the broker, or the record stays pending.**
     Realised P&L, exit prices and commissions are written from what the broker
     reports it did — an order state, an executed stop, an operation — and never
     from a quote, a stop price, an entry price, or any other number the bot has
     to hand. Where the broker's own record is not yet available, the position
-    stays open and the read is retried on the next cycle; after a bounded number
-    of cycles the owner is alerted. A position closed a minute late is
+    stays open and the read is retried on the next cycle; **after three
+    consecutive cycles in which the read is still unavailable, the owner is
+    alerted once for that order, and the alert re-arms when the order settles
+    (v1.75)**. A position closed a minute late is
     recoverable and a position closed at an invented number is not, because
     nothing downstream can tell the invented one from a real one. This rule
     generalises #4, #5, #8 and #11, which are four instances of the same
     mistake.
+
+    **Where the bound applies, and where "cycle" is the wrong unit (v1.75).**
+    "A bounded number of cycles" named no bound until v1.75, which is precisely
+    what rule 2's own post-mortem calls the defect it was rewritten to remove —
+    "a threshold no code implemented and no test could fail" — live one rule
+    family over, on the path that decides whether a position stays open with real
+    money in it (#112). Three, matching rules 1, 2 and 9, because they are the
+    same shape and a second threshold in the same system is a second thing to
+    remember. **The counted path is `execution.orders.resolve_unfinished`**,
+    which runs once per cycle, already logs `order_unresolved` with an
+    `age_seconds` computed from the order's own `created_at`, and already
+    distinguishes "the broker cannot be reached" from "the broker says this order
+    was never placed". That is the full set of three parts rule 36 requires:
+    threshold, one alert, reset on settlement.
+
+    **`broker.reconcile`'s `EXIT_UNRESOLVED` is not on this counter and is not
+    a cycle.** Reconciliation runs at `app.startup` step 7 and appears in no
+    `app.loops` task list, so its retry cadence is one per process start, not one
+    per minute, and it alerts once per pass by construction. Suppressing it
+    across *restarts* would require durable state — restarts are routine (failure
+    class 15) — and whether an operator should stop being told about an
+    unresolved exit because the process has bounced is a judgement about a real
+    money-path alert, not a bug to be fixed in passing. **It is left alerting
+    once per pass**, and the question of a durable, restart-surviving latch is
+    recorded here as open and unowned. It is entangled with rule 25's open
+    decision, which is what would put a reconciliation task on a cadence in the
+    first place, and should be settled with it rather than before it.
+
+34. **An order the bot submitted is partially filled** → the filled part is real
+    and the remainder is not, and which of the two is left exposed depends on the
+    direction. On an **entry**, cancel the remainder, re-read the order, and
+    write the position from that read; if either call fails, write nothing and
+    let recovery repeat it. On an **exit**, never abandon the remainder: the
+    position stays open, reduced to the lots still held, and the exit is retried
+    under rule 4. A partial fill is alerted either way. An abandoned entry
+    remainder leaves cash unspent; an abandoned exit remainder leaves shares held
+    against a decision to sell them, which is the state this system must not rest
+    in.
 
 ## Test cases
 

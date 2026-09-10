@@ -56,6 +56,13 @@ Module **33** of 42 in `dependency-order.md`. Everything before it is complete a
    unmonitored. The count still matters — every price rejected at once is a
    different event from one instrument going quiet — so it is named in the alert
    that does fire.
+
+   **That latch is rule 9b, and this module owns it (v1.75).** §8 said "alert
+   once per cycle" until v1.75 while this paragraph said "latch", and both texts
+   were internally plausible, so no test could be red for both (#106). The latch
+   is the surviving reading and §8 now says so: set on the first cycle that
+   rejects anything, reset by a cycle that rejects nothing, one alert carrying
+   the count.
 3. Evaluate the remaining exits — take-profit, maximum age, and stop-loss only
    for `LOCAL`-protected positions — and submit them. **Before** any halt check,
    and before entries.
@@ -91,6 +98,28 @@ Module **33** of 42 in `dependency-order.md`. Everything before it is complete a
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
 
+   **This step owns rule 20, and the alert names the trades (v1.75).** When the
+   limit is breached the cycle halts, persists the halt, and alerts with the
+   loss **and the trades that produced it**: every position closed on the current
+   Moscow date, each named with its ticker, lots, realised P&L and exit trigger,
+   newest exit first. The source is `db.positions.list_closed()` filtered on
+   `clock.moscow_date(position.exit_at)` — the same list `reporter.weekly` reads
+   and filters to a period. **No new column, no new repository function and no
+   new broker call**: the value was already in hand and was being discarded
+   (failure class 13). When the day closed no positions the alert says so
+   explicitly rather than omitting the section — a limit breached with no closed
+   trades is an unrealised drawdown, which is a different thing for the owner to
+   look at, and an empty list must not read as a formatting failure. Reply
+   truncation follows `telegram.commands`' rule: cut with an explicit note of how
+   many were omitted.
+
+   Until v1.75 the alert carried the loss and the limit only, so rule 20's "and
+   the trades that produced it" was satisfied vacuously — true because nothing
+   ever gathered them, and deletable with no test going red (#108). This is the
+   most consequential alert the system sends, at the moment the brief wants
+   deliberate friction to make the owner look at what went wrong, and it was the
+   one alert with no evidence in it.
+
    **The daily-loss halt passes `daily_loss_pct` (v1.69).** The `loss` this
    module already computed for the limit check is handed to `state.halt.halt`
    as its fourth argument, so `halt_triggered` carries the real figure. It is in
@@ -116,6 +145,15 @@ Module **33** of 42 in `dependency-order.md`. Everything before it is complete a
    only just filled, so the second signal could pass a gate that was working
    correctly. `execution.orders.open_position` then refused it — also correctly —
    with `PositionStateError`, which nothing in this module caught (#24).
+
+   **This step owns rule 8's mid-session half (v1.75).** The instrument is read
+   before the gate, and an `InstrumentNotFound` logs a WARNING and moves to the
+   next ticker: no entry is ever sized against a lot size the bot could not
+   confirm, which is the protection rule 8 exists for. Only that exception is
+   handled here — every other one propagates under rule 21, because a broker that
+   is unreachable is the cycle's problem, not this ticker's. Rule 8's startup
+   half is an open decision recorded in §8 and is not implemented in this module
+   or in `app.startup`.
 
    The set of tickers opened in the pass lives here, not in `risk.gate`, which
    stays pure. It is the local record, which is immediately consistent, deciding
@@ -181,6 +219,14 @@ with `mark_run`. Two defects go with that change (#27):
   and could repeat a rollover; a restart through the report hour lost the week.
   Restarts are routine — six in one evening during the #45 work — so this is the
   ordinary case, not an edge one.
+
+**This module owns rule 2 (v1.75).** `broker.client` raises
+`BrokerRateLimited` and carries the broker's `retry_after` on it; this module is
+where the back-off happens, where the consecutive-failure counter lives, and
+where the alert fires — so the rule is claimed here. Throttling is never fatal
+and is never reported as an outage: the alert that fires after three consecutive
+rate-limited cycles names throttling, which is what tells the owner to change
+nothing and wait rather than to go looking at the network.
 
 **Back-off takes the broker's hint when the broker gives one (v1.53).** After a
 failed cycle the delay escalates as rule 1 describes; when the failure was a
@@ -269,34 +315,124 @@ From `technical-spec.md` §8. Handle each exactly as written.
    could fail — the alert has always come from rule 1's consecutive-cycle
    counter. It now says what happens.
 
+8. **Instrument metadata unavailable mid-session** → skip that ticker for the
+   cycle, WARNING. `app.loops` owns this: step 6 reads the instrument before the
+   gate, and an `InstrumentNotFound` logs and moves to the next ticker, so no
+   entry is ever sized against a lot size the bot could not read.
+
+   **The startup half is not settled here (v1.75).** Until v1.75 this rule also
+   said "unavailable at startup → `StartupError`", an obligation that landed on
+   no module: the only §4 contract that reads watchlist instruments at startup is
+   `app.startup` step 8a, whose text says the opposite — a ticker whose
+   instrument or price cannot be read is "excluded from the judgement and named
+   separately", and "this step never raises `StartupError`, and never prevents
+   startup". `make_tasks.py` cuts by heading, so it delivered the negation to
+   `app.startup`'s agent and the obligation to nobody (#105, failure class 2).
+
+   **Open decision — not settled here.** Either (a) the mid-session skip is the
+   whole rule, and an unconfirmable lot size at startup is a diagnostic finding
+   that startup names and continues past; or (b) startup additionally refuses to
+   run when it cannot confirm the lot size of any watchlist ticker, raising
+   `StartupError` from step 8a. **Until it is decided, (a) is binding**, and it
+   is what the built code does. Two things argue for (a) and are recorded so the
+   decision is made on them rather than on the word "must": the protection rule 8
+   asks for is already supplied per cycle by the skip above, so no entry can be
+   sized on unread metadata either way; and `app.startup` step 8a's own
+   reasoning — refusing to start abandons every *open* position, its exits, its
+   stop management and its `MAX_AGE`, converting a benign no-op into an unmanaged
+   holding with real money in it. What (a) genuinely costs is that a watchlist
+   whose metadata is unreadable at start is a *quieter* condition than the same
+   watchlist unaffordable, which rule 37 alerts on. No agent may add a
+   `StartupError` to step 8a on its own reading of this rule; §3.2 gains a test
+   once the owner chooses — under (a) that startup does not raise, under (b)
+   that it does.
+
+9b. **A quote is rejected as non-positive, stale, or an implausible move** →
+    WARNING, omit that instrument for the cycle, and **alert once, latched, with
+    the count** (v1.75): one alert on the first cycle that rejects anything, and
+    none further until a cycle rejects nothing, which re-arms it. The count is
+    named in the alert that does fire, because every price rejected at once is a
+    different event from one instrument going quiet. `app.loops` owns this and
+    implements it in the price refresh of step 2.
+
+    Until v1.75 this rule read "alert once per cycle with the count", which the
+    `app.loops` contract had already argued against in the next paragraph and
+    which no code has ever done (#106). Read literally it is roughly 510 messages
+    in an 8.5-hour session for one permanently stale instrument — the
+    repeating-alert failure rule 36 exists to forbid, written into the rule an
+    agent is told to implement from. Both texts were internally plausible and no
+    test could be red for both. The latch is now stated here as well as in §4:
+    the set-site is the first rejecting cycle, the reset-site is a cycle that
+    rejects nothing, and the alert is one.
+
+    It is **not** a broker outage: it must not increment the consecutive
+    failure counter of rule 1, and it must not be retried, because the next
+    reading arrives on the next cycle anyway. Treating bad data as an outage is
+    how a malformed field becomes an alert about the network.
+
+20. **Daily loss limit breached** → halt, persist the halt, alert with the loss
+    and the trades that produced it. Exits continue to run.
+
+    **"The trades that produced it" are the positions closed today, and they are
+    already in hand (v1.75).** `db.positions.list_closed()` exists, returns
+    newest exit first, and is already read this way by `reporter.weekly`, which
+    filters it to a period. No new column, no new repository function and no new
+    broker call is needed — the value was being carried and discarded (failure
+    class 13). `app.loops` owns the assembly and its contract states the shape:
+    each closed position of the current Moscow date named with its ticker, lots,
+    realised P&L and exit trigger.
+
+    Until v1.75 nothing assembled them and the alert carried a percentage and a
+    limit only, so the clause was satisfied vacuously — true because the trades
+    were never gathered, and deletable with no test going red (#108, failure
+    class 4). This is the single most consequential alert the system sends, at
+    the moment the brief says deliberate friction should force the owner to look
+    at what went wrong, and it was the one alert with no evidence in it.
+
 21. **Unhandled exception in a background task** → log with traceback, alert,
     restart that task with exponential backoff. One failing task must never
     terminate the process or any other task.
-
-29. **Clock accuracy is a host requirement, verified at deployment, not a
-    runtime rule.** V9 confirms the host clock is NTP-synchronised before the bot
-    is deployed, and `app.startup` logs the observed system time in UTC and MSK
-    so a skewed clock is visible in the first log line after every restart.
-
-    There is deliberately **no runtime skew check**. The broker exposes no server
-    wall-clock: the only timestamp available is `LastPrice.time`, which is the
-    time of the last *trade* and lags arbitrarily when a market is quiet. Halting
-    trading because nobody traded for ninety seconds would be a worse failure
-    than the drift it guards against, and the alternative — shipping a
-    hand-written NTP client into a system that moves money — is more risk than a
-    correctly configured time daemon warrants.
 
 33. **A recorded price comes from the broker, or the record stays pending.**
     Realised P&L, exit prices and commissions are written from what the broker
     reports it did — an order state, an executed stop, an operation — and never
     from a quote, a stop price, an entry price, or any other number the bot has
     to hand. Where the broker's own record is not yet available, the position
-    stays open and the read is retried on the next cycle; after a bounded number
-    of cycles the owner is alerted. A position closed a minute late is
+    stays open and the read is retried on the next cycle; **after three
+    consecutive cycles in which the read is still unavailable, the owner is
+    alerted once for that order, and the alert re-arms when the order settles
+    (v1.75)**. A position closed a minute late is
     recoverable and a position closed at an invented number is not, because
     nothing downstream can tell the invented one from a real one. This rule
     generalises #4, #5, #8 and #11, which are four instances of the same
     mistake.
+
+    **Where the bound applies, and where "cycle" is the wrong unit (v1.75).**
+    "A bounded number of cycles" named no bound until v1.75, which is precisely
+    what rule 2's own post-mortem calls the defect it was rewritten to remove —
+    "a threshold no code implemented and no test could fail" — live one rule
+    family over, on the path that decides whether a position stays open with real
+    money in it (#112). Three, matching rules 1, 2 and 9, because they are the
+    same shape and a second threshold in the same system is a second thing to
+    remember. **The counted path is `execution.orders.resolve_unfinished`**,
+    which runs once per cycle, already logs `order_unresolved` with an
+    `age_seconds` computed from the order's own `created_at`, and already
+    distinguishes "the broker cannot be reached" from "the broker says this order
+    was never placed". That is the full set of three parts rule 36 requires:
+    threshold, one alert, reset on settlement.
+
+    **`broker.reconcile`'s `EXIT_UNRESOLVED` is not on this counter and is not
+    a cycle.** Reconciliation runs at `app.startup` step 7 and appears in no
+    `app.loops` task list, so its retry cadence is one per process start, not one
+    per minute, and it alerts once per pass by construction. Suppressing it
+    across *restarts* would require durable state — restarts are routine (failure
+    class 15) — and whether an operator should stop being told about an
+    unresolved exit because the process has bounced is a judgement about a real
+    money-path alert, not a bug to be fixed in passing. **It is left alerting
+    once per pass**, and the question of a durable, restart-surviving latch is
+    recorded here as open and unowned. It is entangled with rule 25's open
+    decision, which is what would put a reconciliation task on a cadence in the
+    first place, and should be settled with it rather than before it.
 
 ## Test cases
 

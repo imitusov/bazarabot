@@ -18,6 +18,15 @@ Module **1** of 42 in `dependency-order.md`. Everything before it is complete an
 
 Domain types shared across every module. Contains validation only, never logic.
 
+**Owns rule 22 (v1.75).** Every model carrying a `datetime` rejects a naive one
+with `ValueError` at construction, and no model coerces one to a guessed
+timezone. This is where the rule lands because these types are the boundary every
+module's signature is written in: a naive instant that reaches a model has
+already crossed from the module that made it into the module that will store it,
+and the point of failing here is that the traceback names the producer rather
+than the reader. It is a programming defect, not a runtime condition — nothing
+catches it, and no module handles it.
+
 **Enumerations**
 - `Side` — `BUY`, `SELL`
 - `OrderStatus` — `SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED`, `UNKNOWN`

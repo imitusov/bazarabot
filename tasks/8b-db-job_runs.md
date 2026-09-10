@@ -66,6 +66,14 @@ From `technical-spec.md` §8. Handle each exactly as written.
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
 
+    **Non-propagation covers `aiosqlite.Error` and only `aiosqlite.Error`
+    (v1.75)** The swallow exists for a database that will not take the row, not
+    for every way the call site can be wrong. Any other exception propagates and
+    reaches rule 21's supervisor with its traceback. Unqualified, this rule reads
+    as `except Exception: pass` on the analytics path, and an analytics path is
+    exactly where a silently dropped `TypeError` survives longest — nothing
+    downstream misses the row until a weekly report is composed from it.
+
 30. **Database accessed before `db.connection.connect`, or after
     `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
     connection. This is a programming defect in the same family as rule 22: it
