@@ -710,7 +710,12 @@ async def _supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
             await factory()
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — rule 21 is the blind catch
+            # Rule 21: "Unhandled exception in a background task → log with
+            # traceback, alert, restart that task with exponential backoff.
+            # One failing task must never terminate the process or any other
+            # task." This is the supervisor every other narrowed catch
+            # propagates to, so it is the one place the catch must be blind.
             _LOG.exception(
                 "task_crashed",
                 extra={

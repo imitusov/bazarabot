@@ -7,6 +7,9 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+import aiosqlite
+from telegram.error import TelegramError
+
 from zarabot.clock import moscow_date, to_moscow
 from zarabot.db.positions import list_closed
 from zarabot.db.signals import list_for_period
@@ -196,9 +199,15 @@ async def send(now: datetime) -> None:
                 "period_end": end.isoformat(),
             },
         )
-    except Exception:
+    except (aiosqlite.Error, TelegramError):
+        # Rule 12 (v1.75): "Non-propagation covers `aiosqlite.Error` and only
+        # `aiosqlite.Error`" on a non-critical path — the report's reads —
+        # plus rule 13's `TelegramError` from the `alert` leg. Every other
+        # exception propagates to rule 21 with its traceback, because a
+        # `TypeError` composing the report is a defect, not a report that
+        # could not be sent.
         _LOG.exception("weekly report failed")
         try:
             await alert("Weekly report failed to send.")
-        except Exception:
+        except TelegramError:
             _LOG.exception("weekly report failure alert failed")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -89,7 +90,13 @@ def load(path: Path) -> LoadedModel:
         raise ModelLoadError(f"model file missing: {path}")
     try:
         payload = joblib.load(path)  # noqa: S301 — contracted joblib format
-    except Exception as exc:
+    except (OSError, EOFError, ValueError, pickle.UnpicklingError) as exc:
+        # Rule 17 (v1.75): "a missing, unreadable or manifest-mismatched model
+        # file means the bot refuses to start". These are the classes that mean
+        # unreadable — the filesystem refusing the file, and the deserialiser
+        # refusing its contents. Anything else is a defect in this code and
+        # propagates with its traceback rather than being relabelled as a bad
+        # file, which would send the owner to look at the disk.
         raise ModelLoadError(f"model file unreadable: {path}") from exc
     if not isinstance(payload, dict):
         raise ModelLoadError(f"model file unreadable: {path}")

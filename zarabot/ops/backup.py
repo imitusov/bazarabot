@@ -54,7 +54,12 @@ async def run(db_path: Path, backup_dir: Path) -> Path:
     dest = _dest_path(backup_dir)
     try:
         await asyncio.to_thread(_copy, db_path, dest)
-    except Exception as exc:
+    except (sqlite3.Error, OSError) as exc:
+        # Rule 18 (v1.75): "A backup failure is `sqlite3.Error` or `OSError`,
+        # and only those" — the database refusing the copy, and the filesystem
+        # refusing the destination. Every other exception propagates under
+        # rule 21 rather than being reported as "backup failed", which sends
+        # the reader to look at the disk when the fault is in the code.
         _LOG.exception(
             "backup_failed",
             extra={"event": "backup_failed", "error": type(exc).__name__},

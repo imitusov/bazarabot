@@ -9,10 +9,17 @@ from decimal import Decimal
 from typing import Any
 
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from zarabot import config
-from zarabot.broker.client import get_last_price
+from zarabot.broker.client import (
+    BrokerRateLimited,
+    BrokerUnavailable,
+    InstrumentNotFound,
+    PriceRejected,
+    get_last_price,
+)
 from zarabot.clock import moscow_date, now, to_moscow
 from zarabot.db.positions import list_closed, list_open
 from zarabot.db.snapshots import list_for_period
@@ -139,12 +146,14 @@ async def _reply(update: Update, text: str) -> None:
     message = update.message
     if message is None:
         return
-    last_error: Exception | None = None
+    last_error: TelegramError | None = None
     for _attempt in range(_ATTEMPTS):
         try:
             await message.reply_text(text)
             return
-        except Exception as exc:
+        except TelegramError as exc:
+            # Rule 13 (v1.75): a send failure is `telegram.error.TelegramError`
+            # and only that. Any other exception propagates to rule 21.
             last_error = exc
     if last_error is not None:
         _LOG.error("telegram send failed after retries")
@@ -194,7 +203,12 @@ async def _position_line(position: Position) -> str:
         price = await get_last_price(position.figi)
         mark = _fmt_money(price)
         pnl_text = _fmt_money(unrealised(position, price))
-    except Exception:
+    except (BrokerUnavailable, BrokerRateLimited, InstrumentNotFound, PriceRejected):
+        # Rule 9: "Only `BrokerUnavailable`, `BrokerRateLimited` and
+        # `InstrumentNotFound` are handled as failures; every other exception
+        # propagates under rule 21." `PriceRejected` is rule 9b's unusable
+        # quote, which is the same answer here: report it as not available,
+        # never as a number.
         mark = "N/A"
         pnl_text = "N/A"
     return (

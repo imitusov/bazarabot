@@ -11,6 +11,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import aiosqlite
+from telegram.error import TelegramError
 
 from zarabot.broker.client import (
     BrokerRateLimited,
@@ -120,7 +121,11 @@ async def _halt_on_db_failure(detail: str) -> None:
     await alert(f"trading halted: {detail}")
     try:
         await halt(HaltReason.MANUAL, detail, clock_now())
-    except Exception:
+    except aiosqlite.Error:
+        # Rule 11 (v1.75): "A write failure is `aiosqlite.Error`, and only
+        # that ... Every other exception propagates unchanged." The halt is
+        # itself a trading-critical write, so its own failure is the same
+        # class; a defect here must not leave the bot believing it halted.
         _LOG.exception("halt after database failure also failed")
 
 
@@ -537,9 +542,11 @@ async def _alert_fill_slippage(signal: Signal, fill_price: Decimal) -> None:
         )
     try:
         await alert(text)
-    except Exception:
-        # Rule 13: the fill has already happened. A notification failure is
-        # logged loudly here and never propagates into the order path.
+    except TelegramError:
+        # Rule 13 (v1.75): the fill has already happened, and a Telegram send
+        # failure — `telegram.error.TelegramError` and only that — is logged
+        # loudly here and never propagates into the order path. Any other
+        # exception is a defect and goes to rule 21.
         _LOG.exception("failed to alert entry slippage for %s", signal.ticker)
 
 
