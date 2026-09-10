@@ -259,28 +259,13 @@ def sql_literals(src: pathlib.Path) -> list[str]:
 
 
 KNOWN_SIGNATURE_DRIFT: dict[tuple[str, str], tuple[str, str]] = {
-    # 116 — Connection vs aiosqlite.Connection
-    ("zarabot.db.migrations", "apply"): ("conn: aiosqlite.Connection", "int"),
-    # 116 — return elided as list[...]
-    ("zarabot.db.signals", "list_for_period"): (
-        "start: date, end: date",
-        "list[tuple[Signal, RiskDecision]]",
-    ),
-    # 116 — protocol self
-    ("zarabot.strategies.base", "evaluate"): (
-        "self, ticker: str, candles: list[Candle], now: datetime",
-        "Signal | None",
-    ),
-    # 116 — ctx untyped in the spec
-    ("zarabot.app.loops", "run"): ("ctx: AppContext", "None"),
-    # 116 — ctx, signal untyped in the spec
-    ("zarabot.app.shutdown", "shutdown"): ("ctx: AppContext, signal: int", "None"),
-    # 161 — two-module heading; visible once both keys are compared
-    ("zarabot.db.snapshots", "list_for_period"): (
-        "start: date, end: date",
-        "list[DailySnapshot]",
-    ),
-    ("zarabot.db.snapshots", "write_daily"): ("snapshot: DailySnapshot", "None"),
+    # EMPTY as of spec v1.76 (#116, #161). The seven entries that stood here were
+    # the five prose placeholders §4 carried instead of signatures, plus the two
+    # `db.snapshots` names hidden behind a heading shared with `db.signals`. The
+    # amendment writes each signature out in full and splits that heading, so
+    # every §4 signature is now compared against `interfaces.md` for real. An
+    # empty allowlist means the next placeholder fails this gate on the commit
+    # that writes it, rather than joining a list.
 }
 
 WRITE = re.compile(r"(?:insert\s+into|update|delete\s+from)\s+(\w+)", re.I)
@@ -407,7 +392,6 @@ def main() -> None:
     KNOWN_UNOWNED_TABLES = {
         "instruments",  # no writer anywhere in zarabot/
         "schema_version",  # §4 says "schema creation", names no table
-        "daily_snapshots",  # db.signals/snapshots section has no sole-owner line
         "halt_state",  # §4 says "the halt flag", names no table
         "reconciliations",  # owner stated only in interfaces.md
     }

@@ -27,7 +27,7 @@ Module **5** of 42 in `dependency-order.md`. Everything before it is complete an
 
 Owns schema creation and version tracking.
 
-**`async apply(conn: Connection) → int`**
+**`async apply(conn: aiosqlite.Connection) → int`**
 - Applies every migration whose version exceeds the database's recorded version,
   in ascending order, each in its own transaction.
 - Returns the resulting schema version.

@@ -74,10 +74,40 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   `max_position_pct=20`, a state `config.load()` rejects — so a green test
   asserted behaviour the assembled system could not produce (#15).
 - A clean signal in an unremarkable portfolio is approved (happy path).
-- Each rejection reason is produced by a state constructed to trigger exactly it:
-  halted, session closed, position cap, maximum positions, cooldown active,
-  insufficient cash, zero lots, instrument not trading, and an existing position
-  in the same ticker (proves every branch, one test each).
+- Each rejection reason this module can produce is produced by a state
+  constructed to trigger exactly it: `HALTED`, `SESSION_CLOSED`,
+  `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`,
+  `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `PORTFOLIO_EXPOSURE` and `ZERO_LOTS`
+  (proves every branch, one test each — nine reasons, in the priority order the
+  contract fixes).
+- **The list said "position cap" until v1.76 (#99).** `POSITION_CAP` was removed
+  in v1.30 and `PORTFOLIO_EXPOSURE` took its place (§4 `models`), so the
+  enumeration required a test for a reason no code can produce while claiming to
+  prove every branch — in the module held to a 95% floor precisely because a
+  missed branch here is a financial defect. The `PORTFOLIO_EXPOSURE` case above
+  is the one that replaces it.
+- **`BROKER_LOT_LIMIT` is deliberately absent from this list.** #99 read the
+  enumeration as omitting a live reason; it is not live. The reason is defined in
+  `RejectionReason` (§4 `models`) and produced by no module in `zarabot/` today.
+  It cannot be produced *here*: the broker's per-account maximum is read with
+  `broker.client.get_max_lots`, and this module is pure — no I/O, no broker (the
+  purity test below asserts exactly that). A test constructing it in `risk.gate`
+  would be a test of an unreachable branch, which is the shape of the
+  `POSITION_CAP` case this contract already deleted once.
+
+  **Open decision — not settled here.** `BROKER_LOT_LIMIT` has no producer.
+  Either (a) it belongs to `execution.orders`, which already reads
+  `get_max_lots` and, on a maximum of zero, cancels the entry and settles the
+  order `REJECTED` with the message "max lots is 0" (§4 `execution.orders`) —
+  in which case the reason should be recorded on that path, or the enum member
+  should go and the order row's message is the whole record; or (b) the lot
+  ceiling should be read before the gate and passed in as a plain argument, which
+  keeps `risk.gate` pure and makes the reason the gate's to return. **Until it is
+  decided, (a)-without-the-enum is what is built**: the rejection is recorded as
+  an order row and no `RejectionReason` of that name is ever constructed. No
+  agent may add a producer, a test, or a `signals` row for this reason on its own
+  reading — the enum member is inert and that is the settled state of the code,
+  not an oversight to be tidied.
 - With several violations present at once, the rejection reason is the
   highest-priority one, deterministically (proves rejection reporting is stable
   and not order-dependent).

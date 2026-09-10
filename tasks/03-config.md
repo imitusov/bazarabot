@@ -53,6 +53,19 @@ Loads and validates every setting once at startup.
   security control that one environment variable can switch off silently is a
   control nobody can audit after the fact. `app.startup` raises the matching
   alert — see its own contract.
+- **`ConfigError(message: str, *, variable: str)` (v1.76).** `variable` is the
+  environment variable name, set at the raise site from the name being validated,
+  and it is never derived by parsing the message. The keyword is **required**:
+  a raise site that omits it is a `TypeError`, which is what stops the attribute
+  from quietly becoming optional and then absent. Where a check compares two
+  variables, `variable` is the one being validated and the message names both —
+  `TAKE_PROFIT_PCT` for the take-profit-versus-stop-loss check,
+  `MAX_OPEN_POSITIONS` for the allocation check. `app.startup` reads
+  `exc.variable` to name the offender in its CRITICAL line, so this is a
+  contract, not an implementation detail. It was recorded in `interfaces.md` and
+  described in no contract until v1.76, which meant a re-run of `01-config` from
+  the spec alone would have produced a three-argument constructor and dropped the
+  attribute, taking `app.startup`'s alert with it (#166).
 - Raises `ConfigError` naming the offending variable when: a required variable is
   missing or empty; a numeric value is out of range;
   `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `CASH_RESERVE_PCT` is
@@ -106,6 +119,15 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (proves a configuration that can never profit is rejected).
 - An empty `WATCHLIST` raises `ConfigError` (proves the bot cannot start with
   nothing to trade).
+- A cross-field failure whose message names two variables sets `variable` to the
+  field being validated — `TAKE_PROFIT_PCT` for the take-profit-versus-stop-loss
+  check — and the message still names both (proves the attribute picks the
+  offender rather than the first word of the message).
+- A raise site that omits the `variable` keyword raises `TypeError` (proves the
+  keyword is required. This is the case worth having: a test asserting only that
+  `variable` holds the right string stays green against a literal hardcoded
+  inside the raising helper, because the helper's message begins with that same
+  word).
 - The string form of the config object contains neither token (proves accidental
   logging of the whole config leaks nothing).
 - `allow_foreign_holdings` defaults to false when unset, and a near-miss spelling

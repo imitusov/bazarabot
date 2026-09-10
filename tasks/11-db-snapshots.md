@@ -30,7 +30,9 @@ Module **11** of 42 in `dependency-order.md`. Everything before it is complete a
 
 ## Module contract
 
-### `zarabot/db/signals.py`, `zarabot/db/snapshots.py`
+### `zarabot/db/snapshots.py`
+
+**Sole owner of `daily_snapshots` rows.**
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
@@ -38,13 +40,13 @@ violation. **Every write runs inside `db.connection.transaction()`**; this modul
 never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
 its own (rule 31).
 
-**`async record(signal: Signal, decision: RiskDecision) → None`** — stores every signal, approved or rejected, with its reason.
+**`async write_daily(snapshot: DailySnapshot) → None`** — upserts on the Moscow date; a second write for the same date updates rather than duplicates.
 
-**`async list_for_period(start: date, end: date) → list[...]`** — for the weekly report.
+**`async list_for_period(start: date, end: date) → list[DailySnapshot]`** — rows
+whose `trade_date` falls in `[start, end]`, oldest first. For the weekly report.
+Empty list when none.
 
-**`async write_daily(snapshot) → None`** — upserts on the Moscow date; a second write for the same date updates rather than duplicates.
-
-**These two modules own rule 12 (v1.75).** Signals, snapshots and the instruments
+**Owns rule 12 (v1.75, split v1.76).** Signals, snapshots and the instruments
 cache are the non-critical write paths: a failed write here is logged at ERROR
 and does not propagate, because losing an analytics row must not stop trading.
 The swallow is `aiosqlite.Error` and nothing wider — every other exception
@@ -52,6 +54,17 @@ propagates and reaches rule 21's supervisor with its traceback. An analytics
 path is where a silently dropped `TypeError` survives longest, since nothing
 downstream misses the row until a weekly report is composed without it. Contrast
 `db.cooldowns` above, which is rule 11 and propagates everything.
+
+**Why this heading was split (v1.76).** Until v1.76 these two modules shared one
+`###` heading, and `list_for_period` was written once as
+`→ list[...]` because the elision was standing for two different real return
+types — `list[tuple[Signal, RiskDecision]]` here and `list[DailySnapshot]` there
+(#116). One heading cannot carry two signatures of the same name: the signature
+comparison in `scripts/ci/check_docs.py` reads the last one and compares it
+against both modules, so one of the two was guaranteed to be wrong and the
+divergence lived in an allowlist instead. Splitting the heading is what makes
+each signature exact, which is what `AGENTS.md` requires. `make_tasks.py` needs
+no change: its spec-keys are already the two distinct file paths.
 
 ## Relevant error handling rules
 

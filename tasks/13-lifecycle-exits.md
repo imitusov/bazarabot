@@ -25,7 +25,10 @@ Module **13** of 42 in `dependency-order.md`. Everything before it is complete a
   recorded on the position, not inferred.
 - `TAKE_PROFIT` when `price ≥ position.target_price`.
 - `MAX_AGE` when `trading_days_open ≥ MAX_HOLDING_DAYS` **and**
-  `session.in_closing_window(now)`.
+  `session.in_closing_window(now)` — the `SessionInfo` method (§4 `models`),
+  with `minutes` left at its default of 15. This is a comparison over the
+  `SessionInfo` argument's own fields, so the module stays pure: it does not call
+  `market.session`, which does I/O.
 - **`trading_days_open` is `None` when the age could not be measured, and then
   `MAX_AGE` never fires (v1.44).** The recorded calendar may not reach back to a
   position's entry after an outage longer than the schedule window, and the

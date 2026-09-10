@@ -44,7 +44,7 @@ Module **18** of 42 in `dependency-order.md`. Everything before it is complete a
   no other code computes these features. Duplicating it is a critical defect —
   see the sandbox contract.
 
-**`evaluate(...) → Signal | None`** — as the protocol, returning `None` below
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`** — as the protocol, returning `None` below
 `CONFIDENCE_THRESHOLD`, a module constant rather than an environment variable.
 The threshold is a property of the trained model, not of the deployment: moving
 it changes what the model means, so it travels with the code and a redeploy, the
