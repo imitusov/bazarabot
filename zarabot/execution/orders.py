@@ -502,6 +502,47 @@ async def open_position(signal: Signal, lots: int, instrument: Instrument) -> Po
         return await _open_from_fill(signal, settled, instrument)
 
 
+async def _alert_fill_slippage(signal: Signal, fill_price: Decimal) -> None:
+    """Tell the owner when an entry filled far from the price it was sized on.
+
+    Alert only (brief §12). The position is opened, stopped and managed like
+    any other; it is never sold back, because unwinding is a second real trade
+    and the stop and target are already derived from the actual fill, so the
+    percentage risk is correct. What is wrong is the position's rouble size,
+    which is reportable, not tradeable.
+
+    Cadence: at most one alert per entry fill, which is naturally bounded by
+    the number of entries. There is no latch, and therefore no latch to reset.
+    """
+    reference = signal.reference_price
+    threshold = load().fill_slippage_alert_pct
+    if reference <= 0:
+        # A percentage cannot be computed against a zero or negative
+        # reference. Skipping the comparison would silence the alert exactly
+        # where the sizing input was worst, so say so instead.
+        text = (
+            f"entry fill for {signal.ticker} cannot be compared: reference "
+            f"price {reference} is not usable, fill {fill_price}. "
+            "Slippage unknown; the position is kept."
+        )
+    else:
+        difference = abs(fill_price - reference) / reference * _HUNDRED
+        if difference <= threshold:
+            return
+        text = (
+            f"entry fill slippage for {signal.ticker}: reference "
+            f"{reference}, fill {fill_price}, "
+            f"{difference.quantize(Decimal('0.01'))}% away "
+            f"(threshold {threshold}%). The position is kept, not unwound."
+        )
+    try:
+        await alert(text)
+    except Exception:
+        # Rule 13: the fill has already happened. A notification failure is
+        # logged loudly here and never propagates into the order path.
+        _LOG.exception("failed to alert entry slippage for %s", signal.ticker)
+
+
 async def _open_from_fill(
     signal: Signal, order: OrderRecord, instrument: Instrument
 ) -> Position:
@@ -522,7 +563,13 @@ async def _open_from_fill(
         stop_price=position.stop_price,
         target_price=position.target_price,
     )
-    return await _place_stop(position, instrument)
+    protected = await _place_stop(position, instrument)
+    # After the entry settles and the stop is placed: this is the only site
+    # holding both the signal's reference price and the settled fill price.
+    # It runs last so that nothing raised here can leave the position without
+    # a stop order.
+    await _alert_fill_slippage(signal, order.filled_price)
+    return protected
 
 
 async def close_position(position: Position, trigger: ExitTrigger) -> Position:

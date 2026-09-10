@@ -1714,3 +1714,155 @@ def test_contended_locks_work_on_a_second_event_loop() -> None:
 
     asyncio.run(contend())
     asyncio.run(contend())
+
+
+# --- Fill slippage alert (spec §3.2, brief §12: alert and keep, never unwind) --
+
+
+def _signal_at(reference: Decimal) -> Signal:
+    return Signal(
+        ticker="SBER",
+        strategy="ma_crossover",
+        side=Side.BUY,
+        generated_at=NOW,
+        reference_price=reference,
+    )
+
+
+def _slippage_alerts(broker: _Broker) -> list[str]:
+    return [text for text in broker.alerts if "slippage" in text.lower()]
+
+
+async def test_fill_far_from_reference_alerts_and_keeps_the_position(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fake fills at 100; a reference of 90 is 11.1% away, well beyond the
+    # 2% default. The alert must name the ticker, both prices and the
+    # percentage, and the entry must be entirely unaffected.
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
+    position = await open_position(_signal_at(Decimal("90")), 2, _instrument())
+
+    alerts = _slippage_alerts(env)
+    assert len(alerts) == 1
+    text = alerts[0]
+    assert "SBER" in text
+    assert "90" in text
+    assert "100" in text
+    assert "11.1" in text
+
+    # ...and the position is opened, stopped, and never sold back.
+    assert position.status == "OPEN"
+    assert position.entry_price == Decimal("100")
+    assert position.stop_protection is StopProtection.EXCHANGE
+    assert position.stop_price == Decimal("95")
+    stored = await get_position(position.id)
+    assert stored is not None
+    assert stored.status == "OPEN"
+    stops = await list_active()
+    assert len(stops) == 1
+    assert "post:SELL" not in env.calls
+    assert "cancel_stop" not in env.calls
+    assert env.cancelled == []
+    from zarabot.db.cooldowns import is_active
+
+    assert await is_active("SBER", NOW, 120) is False
+
+
+async def test_slippage_alert_never_calls_close_position(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Unwinding would be a second real trade. Nothing in the entry path may
+    # reach close_position, however far the fill lands from the reference.
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
+    import zarabot.execution.orders as orders_mod
+
+    calls: list[int] = []
+    real_close = orders_mod.close_position
+
+    async def spy(position: Position, trigger: ExitTrigger) -> Position:
+        calls.append(position.id)
+        return await real_close(position, trigger)
+
+    monkeypatch.setattr(orders_mod, "close_position", spy)
+    await open_position(_signal_at(Decimal("50")), 2, _instrument())
+    assert calls == []
+    assert _slippage_alerts(env)
+
+
+async def test_fill_inside_the_tolerance_raises_no_slippage_alert(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 99 -> 100 is 1.01%, inside the 2% threshold.
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
+    position = await open_position(_signal_at(Decimal("99")), 2, _instrument())
+    assert _slippage_alerts(env) == []
+    assert position.status == "OPEN"
+    assert position.stop_protection is StopProtection.EXCHANGE
+
+
+async def test_slippage_threshold_never_changes_the_entry_outcome(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An alert, not a control: the same signal produces the same position
+    # whether the threshold is wide open or set to zero.
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "100")
+    wide = await open_position(_signal_at(Decimal("90")), 2, _instrument())
+    await close_position(wide, ExitTrigger.TAKE_PROFIT)
+    assert _slippage_alerts(env) == []
+
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "0")
+    env.alerts.clear()
+    tight = await open_position(_signal_at(Decimal("90")), 2, _instrument())
+    assert _slippage_alerts(env)
+    assert tight.lots == wide.lots
+    assert tight.entry_price == wide.entry_price
+    assert tight.stop_price == wide.stop_price
+    assert tight.target_price == wide.target_price
+    assert tight.status == wide.status == "OPEN"
+    assert tight.stop_protection is wide.stop_protection
+
+
+async def test_slippage_alert_failure_never_fails_the_entry(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Rule 13: the fill has already happened. A Telegram failure must not
+    # propagate out of the order path.
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
+
+    async def _boom(text: str, urgent: bool = False) -> None:
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr("zarabot.execution.orders.alert", _boom)
+    position = await open_position(_signal_at(Decimal("90")), 2, _instrument())
+    assert position.status == "OPEN"
+    assert position.stop_protection is StopProtection.EXCHANGE
+
+
+async def test_unusable_reference_price_alerts_rather_than_skipping(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A zero reference price cannot yield a percentage. Silently skipping the
+    # comparison would make the alert vacuous exactly when the sizing input
+    # was worst, so it alerts instead — and still keeps the position.
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
+    position = await open_position(_signal_at(Decimal("0")), 2, _instrument())
+    alerts = _slippage_alerts(env)
+    assert len(alerts) == 1
+    assert "SBER" in alerts[0]
+    assert position.status == "OPEN"
+    assert position.stop_protection is StopProtection.EXCHANGE
+    assert "post:SELL" not in env.calls
+
+
+async def test_partial_entry_fill_is_also_compared_against_the_reference(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The partial path settles at a real price too, and it is the same
+    # obligation: the owner is told what the fill actually cost.
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
+    env.partial_fill_lots = 1
+    env.filled_after_cancel = 1
+    position = await open_position(_signal_at(Decimal("90")), 2, _instrument())
+    assert position.lots == 1
+    assert _slippage_alerts(env)
+    assert "post:SELL" not in env.calls
