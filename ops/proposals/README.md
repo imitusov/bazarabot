@@ -69,6 +69,19 @@ run **one module per session**, test-first, two commits, never edit the spec.
 | #177 S-36 table ownership outside `db/` | **owner decision** — see `177-table-ownership-outside-db.md`; two coherent readings, code already implements one; do not touch `state/halt.py` or `broker/reconcile.py` until it is made |
 | #179 S-37 check 2 `any()` | **amender** — see `179-split-signals-snapshots-heading.md`; split the only shared §4 heading; do not patch the gate first; modules to re-run: none until the spec is amended |
 
+### Theme G — §8 rule contradictions (S-01–S-05)
+
+Applied to `technical-spec.md` in v1.73; the five proposal files were deleted
+with the amendment, per the instruction above.
+
+| Issue | What landed | Next action |
+|---|---|---|
+| #91 S-01 rule 6 vs rule 32 | rule 6 restricted to the recognised-order (crash-recovery) path, unrecognised holdings deferred to rule 32; `broker.reconcile` §4 now claims rule 6 | close; no code change |
+| #92 S-02 resubmit fallback | §4 `get_order_state` fallback paragraph deleted, V6's third PASS criterion and §2's follow-on sentence corrected | close; no code change |
+| #93 S-03 `pnl` halt severity | misfiled "Interaction with an existing halt" paragraph deleted from `pnl` §4; its `halted_at` obligation moved under `state.halt` §4, which owns severity | close; no code change |
+| #94 S-04 rule 27 vs §4 | rule 27 turned into a pointer to rule 34's exit clause, quoting §4's terminal-partial paragraph as the real conflict | unbooked-slice question still open |
+| #95 S-05 missing stop mid-session | rule 25 states detector/remedy/timing and both options; the choice is left **open** for the owner | **owner decision** before any `app.loops` work |
+
 ### Implementer dispatch order (after amendments)
 
 1. `logging_setup` (#56)

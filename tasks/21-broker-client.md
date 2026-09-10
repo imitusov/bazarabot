@@ -319,12 +319,15 @@ is never estimated, and never inferred from an operations feed.
   same value — the row's primary key in the `orders` table.
 - Raises `OrderNotFound` when the broker has no record, which proves the order
   was never accepted.
-- **Documented fallback.** `PostOrder` is itself idempotent on the
-  `(orderId, accountId)` pair: re-submitting with a key already used returns the
-  status of the existing order rather than creating a second one. If
-  `ORDER_ID_TYPE_REQUEST` proves unreliable in practice, recovery may re-call
-  `post_market_order` with the original key, which is a safe read. Two
-  independent recovery paths exist; the design does not rest on either alone.
+- **There is exactly one recovery path, and it is this one (v1.73).** Until
+  v1.73 this contract offered a "documented fallback": that `PostOrder` is
+  idempotent on the `(orderId, accountId)` pair, so recovery "may re-call
+  `post_market_order` with the original key, which is a safe read". §2.1 measured
+  the opposite on a live account — a duplicate idempotency key is **refused**
+  with `INVALID_ARGUMENT`/`30057` and does not return the existing order — and
+  resubmitting an entry is forbidden outright by the brief and by `AGENTS.md`.
+  Recovery is `get_order_state` by key, never a second submission, and no
+  reasoning anywhere may rest on a second recovery path (#92).
 - **Key retention caveat.** The broker states idempotency keys are retained for
   one year but explicitly declines to guarantee it, noting the mechanism may
   change. This design needs retention measured in minutes — from crash to

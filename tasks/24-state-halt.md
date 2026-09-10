@@ -50,6 +50,14 @@ obligation.
   detail and re-alerts. Returning early regardless of reason meant a daily-loss
   breach arriving during a manual halt was silently discarded, so `/resume`
   cleared a halt whose real cause nobody had been told about (#9).
+- **`halted_at` keeps its original value across an upgrade (v1.73).** Trading has
+  been suspended continuously since the first halt, and moving the timestamp
+  forward would assert it was live in between; the moment the more severe
+  condition arrived reaches the owner in the alert instead. Re-halting for a
+  reason already recorded stays a no-op, so an upgrade adds no alert noise. This
+  sentence lived in `pnl` §4 until v1.73, wrapped in a paragraph that restated
+  the discarded pre-#9 behaviour in the present tense; `state.halt` owns severity
+  and `app.loops` is the caller, so `pnl` says nothing about either (#93).
 - Suspends **entries only**. Never affects `lifecycle.exits` or
   `execution.orders.close_position`.
 - **Emits `halt_triggered` (CRITICAL) after a halt is persisted or upgraded,
