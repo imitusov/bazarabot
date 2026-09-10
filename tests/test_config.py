@@ -71,6 +71,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None = None) -
         "PRICE_MAX_AGE_SECONDS",
         "PRICE_MAX_MOVE_PCT",
         "ALLOW_FOREIGN_HOLDINGS",
+        "FILL_SLIPPAGE_ALERT_PCT",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in REQUIRED.items():
@@ -379,6 +380,73 @@ def test_cash_reserve_pct_appears_in_the_string_form(
     _env(monkeypatch, {"CASH_RESERVE_PCT": "3"})
     text = str(load()) + repr(load())
     assert "cash_reserve_pct" in text
+
+
+def test_fill_slippage_alert_pct_defaults_to_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    _env(monkeypatch)
+    assert load().fill_slippage_alert_pct == Decimal("2")
+
+
+def test_fill_slippage_alert_pct_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"FILL_SLIPPAGE_ALERT_PCT": "0.5"})
+    assert load().fill_slippage_alert_pct == Decimal("0.5")
+
+
+def test_fill_slippage_alert_pct_accepts_the_inclusive_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bounded 0-100 inclusive. 0 means "tell me about every fill that is not
+    # exactly the reference price", which is a legitimate, if noisy, choice.
+    _env(monkeypatch, {"FILL_SLIPPAGE_ALERT_PCT": "0"})
+    assert load().fill_slippage_alert_pct == Decimal("0")
+    _env(monkeypatch, {"FILL_SLIPPAGE_ALERT_PCT": "100"})
+    assert load().fill_slippage_alert_pct == Decimal("100")
+
+
+@pytest.mark.parametrize("raw", ["-1", "100.01", "1000"])
+def test_fill_slippage_alert_pct_out_of_range_raises(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    _env(monkeypatch, {"FILL_SLIPPAGE_ALERT_PCT": raw})
+    with pytest.raises(ConfigError, match="FILL_SLIPPAGE_ALERT_PCT"):
+        load()
+
+
+def test_fill_slippage_alert_pct_not_a_number_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"FILL_SLIPPAGE_ALERT_PCT": "two"})
+    with pytest.raises(ConfigError, match="FILL_SLIPPAGE_ALERT_PCT"):
+        load()
+
+
+def test_fill_slippage_alert_pct_is_a_decimal_never_a_float(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # It is compared against a percentage computed from two money values; a
+    # float here would put binary rounding on that comparison.
+    _env(monkeypatch, {"FILL_SLIPPAGE_ALERT_PCT": "2"})
+    assert isinstance(load().fill_slippage_alert_pct, Decimal)
+
+
+def test_fill_slippage_alert_pct_missing_takes_the_default_not_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # It is an alert threshold, not a risk limit: a missing value takes its
+    # default rather than failing the load, unlike the risk variables.
+    _env(monkeypatch)
+    monkeypatch.delenv("FILL_SLIPPAGE_ALERT_PCT", raising=False)
+    assert load().fill_slippage_alert_pct == Decimal("2")
+
+
+def test_fill_slippage_alert_pct_appears_in_the_string_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env(monkeypatch, {"FILL_SLIPPAGE_ALERT_PCT": "3"})
+    text = str(load()) + repr(load())
+    assert "fill_slippage_alert_pct" in text
 
 
 def test_ssl_tbank_verify_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
