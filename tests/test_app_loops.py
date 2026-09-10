@@ -347,7 +347,14 @@ async def test_session_closed_makes_no_market_data_call(
 
     import zarabot.app.loops as loops
 
+    async def _alert(text: str, urgent: bool = False) -> None:
+        # Not recorded: `calls` is the market-data ledger this test asserts on.
+        # Mocked because the cache-exhausted branch alerts, and rule 13 (v1.75)
+        # no longer lets the notifier swallow a missing-config error.
+        return None
+
     monkeypatch.setattr(loops, "now", lambda: NOW)
+    monkeypatch.setattr(loops, "alert", _alert)
     monkeypatch.setattr(loops, "is_open", lambda moment: False)
     monkeypatch.setattr(loops, "get_last_price", _price)
     monkeypatch.setattr(loops, "candles_for_watchlist", _candles)
@@ -2430,6 +2437,7 @@ async def test_heartbeat_emits_heartbeat_event(
 async def test_supervised_crash_emits_task_crashed(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    import zarabot.app.loops as loops
     from zarabot.app.loops import _supervise
 
     async def _boom() -> None:
@@ -2438,6 +2446,13 @@ async def test_supervised_crash_emits_task_crashed(
     async def _sleep(_seconds: float) -> None:
         raise asyncio.CancelledError
 
+    async def _alert(text: str, urgent: bool = False) -> None:
+        return None
+
+    # `CLAUDE.md`: mock at `telegram.notifier`. Before rule 13 was narrowed,
+    # `alert` absorbed the missing-config error this test never set up, which
+    # is the swallowing this change removes.
+    monkeypatch.setattr(loops, "alert", _alert)
     monkeypatch.setattr(asyncio, "sleep", _sleep)
     with (
         caplog.at_level(logging.ERROR, logger="zarabot.app.loops"),

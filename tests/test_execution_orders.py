@@ -1858,8 +1858,12 @@ async def test_slippage_alert_failure_never_fails_the_entry(
     # propagate out of the order path.
     monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
 
+    from telegram.error import NetworkError
+
     async def _boom(text: str, urgent: bool = False) -> None:
-        raise RuntimeError("telegram down")
+        # Rule 13 (v1.75) narrowed the send failure to `TelegramError`, so
+        # that — not any exception at all — is what this test stands for.
+        raise NetworkError("telegram down")
 
     monkeypatch.setattr("zarabot.execution.orders.alert", _boom)
     position = await open_position(_signal_at(Decimal("90")), 2, _instrument())
