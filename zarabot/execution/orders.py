@@ -563,10 +563,13 @@ async def _open_from_fill(
         stop_price=position.stop_price,
         target_price=position.target_price,
     )
-    # After the entry settles: this is the only site holding both the signal's
-    # reference price and the settled fill price.
+    protected = await _place_stop(position, instrument)
+    # After the entry settles and the stop is placed: this is the only site
+    # holding both the signal's reference price and the settled fill price.
+    # It runs last so that nothing raised here can leave the position without
+    # a stop order.
     await _alert_fill_slippage(signal, order.filled_price)
-    return await _place_stop(position, instrument)
+    return protected
 
 
 async def close_position(position: Position, trigger: ExitTrigger) -> Position:
