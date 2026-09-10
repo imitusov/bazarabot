@@ -161,3 +161,42 @@ def test_build_features_matches_feature_names_order() -> None:
 def test_build_features_rejects_short_series() -> None:
     with pytest.raises(ValueError):
         build_features(_candles([100, 101, 102]))
+
+
+# --- Rule 17 (v1.75): the catch is narrow. ------------------------------------
+# The module contract: "a missing, unreadable or manifest-mismatched model file
+# means the bot refuses to start". "Unreadable" is what the filesystem and the
+# deserialiser report - it is not a licence to relabel any exception at all as
+# an unreadable file.
+
+
+def test_os_error_reading_the_model_file_raises_model_load_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _dump(tmp_path / "ok.joblib", 0.95)
+
+    def _boom(name: object) -> object:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr("zarabot.strategies.ml_model.joblib.load", _boom)
+    with pytest.raises(ModelLoadError):
+        load(path)
+
+
+def test_defect_in_the_loader_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: red against `except Exception`.
+
+    A rename or a bad argument inside the loader is not an unreadable model
+    file. Reporting it as one sends the owner to look at the disk while the
+    fault is in the code (failure class 5).
+    """
+    path = _dump(tmp_path / "ok.joblib", 0.95)
+
+    def _boom(name: object) -> object:
+        raise AttributeError("joblib.load renamed")
+
+    monkeypatch.setattr("zarabot.strategies.ml_model.joblib.load", _boom)
+    with pytest.raises(AttributeError):
+        load(path)

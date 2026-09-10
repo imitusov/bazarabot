@@ -1428,15 +1428,44 @@ async def test_database_write_failure_halts(
 async def test_halt_failure_after_db_error_is_logged(
     env: _Broker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Rule 11 (v1.75): a write failure is `aiosqlite.Error`, and only that.
+
+    The halt itself is a trading-critical write, so its own failure is the same
+    class. The original database error still reaches the caller.
+    """
+
     async def boom(*args: object, **kwargs: object) -> None:
         raise aiosqlite.Error("disk")
 
     async def halt_boom(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("halt failed")
+        raise aiosqlite.Error("halt failed")
 
     monkeypatch.setattr("zarabot.execution.orders.record_submitting", boom)
     monkeypatch.setattr("zarabot.execution.orders.halt", halt_boom)
     with pytest.raises(aiosqlite.Error):
+        await open_position(_signal(), 2, _instrument())
+
+
+async def test_defect_in_halt_after_db_error_propagates(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: red against `except Exception`.
+
+    "Every other exception propagates unchanged - an `AttributeError` from a
+    rename is not a database that is unavailable" (rule 11, v1.75). Swallowing
+    it here would leave the bot believing it had halted when it had not, on the
+    one path that exists because a trading-critical write just failed.
+    """
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise aiosqlite.Error("disk")
+
+    async def halt_boom(*args: object, **kwargs: object) -> None:
+        raise AttributeError("halt renamed")
+
+    monkeypatch.setattr("zarabot.execution.orders.record_submitting", boom)
+    monkeypatch.setattr("zarabot.execution.orders.halt", halt_boom)
+    with pytest.raises(AttributeError):
         await open_position(_signal(), 2, _instrument())
 
 
@@ -1866,3 +1895,38 @@ async def test_partial_entry_fill_is_also_compared_against_the_reference(
     assert position.lots == 1
     assert _slippage_alerts(env)
     assert "post:SELL" not in env.calls
+
+
+# --- The slippage alert's catch is narrow too (issue #195). --------------------
+# Rule 13 (v1.75) licenses swallowing a Telegram send failure here - the fill
+# has already happened - and nothing wider: "Any other exception propagates to
+# the caller and thence to rule 21."
+
+
+async def test_slippage_alert_swallows_a_telegram_send_failure(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from telegram.error import NetworkError
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        raise NetworkError("telegram down")
+
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
+    monkeypatch.setattr("zarabot.execution.orders.alert", _alert)
+    position = await open_position(_signal_at(Decimal("90")), 2, _instrument())
+    assert position.status == "OPEN"
+    assert "post:SELL" not in env.calls
+
+
+async def test_slippage_alert_propagates_a_non_telegram_exception(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: red against `except Exception`."""
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        raise AttributeError("alert renamed")
+
+    monkeypatch.setenv("FILL_SLIPPAGE_ALERT_PCT", "2")
+    monkeypatch.setattr("zarabot.execution.orders.alert", _alert)
+    with pytest.raises(AttributeError):
+        await open_position(_signal_at(Decimal("90")), 2, _instrument())

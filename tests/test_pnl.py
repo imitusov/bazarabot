@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from zarabot.broker.client import BrokerUnavailable, InstrumentNotFound
 from zarabot.config import get
 from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
@@ -364,3 +365,48 @@ async def test_benchmark_unavailable_when_a_price_is_missing(
     monkeypatch.setattr("zarabot.pnl.get_instrument", get_instrument)
     monkeypatch.setattr("zarabot.pnl.get_candles", get_candles)
     assert await benchmark_return(date(2026, 3, 1), TODAY) is None
+
+
+# --- Narrow catch (issue #195). ----------------------------------------------
+# `benchmark_return` wraps broker calls, so §8 rule 9 names its handled classes:
+# "Only `BrokerUnavailable`, `BrokerRateLimited` and `InstrumentNotFound` are
+# handled as failures; every other exception propagates under rule 21." The §4
+# contract says the benchmark is then "reported as unavailable, never as zero".
+
+
+async def test_benchmark_unavailable_when_the_broker_is_unavailable(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def get_instrument(ticker: str) -> Instrument:
+        raise BrokerUnavailable("broker down")
+
+    monkeypatch.setattr("zarabot.pnl.get_instrument", get_instrument)
+    assert await benchmark_return(date(2026, 3, 1), TODAY) is None
+
+
+async def test_benchmark_unavailable_when_the_instrument_is_not_found(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def get_instrument(ticker: str) -> Instrument:
+        raise InstrumentNotFound("no such ticker")
+
+    monkeypatch.setattr("zarabot.pnl.get_instrument", get_instrument)
+    assert await benchmark_return(date(2026, 3, 1), TODAY) is None
+
+
+async def test_benchmark_propagates_a_non_broker_exception(
+    ctx: Ctx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: red against `except Exception`.
+
+    A rename must not be reported to the weekly report as "benchmark
+    unavailable" - that is a plausible-looking degraded state with no
+    traceback (failure class 5).
+    """
+
+    async def get_instrument(ticker: str) -> Instrument:
+        raise AttributeError("get_instrument renamed")
+
+    monkeypatch.setattr("zarabot.pnl.get_instrument", get_instrument)
+    with pytest.raises(AttributeError):
+        await benchmark_return(date(2026, 3, 1), TODAY)
