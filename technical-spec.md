@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.78
+**Version:** 1.79
 **Date:** 2026-09-10
 **Implements:** `business-brief.md` v1.13
 
@@ -3931,12 +3931,16 @@ Fixed ordering; each step completes before the next begins:
   not a runtime rule: V9 confirms the host is NTP-synchronised before deployment,
   and this module logs the observed system time in **both UTC and MSK** in the
   first log line after every restart, so a skewed clock is visible to whoever
-  reads that line. **That line is not written today** — rule 29 has asserted it
-  since the rule was written and no §4 contract claimed the rule, so nothing in
-  `app/startup.py` emits it (#115). Stating it here is what makes it a work item
-  rather than a sentence in a rule nobody implements from; the observed instant
-  comes from `clock.now()`, never from `datetime.now()`, which this module may
-  not call. There is deliberately no runtime skew check, and adding one is
+  reads that line. **`_log_observed_time` writes it (v1.79)**, immediately after
+  `logging_setup.configure` — the earliest point at which a line is redacted and
+  structured, and therefore the first line this module writes after every
+  restart. It carries `utc` and `msk` fields as well as the message: UTC alone
+  cannot show a wrong Moscow offset and MSK alone cannot show a wrong instant,
+  so both are needed to tell a drifted zone database from a drifted clock. It
+  carries no `event` key and is not a §7.1 row. The observed instant comes from
+  `clock.now()`, never from `datetime.now()`, which this module may not call.
+  Rule 29 went unimplemented from the day it was written until #196, because no
+  §4 contract claimed it (#115) — the rule existed and reached nobody. There is deliberately no runtime skew check, and adding one is
   not an improvement — the reasoning is in rule 29 and rests on the broker
   exposing no server wall-clock. The one timestamp available, `LastPrice.time`,
   is the time of the last *trade* and lags arbitrarily in a quiet market, so a
