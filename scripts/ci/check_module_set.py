@@ -104,7 +104,7 @@ def spec_headings(spec: str) -> list[str]:
 
 def all_h3(spec: str) -> list[tuple[int, str]]:
     """(line index, text) for every ``### `` heading in the whole document."""
-    return [(i, l) for i, l in enumerate(spec.splitlines()) if _H3.match(l)]
+    return [(i, line) for i, line in enumerate(spec.splitlines()) if _H3.match(line)]
 
 
 def module_table(source: str) -> list[tuple]:

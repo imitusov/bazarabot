@@ -115,7 +115,10 @@ def test_allowlisted_file_passes(tmp_path: Path) -> None:
 
 def test_sketch_name_without_a_file_fails(tmp_path: Path) -> None:
     check = _load()
-    agents = _AGENTS.replace("  db/             migrations, connection,", "  db/             migrations, connection, kelly,")
+    agents = _AGENTS.replace(
+        "  db/             migrations, connection,",
+        "  db/             migrations, connection, kelly,",
+    )
     code, lines = check.evaluate(_tree(tmp_path, agents=agents), allowlist={})
     assert code == 1
     assert any("zarabot/db/kelly.py" in line for line in lines)
