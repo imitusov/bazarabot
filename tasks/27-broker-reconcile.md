@@ -167,7 +167,9 @@ was one of the eight sites opening its own connection.
   count and the average price, so `app.startup` can name them in its refusal.
   `db.positions.adopt` remains in the contract and is still called for a holding
   the bot **does** recognise but whose local row is missing — the crash-recovery
-  case it was written for. This module passes it the key of that recognising
+  case it was written for, and the whole subject of **rule 6** (v1.73). Rule 6
+  covers the recognised-order path only; the unrecognised holding is rule 32's,
+  and the two must not be collapsed into one. This module passes it the key of that recognising
   order (v1.38): the recognition rule already identifies exactly one order, so
   the key is in hand at the moment the decision is made, and it is what the
   adopted position must point at. Where more than one unresolved `ENTRY` order
@@ -277,8 +279,21 @@ was one of the eight sites opening its own connection.
 
 From `technical-spec.md` §8. Handle each exactly as written.
 
-6. **Order found at the broker that is unknown locally** → adopt the position,
-   alert. Never ignore.
+6. **A holding at the broker that an unresolved `ENTRY` order of ours
+   recognises** → adopt the position from that order's key, alert. Never ignore.
+   This is the crash-recovery case and nothing else: the bot submitted the buy,
+   the broker filled it, and the process died before the position row was
+   written, so an unresolved `SUBMITTING`/`SUBMITTED` `ENTRY` order for that
+   ticker is still standing. `broker.reconcile` recognises exactly this case,
+   reports it, and `app.startup` applies the remedy through
+   `db.positions.adopt`; the recognition test and its tie-break are in
+   `broker.reconcile`'s §4 contract. **A holding no such order recognises is not
+   covered by this rule — it is rule 32's, and is never adopted** (v1.73).
+   Until v1.73 this rule read "order found at the broker that is unknown locally
+   → adopt the position", which covered rule 32's foreign holding as well and so
+   ordered the adoption from average cost that rule 32 exists to prevent (#91).
+   The two failures are distinct: this rule is about an order the bot itself
+   submitted, rule 32 about inventory the bot has no record of asking for.
 
 7. **Broker and database disagree on positions or quantities** → the broker wins,
    the local record is corrected, and the owner is alerted with specifics.
@@ -288,8 +303,32 @@ From `technical-spec.md` §8. Handle each exactly as written.
     stock the account does not hold.
 
 25. **Open position found with no live stop order** while
-    `stop_protection = 'EXCHANGE'` → place a replacement immediately and alert.
-    An unprotected position is the state this whole mechanism exists to prevent.
+    `stop_protection = 'EXCHANGE'` → place a replacement and alert. An
+    unprotected position is the state this whole mechanism exists to prevent.
+    **Who detects, who remedies, and when (v1.73).** The detector is
+    `broker.reconcile`, which reports the discrepancy and, by its own contract,
+    **must never place or cancel an order**. The remedy is applied by the caller
+    through `execution.orders`, the only module permitted to place orders —
+    today that caller is `app.startup` step 7, and `app.loops.run`'s task list
+    contains no reconciliation task. So "immediately" today means "at the next
+    process start", and a stop cancelled at the exchange mid-session leaves the
+    position unprotected until then: `stop_protection` still reads `EXCHANGE`,
+    so `lifecycle.exits` declines to fire `STOP_LOSS` and neither side is
+    watching (#95). Two things hold under either resolution below and are
+    binding now: `broker.reconcile` never places or cancels, and
+    `lifecycle.exits` never sells an `EXCHANGE` position because its stop
+    vanished — the exchange may still hold it, and a double sell is worse than
+    an unprotected one.
+    **Open decision — not settled here.** Either (a) rule 25 means "before the
+    process serves traffic", the startup-only reading, and the mid-session hole
+    is accepted until restart; or (b) a named `app.loops` task calls a narrow
+    replace path on a cadence — place a stop only, never sell — which requires a
+    new loops/reconcile split. This is a money-path behaviour decision and is
+    the owner's to make. Until it is made, implement (a): that is what the built
+    code does, and no agent may add a mid-session replace path on its own
+    reading of the word "immediately". §3.2 gains a test once the choice is
+    made — under (a) that loops do not replace, under (b) that a missing stop
+    mid-session is replaced without a sell.
 
 30. **Database accessed before `db.connection.connect`, or after
     `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback

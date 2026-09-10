@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.72
+**Version:** 1.73
 **Date:** 2026-09-08
 **Implements:** `business-brief.md` v1.11
 
@@ -158,16 +158,18 @@ hardcoded — the design depends on querying it.
 **V6 — `verify_order_state.py`.** On the sandbox account, submits an order with
 a client-generated idempotency key, then in a **separate process** retrieves it
 using `GetOrderState` with `orderIdType = ORDER_ID_TYPE_REQUEST`. PASS requires:
-the order is retrievable by the client key alone; its terminal state is
-unambiguous; and re-submitting `PostOrder` with the same key returns the existing
-order rather than creating a second one. FAIL on any of the three.
+the order is retrievable by the client key alone, and its terminal state is
+unambiguous. FAIL on either. Until v1.73 a third criterion required that
+re-submitting `PostOrder` with the same key return the existing order; §2.1
+measured that as refused (`INVALID_ARGUMENT`/`30057`), so the criterion could
+never pass and V6 must not exercise it — resubmitting an entry order is
+forbidden (#92).
 
 This remains the most important verification in the suite, but its status has
 changed: the behaviour is now **documented** by the broker rather than assumed by
 this spec, so V6 confirms that documentation matches reality on a live account
-instead of discovering whether the design is viable at all. Both mechanisms are
-checked because the crash-recovery path uses the first and falls back to the
-second.
+instead of discovering whether the design is viable at all. V6 checks the one mechanism the crash-recovery path
+uses; there is no second one to fall back to (v1.73, #92).
 
 **V7 — `verify_rate_limits.py`.** Issues requests to the candle endpoint at a
 measured, increasing rate until the broker signals a limit. PASS requires: the
@@ -2349,12 +2351,15 @@ is never estimated, and never inferred from an operations feed.
   same value — the row's primary key in the `orders` table.
 - Raises `OrderNotFound` when the broker has no record, which proves the order
   was never accepted.
-- **Documented fallback.** `PostOrder` is itself idempotent on the
-  `(orderId, accountId)` pair: re-submitting with a key already used returns the
-  status of the existing order rather than creating a second one. If
-  `ORDER_ID_TYPE_REQUEST` proves unreliable in practice, recovery may re-call
-  `post_market_order` with the original key, which is a safe read. Two
-  independent recovery paths exist; the design does not rest on either alone.
+- **There is exactly one recovery path, and it is this one (v1.73).** Until
+  v1.73 this contract offered a "documented fallback": that `PostOrder` is
+  idempotent on the `(orderId, accountId)` pair, so recovery "may re-call
+  `post_market_order` with the original key, which is a safe read". §2.1 measured
+  the opposite on a live account — a duplicate idempotency key is **refused**
+  with `INVALID_ARGUMENT`/`30057` and does not return the existing order — and
+  resubmitting an entry is forbidden outright by the brief and by `AGENTS.md`.
+  Recovery is `get_order_state` by key, never a second submission, and no
+  reasoning anywhere may rest on a second recovery path (#92).
 - **Key retention caveat.** The broker states idempotency keys are retained for
   one year but explicitly declines to guarantee it, noting the mechanism may
   change. This design needs retention measured in minutes — from crash to
@@ -2437,7 +2442,9 @@ was one of the eight sites opening its own connection.
   count and the average price, so `app.startup` can name them in its refusal.
   `db.positions.adopt` remains in the contract and is still called for a holding
   the bot **does** recognise but whose local row is missing — the crash-recovery
-  case it was written for. This module passes it the key of that recognising
+  case it was written for, and the whole subject of **rule 6** (v1.73). Rule 6
+  covers the recognised-order path only; the unrecognised holding is rule 32's,
+  and the two must not be collapsed into one. This module passes it the key of that recognising
   order (v1.38): the recognition rule already identifies exactly one order, so
   the key is in hand at the moment the decision is made, and it is what the
   adopted position must point at. Where more than one unresolved `ENTRY` order
@@ -3156,6 +3163,14 @@ obligation.
   detail and re-alerts. Returning early regardless of reason meant a daily-loss
   breach arriving during a manual halt was silently discarded, so `/resume`
   cleared a halt whose real cause nobody had been told about (#9).
+- **`halted_at` keeps its original value across an upgrade (v1.73).** Trading has
+  been suspended continuously since the first halt, and moving the timestamp
+  forward would assert it was live in between; the moment the more severe
+  condition arrived reaches the owner in the alert instead. Re-halting for a
+  reason already recorded stays a no-op, so an upgrade adds no alert noise. This
+  sentence lived in `pnl` §4 until v1.73, wrapped in a paragraph that restated
+  the discarded pre-#9 behaviour in the present tense; `state.halt` owns severity
+  and `app.loops` is the caller, so `pnl` says nothing about either (#93).
 - Suspends **entries only**. Never affects `lifecycle.exits` or
   `execution.orders.close_position`.
 - **Emits `halt_triggered` (CRITICAL) after a halt is persisted or upgraded,
@@ -3243,17 +3258,6 @@ realised P&L slightly and permanently wrong.
   positions carried overnight is attributed to today. That direction is
   deliberate, because it makes the limit tighter rather than looser, and a limit
   that halts early is recoverable by `/resume` while one that halts late is not.
-
-**Interaction with an existing halt.** `state.halt.halt()` returns early when
-already halted, so a `DAILY_LOSS_LIMIT` breach arriving during a `MANUAL` halt
-was discarded — the more serious reason and its detail lost. A halt reason of
-strictly greater severity must replace a weaker one and re-alert;
-`DAILY_LOSS_LIMIT` outranks `MANUAL` and `RECONCILIATION_MISMATCH`. **`halted_at`
-keeps its original value across an upgrade**: trading has been suspended
-continuously since the first halt, and moving the timestamp forward would assert
-it was live in between. The moment the more severe condition arrived reaches the
-owner in the alert. Re-halting
-for a reason already recorded stays a no-op, so this adds no alert noise.
 
 **`async benchmark_return(start: date, end: date) → Decimal | None`**
 - Buy-and-hold return over the watchlist for the period.
@@ -4347,6 +4351,15 @@ events only.
 
 Applies across all modules. Every external failure mode has exactly one rule.
 
+**The ordinals are frozen (v1.73).** A rule that is superseded is rewritten in
+place or turned into a pointer to the rule that replaced it; if one is ever
+deleted, the remaining rules keep their numbers and the deleted one leaves a
+gap. Renumbering would silently invalidate the `rule N` references in
+`zarabot/**.py`, every `rule N` claim in §4 that `scripts/ci/check_docs.py`
+check 4 parses, and that check's `KNOWN_UNCLAIMED_RULES` set — none of which
+would go red, because they match on a number that would still exist and mean
+something else.
+
 1. **Market data transport failure** → WARNING, exponential backoff, retry on the
    next cycle. After three consecutive failed cycles, alert **once**; keep the
    process alive and keep trying. Never exit.
@@ -4376,8 +4389,21 @@ Applies across all modules. Every external failure mode has exactly one rule.
 5. **Order submission times out or the outcome is unknown** → leave the row
    `SUBMITTING`, resolve by querying with the idempotency key on the next cycle
    or at next startup. **Never resubmit.**
-6. **Order found at the broker that is unknown locally** → adopt the position,
-   alert. Never ignore.
+6. **A holding at the broker that an unresolved `ENTRY` order of ours
+   recognises** → adopt the position from that order's key, alert. Never ignore.
+   This is the crash-recovery case and nothing else: the bot submitted the buy,
+   the broker filled it, and the process died before the position row was
+   written, so an unresolved `SUBMITTING`/`SUBMITTED` `ENTRY` order for that
+   ticker is still standing. `broker.reconcile` recognises exactly this case,
+   reports it, and `app.startup` applies the remedy through
+   `db.positions.adopt`; the recognition test and its tie-break are in
+   `broker.reconcile`'s §4 contract. **A holding no such order recognises is not
+   covered by this rule — it is rule 32's, and is never adopted** (v1.73).
+   Until v1.73 this rule read "order found at the broker that is unknown locally
+   → adopt the position", which covered rule 32's foreign holding as well and so
+   ordered the adoption from average cost that rule 32 exists to prevent (#91).
+   The two failures are distinct: this rule is about an order the bot itself
+   submitted, rule 32 about inventory the bot has no record of asking for.
 7. **Broker and database disagree on positions or quantities** → the broker wins,
    the local record is corrected, and the owner is alerted with specifics.
 8. **Instrument metadata unavailable mid-session** → skip that ticker for the
@@ -4455,12 +4481,48 @@ Applies across all modules. Every external failure mode has exactly one rule.
     and alert. A live stop against a position that no longer exists can sell
     stock the account does not hold.
 25. **Open position found with no live stop order** while
-    `stop_protection = 'EXCHANGE'` → place a replacement immediately and alert.
-    An unprotected position is the state this whole mechanism exists to prevent.
+    `stop_protection = 'EXCHANGE'` → place a replacement and alert. An
+    unprotected position is the state this whole mechanism exists to prevent.
+    **Who detects, who remedies, and when (v1.73).** The detector is
+    `broker.reconcile`, which reports the discrepancy and, by its own contract,
+    **must never place or cancel an order**. The remedy is applied by the caller
+    through `execution.orders`, the only module permitted to place orders —
+    today that caller is `app.startup` step 7, and `app.loops.run`'s task list
+    contains no reconciliation task. So "immediately" today means "at the next
+    process start", and a stop cancelled at the exchange mid-session leaves the
+    position unprotected until then: `stop_protection` still reads `EXCHANGE`,
+    so `lifecycle.exits` declines to fire `STOP_LOSS` and neither side is
+    watching (#95). Two things hold under either resolution below and are
+    binding now: `broker.reconcile` never places or cancels, and
+    `lifecycle.exits` never sells an `EXCHANGE` position because its stop
+    vanished — the exchange may still hold it, and a double sell is worse than
+    an unprotected one.
+    **Open decision — not settled here.** Either (a) rule 25 means "before the
+    process serves traffic", the startup-only reading, and the mid-session hole
+    is accepted until restart; or (b) a named `app.loops` task calls a narrow
+    replace path on a cadence — place a stop only, never sell — which requires a
+    new loops/reconcile split. This is a money-path behaviour decision and is
+    the owner's to make. Until it is made, implement (a): that is what the built
+    code does, and no agent may add a mid-session replace path on its own
+    reading of the word "immediately". §3.2 gains a test once the choice is
+    made — under (a) that loops do not replace, under (b) that a missing stop
+    mid-session is replaced without a sell.
 26. **Stop order executed by the exchange** → not an error. Close the position
     from the fill with `exit_trigger = STOP_LOSS`, start the cooldown, alert.
-27. **Exit order partially filled** → retry the remainder until flat. A
-    half-exited position must never be a resting state.
+27. **Exit order partially filled** → **see rule 34's exit clause, which is the
+    live rule** (v1.73). An exit the bot is still pursuing is retried under rule
+    4 for the lots still held; the position stays open, reduced to those lots.
+    Until v1.73 this rule said "retry the remainder until flat. A half-exited
+    position must never be a resting state", which contradicted the §4
+    `execution.orders` contract for a **terminal** partial exit — an `EXIT` order
+    settled `CANCELLED` or `REJECTED` with `0 < filled_lots < position.lots`
+    "reduces the position to the unsold remainder and leaves it open… The sold
+    slice's profit or loss is therefore **not booked**". That is the resting
+    state this rule denied existed, and it is the implemented behaviour. A
+    pointer rather than a deletion: the ordinal is frozen and rule 27 is cited
+    elsewhere (#94). Whether the unbooked slice is acceptable is a separate,
+    still-open money question; it is not settled by this amendment, and nothing
+    here authorises a slicing loop in `close_position`.
 28. **Any code path that would set `confirm_margin_trade=True`** → rejected in
     review, not at runtime. There is no runtime condition under which this is
     correct; it is listed here because the failure mode it would produce —

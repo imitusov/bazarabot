@@ -382,8 +382,20 @@ From `technical-spec.md` §8. Handle each exactly as written.
 26. **Stop order executed by the exchange** → not an error. Close the position
     from the fill with `exit_trigger = STOP_LOSS`, start the cooldown, alert.
 
-27. **Exit order partially filled** → retry the remainder until flat. A
-    half-exited position must never be a resting state.
+27. **Exit order partially filled** → **see rule 34's exit clause, which is the
+    live rule** (v1.73). An exit the bot is still pursuing is retried under rule
+    4 for the lots still held; the position stays open, reduced to those lots.
+    Until v1.73 this rule said "retry the remainder until flat. A half-exited
+    position must never be a resting state", which contradicted the §4
+    `execution.orders` contract for a **terminal** partial exit — an `EXIT` order
+    settled `CANCELLED` or `REJECTED` with `0 < filled_lots < position.lots`
+    "reduces the position to the unsold remainder and leaves it open… The sold
+    slice's profit or loss is therefore **not booked**". That is the resting
+    state this rule denied existed, and it is the implemented behaviour. A
+    pointer rather than a deletion: the ordinal is frozen and rule 27 is cited
+    elsewhere (#94). Whether the unbooked slice is acceptable is a separate,
+    still-open money question; it is not settled by this amendment, and nothing
+    here authorises a slicing loop in `close_position`.
 
 28. **Any code path that would set `confirm_margin_trade=True`** → rejected in
     review, not at runtime. There is no runtime condition under which this is

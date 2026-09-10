@@ -373,7 +373,9 @@ def main() -> None:
     # Unclaimed when this gate was written (#115). Delete an entry when a §4
     # contract takes the rule, or when the rule itself goes.
     KNOWN_UNCLAIMED_RULES = {
-        "2", "3", "5", "6", "7", "8", "12", "13", "14", "16", "17", "18", "20",
+        # "6" removed in v1.73 (#91): broker.reconcile's §4 contract now names
+        # rule 6 as the subject of its recognised-order adopt path.
+        "2", "3", "5", "7", "8", "12", "13", "14", "16", "17", "18", "20",
         "22", "24", "25", "26", "27", "28", "29", "30", "34", "37",
     }
 
