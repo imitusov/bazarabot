@@ -140,8 +140,17 @@ async def test_record_placing_then_activate(db: Path) -> None:
 async def test_duplicate_key_raises(db: Path) -> None:
     position_id = await _position_id()
     await record_placing(KEY, position_id, "SBER", 2, STOP)
+    await activate(KEY, "broker-stop-1")
     with pytest.raises(DuplicateOrderError):
         await record_placing(KEY, position_id, "SBER", 2, STOP)
+    # §3.2 "and leaves one row": the rejected write must not have replaced,
+    # reset or duplicated the row that was already there.
+    surviving = await active_for_position(position_id)
+    assert surviving is not None
+    assert surviving.key == KEY
+    assert surviving.status is StopOrderStatus.ACTIVE
+    assert surviving.stop_order_id == "broker-stop-1"
+    assert [row.key for row in await list_active()] == [KEY]
 
 
 async def test_missing_position_raises_integrity_error(db: Path) -> None:
@@ -161,10 +170,24 @@ async def test_terminal_stop_cannot_resettle(db: Path) -> None:
     await record_placing(KEY, position_id, "SBER", 2, STOP)
     await activate(KEY, "broker-stop-1")
     await settle_stop(KEY, StopOrderStatus.CANCELLED, AWARE)
+    later = datetime(2026, 3, 16, 11, 0, tzinfo=UTC)
     with pytest.raises(OrderStateError):
-        await settle_stop(KEY, StopOrderStatus.EXECUTED, AWARE)
+        await settle_stop(KEY, StopOrderStatus.EXECUTED, later)
     assert await active_for_position(position_id) is None
     assert await list_active() == []
+    # §3.2 "and leaves the first outcome in place": both CANCELLED and
+    # EXECUTED are terminal, so neither view above can tell them apart. Read
+    # the row back — a stop the exchange fired and a stop that never stood
+    # must stay distinguishable after a late duplicate report.
+    conn = shared()
+    conn.row_factory = aiosqlite.Row
+    cursor = await conn.execute(
+        "SELECT status, settled_at FROM stop_orders WHERE key = ?", (KEY,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["status"] == StopOrderStatus.CANCELLED.value
+    assert row["settled_at"] == AWARE.isoformat()
 
 
 async def test_settle_rejects_non_terminal_and_naive(db: Path) -> None:
@@ -175,6 +198,19 @@ async def test_settle_rejects_non_terminal_and_naive(db: Path) -> None:
     naive = datetime(2026, 3, 16, 10, 0)  # noqa: DTZ001
     with pytest.raises(ValueError):
         await settle_stop(KEY, StopOrderStatus.FAILED, naive)
+    # The row must be untouched: rule 22 rejects the argument, it does not
+    # write it and discover the problem on read-back.
+    still_placing = await active_for_position(position_id)
+    assert still_placing is not None
+    assert still_placing.status is StopOrderStatus.PLACING
+    # And the rejection must happen before the row is looked up at all —
+    # otherwise deleting the guard in `settle` leaves this case green, because
+    # a naive timestamp written through raises `ValueError` again on read-back
+    # and nothing distinguishes the two. An unknown key proves the ordering:
+    # `OrderStateError` is not a `ValueError`, so only the guard can satisfy
+    # this.
+    with pytest.raises(ValueError):
+        await settle_stop("never-recorded", StopOrderStatus.FAILED, naive)
 
 
 async def test_activate_and_settle_absent_or_terminal_raise(db: Path) -> None:
@@ -250,18 +286,29 @@ async def test_list_active_oldest_first(db: Path) -> None:
     )
     await record_placing(KEY2, second.id, "GAZP", 1, Decimal("45.00"))
     await activate(KEY2, "broker-b")
+    # Age the row that was inserted FIRST, so that "oldest first" and
+    # "insertion order" disagree. With them agreeing — as they did before —
+    # deleting `ORDER BY created_at ASC` left this assertion green, because
+    # SQLite returns rowid order anyway. Now only the ORDER BY can satisfy it.
     later = datetime(2026, 3, 16, 11, 0, tzinfo=UTC)
     await conn.execute(
         "UPDATE stop_orders SET created_at = ? WHERE key = ?",
-        (later.isoformat(), KEY2),
+        (later.isoformat(), KEY),
     )
     await conn.commit()
     active = await list_active()
-    assert [row.key for row in active] == [KEY, KEY2]
+    assert [row.key for row in active] == [KEY2, KEY]
+    assert active[0].created_at == AWARE
+    assert active[1].created_at == later
 
 
 async def test_active_for_position_none_when_absent(db: Path) -> None:
     assert await active_for_position(999) is None
+    # §3.2 says "a position with no standing stop", not "a position id that
+    # does not exist" — a real open position with no stop row is the case the
+    # callers actually hit (failure class 9, fixture differs from caller).
+    position_id = await _position_id()
+    assert await active_for_position(position_id) is None
 
 
 async def test_active_for_position_raises_on_duplicate_standing(db: Path) -> None:
