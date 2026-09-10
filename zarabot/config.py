@@ -31,6 +31,7 @@ _DEFAULTS: dict[str, str] = {
     "PRICE_MAX_AGE_SECONDS": "120",
     "PRICE_MAX_MOVE_PCT": "20",
     "ALLOW_FOREIGN_HOLDINGS": "false",
+    "FILL_SLIPPAGE_ALERT_PCT": "2",
 }
 
 _REQUIRED = (
@@ -166,6 +167,7 @@ class Config:
     price_max_age_seconds: int = 120
     price_max_move_pct: Decimal = Decimal("20")
     cash_reserve_pct: Decimal = Decimal("1")
+    fill_slippage_alert_pct: Decimal = Decimal("2")
     allow_foreign_holdings: bool = False
 
     def __repr__(self) -> str:
@@ -196,6 +198,7 @@ class Config:
             f"price_max_age_seconds={self.price_max_age_seconds!r}, "
             f"price_max_move_pct={self.price_max_move_pct!r}, "
             f"cash_reserve_pct={self.cash_reserve_pct!r}, "
+            f"fill_slippage_alert_pct={self.fill_slippage_alert_pct!r}, "
             f"allow_foreign_holdings={self.allow_foreign_holdings!r})"
         )
 
@@ -312,6 +315,17 @@ def load() -> Config:
             _optional("CASH_RESERVE_PCT"),
             Decimal("0"),
             Decimal("50"),
+        ),
+        # An alert threshold, not a risk limit: nothing rejects an order or
+        # unwinds a position because of it, so a missing value takes its
+        # default rather than failing the load. Both bounds are inclusive —
+        # 0 means "tell me about every fill that is not exactly the reference
+        # price", which is noisy but legitimate.
+        fill_slippage_alert_pct=_pct_inclusive(
+            "FILL_SLIPPAGE_ALERT_PCT",
+            _optional("FILL_SLIPPAGE_ALERT_PCT"),
+            Decimal("0"),
+            Decimal("100"),
         ),
         # Not a risk limit, so a missing value takes the safe default. Anything
         # else must be spelled exactly: the flag says the trading account is not

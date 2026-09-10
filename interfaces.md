@@ -129,7 +129,11 @@ set at the raise site, never parsed from the message. Cross-field:
 `ml_model_path: Path | None`, `poll_interval_seconds: int`, `db_path: Path`,
 `backup_dir: Path`, `log_level: str`, `tz: str`, `ssl_tbank_verify: bool = True`,
 `price_max_age_seconds: int = 120`, `price_max_move_pct: Decimal = Decimal("20")`,
-`cash_reserve_pct: Decimal = Decimal("1")`, `allow_foreign_holdings: bool = False`.
+`cash_reserve_pct: Decimal = Decimal("1")`, `allow_foreign_holdings: bool = False`,
+`fill_slippage_alert_pct: Decimal = Decimal("2")`.
+`fill_slippage_alert_pct` (v1.74) is an alert threshold, not a risk limit:
+bounded 0-100 inclusive, read only by `execution.orders`, and it never
+rejects an order or unwinds a position.
 `max_position_pct` was withdrawn in v1.30 (#15): the cross-field check that
 guaranteed `position_size_pct <= max_position_pct` made the per-position cap
 unreachable in sizing while `/resume` displayed it as an active limit. The
