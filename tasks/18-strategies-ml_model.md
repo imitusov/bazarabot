@@ -27,6 +27,14 @@ Module **18** of 42 in `dependency-order.md`. Everything before it is complete a
   the loader can validate.
 - Called once at startup, never on the trading path — a model failure must be
   loud and early, never mid-session.
+- **This module owns rule 17 (v1.75).** While ML is enabled, a missing,
+  unreadable or manifest-mismatched model file means the bot refuses to start:
+  `ModelLoadError` and `ModelContractError` both reach `app.startup` step 4 as
+  `StartupError`. Neither is ever downgraded to "run without the model". A
+  silently disabled model would mean the owner is watching a different system
+  than the one trading, and a manifest mismatch is worse than a missing file —
+  the features still compute, in the wrong order, and every prediction is
+  confident nonsense.
 
 **`build_features(candles: list[Candle]) → list[float]`**
 - Pure. Builds the feature vector in `FEATURE_NAMES` order from the most recent

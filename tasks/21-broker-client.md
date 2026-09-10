@@ -40,7 +40,14 @@ any condition, for any order. The brief's no-leverage guarantee — which is wha
 bounds the maximum loss to the allocated capital, and therefore what the entire
 security model rests on — is enforced here, at the one place an order can be
 created. A code change setting this flag is a critical defect regardless of what
-else it does.
+else it does. **This module owns rule 28 (v1.75)**, and the enforcement is a
+review gate rather than a runtime one: there is no condition under which `True`
+is correct, so there is nothing to detect at runtime and no branch to test. What
+makes the rule non-vacuous is the positive action — every submission in this
+module passes `confirm_margin_trade=False` explicitly, and V10 asserts the
+parameter is still on the SDK signature it is being passed to — a rename that
+made the keyword silently inert is the one way this could fail without anyone
+writing `True`.
 
 **One channel per process, and one `Config`.** The module holds a single
 `AsyncClient`, created lazily on first use — never at import, which `AGENTS.md`
@@ -393,12 +400,41 @@ From `technical-spec.md` §8. Handle each exactly as written.
     reports it did — an order state, an executed stop, an operation — and never
     from a quote, a stop price, an entry price, or any other number the bot has
     to hand. Where the broker's own record is not yet available, the position
-    stays open and the read is retried on the next cycle; after a bounded number
-    of cycles the owner is alerted. A position closed a minute late is
+    stays open and the read is retried on the next cycle; **after three
+    consecutive cycles in which the read is still unavailable, the owner is
+    alerted once for that order, and the alert re-arms when the order settles
+    (v1.75)**. A position closed a minute late is
     recoverable and a position closed at an invented number is not, because
     nothing downstream can tell the invented one from a real one. This rule
     generalises #4, #5, #8 and #11, which are four instances of the same
     mistake.
+
+    **Where the bound applies, and where "cycle" is the wrong unit (v1.75).**
+    "A bounded number of cycles" named no bound until v1.75, which is precisely
+    what rule 2's own post-mortem calls the defect it was rewritten to remove —
+    "a threshold no code implemented and no test could fail" — live one rule
+    family over, on the path that decides whether a position stays open with real
+    money in it (#112). Three, matching rules 1, 2 and 9, because they are the
+    same shape and a second threshold in the same system is a second thing to
+    remember. **The counted path is `execution.orders.resolve_unfinished`**,
+    which runs once per cycle, already logs `order_unresolved` with an
+    `age_seconds` computed from the order's own `created_at`, and already
+    distinguishes "the broker cannot be reached" from "the broker says this order
+    was never placed". That is the full set of three parts rule 36 requires:
+    threshold, one alert, reset on settlement.
+
+    **`broker.reconcile`'s `EXIT_UNRESOLVED` is not on this counter and is not
+    a cycle.** Reconciliation runs at `app.startup` step 7 and appears in no
+    `app.loops` task list, so its retry cadence is one per process start, not one
+    per minute, and it alerts once per pass by construction. Suppressing it
+    across *restarts* would require durable state — restarts are routine (failure
+    class 15) — and whether an operator should stop being told about an
+    unresolved exit because the process has bounced is a judgement about a real
+    money-path alert, not a bug to be fixed in passing. **It is left alerting
+    once per pass**, and the question of a durable, restart-surviving latch is
+    recorded here as open and unowned. It is entangled with rule 25's open
+    decision, which is what would put a reconciliation task on a cadence in the
+    first place, and should be settled with it rather than before it.
 
 ## Test cases
 

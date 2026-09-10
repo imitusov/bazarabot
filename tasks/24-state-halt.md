@@ -113,6 +113,22 @@ From `technical-spec.md` §8. Handle each exactly as written.
 20. **Daily loss limit breached** → halt, persist the halt, alert with the loss
     and the trades that produced it. Exits continue to run.
 
+    **"The trades that produced it" are the positions closed today, and they are
+    already in hand (v1.75).** `db.positions.list_closed()` exists, returns
+    newest exit first, and is already read this way by `reporter.weekly`, which
+    filters it to a period. No new column, no new repository function and no new
+    broker call is needed — the value was being carried and discarded (failure
+    class 13). `app.loops` owns the assembly and its contract states the shape:
+    each closed position of the current Moscow date named with its ticker, lots,
+    realised P&L and exit trigger.
+
+    Until v1.75 nothing assembled them and the alert carried a percentage and a
+    limit only, so the clause was satisfied vacuously — true because the trades
+    were never gathered, and deletable with no test going red (#108, failure
+    class 4). This is the single most consequential alert the system sends, at
+    the moment the brief says deliberate friction should force the owner to look
+    at what went wrong, and it was the one alert with no evidence in it.
+
 30. **Database accessed before `db.connection.connect`, or after
     `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
     connection. This is a programming defect in the same family as rule 22: it

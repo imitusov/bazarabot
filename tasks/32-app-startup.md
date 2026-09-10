@@ -113,6 +113,22 @@ Fixed ordering; each step completes before the next begins:
      is **inconclusive** and says so; it must not report a blackout it did not
      observe, and it must not stay silent as though it had confirmed health.
 
+   **This step owns rule 37 (v1.75).** The no-instrument-affordable alert is
+   reported **once per start** — not per cycle and not per signal. At one poll a
+   minute the per-signal alternative is several hundred identical messages a day,
+   and an alert that repeats forever is equivalent to no alert in a channel whose
+   premise is that silence means healthy. The `ZERO_LOTS` rejections themselves
+   stay correct and stay silent; this rule governs only whether the owner is
+   told. Process start *is* the reset: a restart is a reasonable moment to say it
+   again, and nothing here is latched in the database.
+
+   **Rule 8's startup half is an open decision and is not implemented here
+   (v1.75).** This step reads each watchlist instrument and therefore looks like
+   the place that would refuse to start on unreadable metadata. It does not, and
+   the reasoning is under rule 8 in §8, where the decision is recorded for the
+   owner. What is binding today is the paragraph below: no agent adds a
+   `StartupError` to this step on its own reading of rule 8's word "must".
+
    **This step never raises `StartupError`, and never prevents startup.** An
    unaffordable budget stops *new entries only*. Refusing to start would
    additionally abandon every open position — no exit evaluation, no stop
@@ -138,6 +154,20 @@ Fixed ordering; each step completes before the next begins:
 
 - Raises `StartupError` on any failure, having alerted if Telegram credentials
   were valid. No entry may be attempted before step 9 completes.
+- **This module owns rule 29 (v1.75).** Clock accuracy is a host requirement,
+  not a runtime rule: V9 confirms the host is NTP-synchronised before deployment,
+  and this module logs the observed system time in **both UTC and MSK** in the
+  first log line after every restart, so a skewed clock is visible to whoever
+  reads that line. **That line is not written today** — rule 29 has asserted it
+  since the rule was written and no §4 contract claimed the rule, so nothing in
+  `app/startup.py` emits it (#115). Stating it here is what makes it a work item
+  rather than a sentence in a rule nobody implements from; the observed instant
+  comes from `clock.now()`, never from `datetime.now()`, which this module may
+  not call. There is deliberately no runtime skew check, and adding one is
+  not an improvement — the reasoning is in rule 29 and rests on the broker
+  exposing no server wall-clock. The one timestamp available, `LastPrice.time`,
+  is the time of the last *trade* and lags arbitrarily in a quiet market, so a
+  check built on it would halt trading because nobody traded.
 - **On any `StartupError` after logging is configured, emit `startup_failed`
   (CRITICAL) with `stage` (the step name: `config`, `logging`, `database`,
   `strategies`, `session`, `recovery`, `reconcile`, `halt`, `ready`) and
@@ -163,6 +193,19 @@ From `technical-spec.md` §8. Handle each exactly as written.
     restart that task with exponential backoff. One failing task must never
     terminate the process or any other task.
 
+29. **Clock accuracy is a host requirement, verified at deployment, not a
+    runtime rule.** V9 confirms the host clock is NTP-synchronised before the bot
+    is deployed, and `app.startup` logs the observed system time in UTC and MSK
+    so a skewed clock is visible in the first log line after every restart.
+
+    There is deliberately **no runtime skew check**. The broker exposes no server
+    wall-clock: the only timestamp available is `LastPrice.time`, which is the
+    time of the last *trade* and lags arbitrarily when a market is quiet. Halting
+    trading because nobody traded for ninety seconds would be a worse failure
+    than the drift it guards against, and the alternative — shipping a
+    hand-written NTP client into a system that moves money — is more risk than a
+    correctly configured time daemon warrants.
+
 30. **Database accessed before `db.connection.connect`, or after
     `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
     connection. This is a programming defect in the same family as rule 22: it
@@ -179,6 +222,22 @@ From `technical-spec.md` §8. Handle each exactly as written.
     placed, no exit evaluated, no sale made. Never adopt one — adoption derived a
     stop and target from the holding's average cost, which handed the next cycle
     a position already past its take-profit.
+
+37. **No instrument on the watchlist costs less than one position budget** →
+    alert at startup, and continue running. The bot is watching a list it cannot
+    afford to buy any of, and every signal it generates will be rejected
+    `ZERO_LOTS` forever. The rejection itself is correct and stays correct — this
+    rule governs only whether the owner is told. It is reported once per start
+    rather than per cycle or per signal: at one poll a minute the per-signal
+    alternative is several hundred identical messages a day, and an alert that
+    repeats forever is equivalent to no alert in a channel whose premise is that
+    silence means healthy.
+
+    Where **some** instruments are affordable and some are not, the unaffordable
+    ones are named in the ready alert and nothing is escalated. A watchlist the
+    budget only partly reaches is a normal operating state, not a fault: on
+    2026-08-28 MGNT and LKOH were out of reach while SBER and GAZP were buyable,
+    and that configuration was working as intended.
 
 ## Test cases
 

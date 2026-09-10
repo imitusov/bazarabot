@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.74
+**Version:** 1.75
 **Date:** 2026-09-10
 **Implements:** `business-brief.md` v1.13
 
@@ -1394,6 +1394,15 @@ contract and must be raised exactly under the stated conditions.
 
 Domain types shared across every module. Contains validation only, never logic.
 
+**Owns rule 22 (v1.75).** Every model carrying a `datetime` rejects a naive one
+with `ValueError` at construction, and no model coerces one to a guessed
+timezone. This is where the rule lands because these types are the boundary every
+module's signature is written in: a naive instant that reaches a model has
+already crossed from the module that made it into the module that will store it,
+and the point of failing here is that the traceback names the producer rather
+than the reader. It is a programming defect, not a runtime condition — nothing
+catches it, and no module handles it.
+
 **Enumerations**
 - `Side` — `BUY`, `SELL`
 - `OrderStatus` — `SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED`, `UNKNOWN`
@@ -1592,7 +1601,12 @@ Owns schema creation and version tracking.
   in ascending order, each in its own transaction.
 - Returns the resulting schema version.
 - Raises `MigrationError` if the recorded version exceeds the highest known
-  migration, and makes no modification in that case.
+  migration, and makes no modification in that case. **This is rule 16
+  (v1.75):** a schema version ahead of the code means a newer build wrote this
+  database, so the running code cannot know what its own `SELECT`s mean. It
+  refuses to start, alerts, and changes nothing — in particular it never
+  down-migrates, because §6 is forward-only and the file holds real trade
+  history.
 - Idempotent: applying twice is a no-op the second time.
 - **The one module exempt from rule 31.** It commits and rolls back the
   connection it is given, one transaction per migration file, because §6 requires
@@ -1650,6 +1664,12 @@ inherit whichever file the previous importer happened to open.
 - Must never open a connection as a side effect of being called. A silent
   reconnect would hide a missing `app.startup` step and would let a test inherit
   a file it did not create.
+- **This module owns rule 30 (v1.75).** Every access to the database before
+  `connect` or after `disconnect` fails here, with `DatabaseNotOpenError` and no
+  fallback connection, because this is the only module that knows whether the
+  connection is open. No caller handles it: like rules 22 and 31 it is a
+  programming defect that must reach a traceback, and a module that caught it
+  would be choosing to run without a database rather than say so.
 
 **`transaction(*, critical: bool = True) → async context manager yielding aiosqlite.Connection`**
 - **The sole transaction owner.** Every write in the system runs inside it:
@@ -2063,6 +2083,15 @@ its own (rule 31).
 
 **`async write_daily(snapshot) → None`** — upserts on the Moscow date; a second write for the same date updates rather than duplicates.
 
+**These two modules own rule 12 (v1.75).** Signals, snapshots and the instruments
+cache are the non-critical write paths: a failed write here is logged at ERROR
+and does not propagate, because losing an analytics row must not stop trading.
+The swallow is `aiosqlite.Error` and nothing wider — every other exception
+propagates and reaches rule 21's supervisor with its traceback. An analytics
+path is where a silently dropped `TypeError` survives longest, since nothing
+downstream misses the row until a weekly report is composed without it. Contrast
+`db.cooldowns` above, which is rule 11 and propagates everything.
+
 ### `zarabot/broker/client.py`
 
 The **only** module that calls the broker. Wraps `t_tech.invest.AsyncClient` and
@@ -2089,7 +2118,14 @@ any condition, for any order. The brief's no-leverage guarantee — which is wha
 bounds the maximum loss to the allocated capital, and therefore what the entire
 security model rests on — is enforced here, at the one place an order can be
 created. A code change setting this flag is a critical defect regardless of what
-else it does.
+else it does. **This module owns rule 28 (v1.75)**, and the enforcement is a
+review gate rather than a runtime one: there is no condition under which `True`
+is correct, so there is nothing to detect at runtime and no branch to test. What
+makes the rule non-vacuous is the positive action — every submission in this
+module passes `confirm_margin_trade=False` explicitly, and V10 asserts the
+parameter is still on the SDK signature it is being passed to — a rename that
+made the keyword silently inert is the one way this could fail without anyone
+writing `True`.
 
 **One channel per process, and one `Config`.** The module holds a single
 `AsyncClient`, created lazily on first use — never at import, which `AGENTS.md`
@@ -2567,6 +2603,30 @@ was one of the eight sites opening its own connection.
   observes and records; it does not trade. Every remedy it identifies is carried
   out by `app.startup` through `execution.orders`.
 
+**This module owns rules 7, 24 and 25 as their detector (v1.75).** All three are
+disagreements between broker truth and local belief, and this is the only module
+that compares the two:
+
+- **Rule 7** — broker and database disagree on a position or a quantity. The
+  broker wins, the local record is corrected, and the report names specifics so
+  the owner's alert says which ticker moved from what to what. A quantity
+  mismatch is `LOTS_ADJUSTED`; a position the broker does not hold is the
+  operations-feed path above.
+- **Rule 24** — a stop order with no matching open position is reported
+  `STOP_ORPHAN` and alerted. A live stop against a position that no longer exists
+  can sell stock the account does not hold, which is why it is remedied rather
+  than merely noted.
+- **Rule 25** — an open `EXCHANGE`-protected position with no live stop is
+  reported `STOP_MISSING`. Rule 25's own text carries the open decision about
+  *when* the replacement happens and it is not settled here.
+
+The cancel in rule 24 and the placement in rule 25 are **not** performed here:
+this module's never-place-or-cancel line is binding and older than either rule.
+`app.startup` step 7 applies both remedies through `execution.orders`. The
+detector owns the rule because the detector is the module that can be wrong about
+whether the condition exists at all — the remedy is a call it names, and step 7
+already names it.
+
 ### `zarabot/market/session.py`
 
 **`async refresh(days: int) → None`**
@@ -2788,6 +2848,14 @@ unknown name.
   the loader can validate.
 - Called once at startup, never on the trading path — a model failure must be
   loud and early, never mid-session.
+- **This module owns rule 17 (v1.75).** While ML is enabled, a missing,
+  unreadable or manifest-mismatched model file means the bot refuses to start:
+  `ModelLoadError` and `ModelContractError` both reach `app.startup` step 4 as
+  `StartupError`. Neither is ever downgraded to "run without the model". A
+  silently disabled model would mean the owner is watching a different system
+  than the one trading, and a manifest mismatch is worse than a missing file —
+  the features still compute, in the wrong order, and every prediction is
+  confident nonsense.
 
 **`build_features(candles: list[Candle]) → list[float]`**
 - Pure. Builds the feature vector in `FEATURE_NAMES` order from the most recent
@@ -3173,6 +3241,48 @@ recorded is a different kind of thing from a wrong number that looks right.
 - Ordering constraint: completes before any new order is submitted in the
   process's lifetime.
 - Must never resubmit an order.
+- **Rule 33's bound lands here (v1.75).** An order this function cannot settle
+  because the broker cannot be reached stays unresolved and is retried on the
+  next cycle; on the **third consecutive cycle** in which it is still unknown,
+  alert **once** for that order key, and re-arm when the order settles by any
+  route — a fill, a rejection, or `OrderNotFound`. The count and the alert are
+  per order key, not per cycle: two stuck orders are two alerts, and one stuck
+  order is one. Nothing new needs recording to do it. `order_unresolved` already
+  carries `age_seconds`, computed from the order's own `created_at`, so the
+  age is in hand at the site that would alert. Three matches rules 1, 2 and 9
+  deliberately; a second threshold in this system would be a second number to
+  remember.
+
+**This module owns rules 3, 5, 26, 27 and 34 (v1.75).** All five are the same
+subject from different sides — what the bot does when the broker's answer to a
+submission is a refusal, a silence, or a fraction — and this is the only module
+that submits:
+
+- **Rule 3** — an entry the broker rejects is recorded with its `broker_reason`,
+  alerted, and opens no position. It is **never retried**, on this cycle or any
+  later one. The strategy that produced the signal will produce another if the
+  condition still holds, and a retry loop on an entry is how a rejection becomes
+  a position nobody decided to take.
+- **Rule 4 is the documented exception to that**, and it is already stated above
+  under `close_position`: an exit is retried on every following cycle until the
+  position closes.
+- **Rule 5** — a submission that times out or whose outcome is unknown leaves the
+  row `SUBMITTING` and is resolved by `resolve_unfinished` querying with the
+  idempotency key, which is the whole of rule 5's remedy, on the next cycle or at the next startup. **Never resubmit**,
+  and note that resubmission is not merely forbidden but useless: §2.1 measured
+  that a duplicate key is refused with `INVALID_ARGUMENT`/`30057` rather than
+  returning the existing order.
+- **Rule 26** — a stop the exchange executed is not an error. The position is
+  closed from the fill with `exit_trigger = STOP_LOSS`, the cooldown starts, and
+  the owner is alerted; rule 26 is a normal outcome with a bookkeeping remedy,
+  not a failure path. The fill is the source of the exit price, per rule 33;
+  the stop price the bot asked for is not.
+- **Rules 27 and 34** — a partial fill, whose remedy depends on direction and is
+  specified in full under `open_position` and `close_position` above: an entry
+  remainder is cancelled and the position written from a re-read, an exit
+  remainder is never abandoned and the position stays open reduced to the lots
+  still held. rule 27 is a pointer to rule 34's exit clause and adds nothing of
+  its own. A partial fill is alerted either way.
 
 ### `zarabot/state/halt.py`
 
@@ -3307,6 +3417,20 @@ realised P&L slightly and permanently wrong.
   (ERROR) with `sink` equal to `telegram` — never the secret, never its length —
   and send a substitute incident alert without the secret (v1.61, rule 19).**
 - Never includes a token or account identifier in a message.
+- **This module owns rule 13 (v1.75), and the catch is narrow.** A send failure
+  is `telegram.error.TelegramError` and only that; the retries — three — are for
+  `telegram.error.NetworkError` (including `TimedOut`) and
+  `telegram.error.RetryAfter`, the transport failures a second attempt can fix.
+  `BadRequest`, `Forbidden` and `InvalidToken` are settings that will be equally
+  wrong on the third attempt: logged once, not retried. **Every other exception
+  propagates** out of `alert` to the caller, and thence to rule 21.
+- That last clause is uncomfortable on purpose, because `alert` is called from
+  inside other modules' `except` blocks. It has to be. This module carries every
+  alert in the system, and an unqualified "never raises" means a rename here
+  silences the whole channel while every module believes it has spoken — the one
+  degraded state with no external symptom. The `except Exception` in
+  `alert` today is that defect; `ruff`'s `BLE001` is the lint that would keep it
+  from coming back, and it is not enabled yet.
 
 ### `zarabot/telegram/commands.py`
 
@@ -3315,7 +3439,9 @@ One handler per command in the brief's command table.
 - Every handler first checks the sender against `TELEGRAM_CHAT_ID`; a mismatch
   emits `unauthorised_command` (INFO) with `chat_id` and `command` (v1.61), then
   returns without replying and without any state change. `chat_id` is not a
-  brokerage secret; it is the field that makes the event answerable.
+  brokerage secret; it is the field that makes the event answerable. **This is
+  rule 14 (v1.75)**, and this module owns it: no reply of any kind, not even a
+  refusal, because a refusal confirms the bot exists to whoever sent the message.
 - Replies exceeding the platform limit are truncated with an explicit note of how
   many entries were omitted.
 - No handler mutates a risk limit.
@@ -3450,6 +3576,22 @@ Fixed ordering; each step completes before the next begins:
      is **inconclusive** and says so; it must not report a blackout it did not
      observe, and it must not stay silent as though it had confirmed health.
 
+   **This step owns rule 37 (v1.75).** The no-instrument-affordable alert is
+   reported **once per start** — not per cycle and not per signal. At one poll a
+   minute the per-signal alternative is several hundred identical messages a day,
+   and an alert that repeats forever is equivalent to no alert in a channel whose
+   premise is that silence means healthy. The `ZERO_LOTS` rejections themselves
+   stay correct and stay silent; this rule governs only whether the owner is
+   told. Process start *is* the reset: a restart is a reasonable moment to say it
+   again, and nothing here is latched in the database.
+
+   **Rule 8's startup half is an open decision and is not implemented here
+   (v1.75).** This step reads each watchlist instrument and therefore looks like
+   the place that would refuse to start on unreadable metadata. It does not, and
+   the reasoning is under rule 8 in §8, where the decision is recorded for the
+   owner. What is binding today is the paragraph below: no agent adds a
+   `StartupError` to this step on its own reading of rule 8's word "must".
+
    **This step never raises `StartupError`, and never prevents startup.** An
    unaffordable budget stops *new entries only*. Refusing to start would
    additionally abandon every open position — no exit evaluation, no stop
@@ -3475,6 +3617,20 @@ Fixed ordering; each step completes before the next begins:
 
 - Raises `StartupError` on any failure, having alerted if Telegram credentials
   were valid. No entry may be attempted before step 9 completes.
+- **This module owns rule 29 (v1.75).** Clock accuracy is a host requirement,
+  not a runtime rule: V9 confirms the host is NTP-synchronised before deployment,
+  and this module logs the observed system time in **both UTC and MSK** in the
+  first log line after every restart, so a skewed clock is visible to whoever
+  reads that line. **That line is not written today** — rule 29 has asserted it
+  since the rule was written and no §4 contract claimed the rule, so nothing in
+  `app/startup.py` emits it (#115). Stating it here is what makes it a work item
+  rather than a sentence in a rule nobody implements from; the observed instant
+  comes from `clock.now()`, never from `datetime.now()`, which this module may
+  not call. There is deliberately no runtime skew check, and adding one is
+  not an improvement — the reasoning is in rule 29 and rests on the broker
+  exposing no server wall-clock. The one timestamp available, `LastPrice.time`,
+  is the time of the last *trade* and lags arbitrarily in a quiet market, so a
+  check built on it would halt trading because nobody traded.
 - **On any `StartupError` after logging is configured, emit `startup_failed`
   (CRITICAL) with `stage` (the step name: `config`, `logging`, `database`,
   `strategies`, `session`, `recovery`, `reconcile`, `halt`, `ready`) and
@@ -3523,6 +3679,13 @@ Fixed ordering; each step completes before the next begins:
    unmonitored. The count still matters — every price rejected at once is a
    different event from one instrument going quiet — so it is named in the alert
    that does fire.
+
+   **That latch is rule 9b, and this module owns it (v1.75).** §8 said "alert
+   once per cycle" until v1.75 while this paragraph said "latch", and both texts
+   were internally plausible, so no test could be red for both (#106). The latch
+   is the surviving reading and §8 now says so: set on the first cycle that
+   rejects anything, reset by a cycle that rejects nothing, one alert carrying
+   the count.
 3. Evaluate the remaining exits — take-profit, maximum age, and stop-loss only
    for `LOCAL`-protected positions — and submit them. **Before** any halt check,
    and before entries.
@@ -3558,6 +3721,28 @@ Fixed ordering; each step completes before the next begins:
 6. Fetch candles, evaluate strategies, and pass each signal through the gate.
 7. Record every signal with its decision; execute the approved ones.
 
+   **This step owns rule 20, and the alert names the trades (v1.75).** When the
+   limit is breached the cycle halts, persists the halt, and alerts with the
+   loss **and the trades that produced it**: every position closed on the current
+   Moscow date, each named with its ticker, lots, realised P&L and exit trigger,
+   newest exit first. The source is `db.positions.list_closed()` filtered on
+   `clock.moscow_date(position.exit_at)` — the same list `reporter.weekly` reads
+   and filters to a period. **No new column, no new repository function and no
+   new broker call**: the value was already in hand and was being discarded
+   (failure class 13). When the day closed no positions the alert says so
+   explicitly rather than omitting the section — a limit breached with no closed
+   trades is an unrealised drawdown, which is a different thing for the owner to
+   look at, and an empty list must not read as a formatting failure. Reply
+   truncation follows `telegram.commands`' rule: cut with an explicit note of how
+   many were omitted.
+
+   Until v1.75 the alert carried the loss and the limit only, so rule 20's "and
+   the trades that produced it" was satisfied vacuously — true because nothing
+   ever gathered them, and deletable with no test going red (#108). This is the
+   most consequential alert the system sends, at the moment the brief wants
+   deliberate friction to make the owner look at what went wrong, and it was the
+   one alert with no evidence in it.
+
    **The daily-loss halt passes `daily_loss_pct` (v1.69).** The `loss` this
    module already computed for the limit check is handed to `state.halt.halt`
    as its fourth argument, so `halt_triggered` carries the real figure. It is in
@@ -3583,6 +3768,15 @@ Fixed ordering; each step completes before the next begins:
    only just filled, so the second signal could pass a gate that was working
    correctly. `execution.orders.open_position` then refused it — also correctly —
    with `PositionStateError`, which nothing in this module caught (#24).
+
+   **This step owns rule 8's mid-session half (v1.75).** The instrument is read
+   before the gate, and an `InstrumentNotFound` logs a WARNING and moves to the
+   next ticker: no entry is ever sized against a lot size the bot could not
+   confirm, which is the protection rule 8 exists for. Only that exception is
+   handled here — every other one propagates under rule 21, because a broker that
+   is unreachable is the cycle's problem, not this ticker's. Rule 8's startup
+   half is an open decision recorded in §8 and is not implemented in this module
+   or in `app.startup`.
 
    The set of tickers opened in the pass lives here, not in `risk.gate`, which
    stays pure. It is the local record, which is immediately consistent, deciding
@@ -3648,6 +3842,14 @@ with `mark_run`. Two defects go with that change (#27):
   and could repeat a rollover; a restart through the report hour lost the week.
   Restarts are routine — six in one evening during the #45 work — so this is the
   ordinary case, not an edge one.
+
+**This module owns rule 2 (v1.75).** `broker.client` raises
+`BrokerRateLimited` and carries the broker's `retry_after` on it; this module is
+where the back-off happens, where the consecutive-failure counter lives, and
+where the alert fires — so the rule is claimed here. Throttling is never fatal
+and is never reported as an outage: the alert that fires after three consecutive
+rate-limited cycles names throttling, which is what tells the owner to change
+nothing and wait rather than to go looking at the network.
 
 **Back-off takes the broker's hint when the broker gives one (v1.53).** After a
 failed cycle the delay escalates as rule 1 describes; when the failure was a
@@ -3788,6 +3990,15 @@ that depended on them.
 **`async prune(backup_dir: Path, retention_days: int) → int`** — removes backups strictly older than the window; returns the count removed.
 
 - Failure alerts and returns; it must never stop trading.
+
+**This module owns rule 18 (v1.75), and the catch is narrow.** A backup failure
+is `sqlite3.Error` or `OSError` and only those: the database refusing the copy,
+or the filesystem refusing the destination — a full disk, a missing mount, a
+permission. Note `sqlite3`, not `aiosqlite`: this path deliberately opens its own
+synchronous connections in a worker thread rather than using the shared one, so
+rule 30 does not apply to it. **Every other exception propagates** under rule 21
+rather than being reported as "backup failed", which is a message that sends the
+reader to inspect a disk when the fault is in the code.
 
 ### `sandbox/` — laptop research (never imported by server code)
 
@@ -4384,6 +4595,21 @@ events only.
 
 Applies across all modules. Every external failure mode has exactly one rule.
 
+**Every rule is owned by exactly one §4 module contract (v1.75).** §7.1 has
+required this of log events since the first version — "each event is owed by
+exactly one module, named in the table" — and §8 never got the same treatment,
+so twenty-three of the thirty-eight rules were claimed by no contract at all
+(#115). That is not a bookkeeping gap. `scripts/make_tasks.py` cuts the spec by
+heading and nothing else, so an obligation written only here reaches no agent
+building any module: rules 8, 22, 34 and 37 reached no task file by any route.
+The rules below therefore state the failure and the remedy; the **module that
+owes the remedy states it again in its own §4 contract, naming the rule**, and
+`scripts/ci/check_docs.py` check 4 fails on any ordinal no §4 contract claims.
+Where a rule is detected by one module and remedied by another — 24 and 25 are
+both — the **detector** owns it and its contract names the caller that applies
+the remedy, because that is the split `broker.reconcile`'s never-place-or-cancel
+contract already forces.
+
 **The ordinals are frozen (v1.73).** A rule that is superseded is rewritten in
 place or turned into a pointer to the rule that replaced it; if one is ever
 deleted, the remaining rules keep their numbers and the deleted one leaves a
@@ -4440,8 +4666,36 @@ something else.
 7. **Broker and database disagree on positions or quantities** → the broker wins,
    the local record is corrected, and the owner is alerted with specifics.
 8. **Instrument metadata unavailable mid-session** → skip that ticker for the
-   cycle, WARNING. Unavailable at startup → `StartupError`; the bot must not
-   trade an instrument whose lot size it cannot confirm.
+   cycle, WARNING. `app.loops` owns this: step 6 reads the instrument before the
+   gate, and an `InstrumentNotFound` logs and moves to the next ticker, so no
+   entry is ever sized against a lot size the bot could not read.
+
+   **The startup half is not settled here (v1.75).** Until v1.75 this rule also
+   said "unavailable at startup → `StartupError`", an obligation that landed on
+   no module: the only §4 contract that reads watchlist instruments at startup is
+   `app.startup` step 8a, whose text says the opposite — a ticker whose
+   instrument or price cannot be read is "excluded from the judgement and named
+   separately", and "this step never raises `StartupError`, and never prevents
+   startup". `make_tasks.py` cuts by heading, so it delivered the negation to
+   `app.startup`'s agent and the obligation to nobody (#105, failure class 2).
+
+   **Open decision — not settled here.** Either (a) the mid-session skip is the
+   whole rule, and an unconfirmable lot size at startup is a diagnostic finding
+   that startup names and continues past; or (b) startup additionally refuses to
+   run when it cannot confirm the lot size of any watchlist ticker, raising
+   `StartupError` from step 8a. **Until it is decided, (a) is binding**, and it
+   is what the built code does. Two things argue for (a) and are recorded so the
+   decision is made on them rather than on the word "must": the protection rule 8
+   asks for is already supplied per cycle by the skip above, so no entry can be
+   sized on unread metadata either way; and `app.startup` step 8a's own
+   reasoning — refusing to start abandons every *open* position, its exits, its
+   stop management and its `MAX_AGE`, converting a benign no-op into an unmanaged
+   holding with real money in it. What (a) genuinely costs is that a watchlist
+   whose metadata is unreadable at start is a *quieter* condition than the same
+   watchlist unaffordable, which rule 37 alerts on. No agent may add a
+   `StartupError` to step 8a on its own reading of this rule; §3.2 gains a test
+   once the owner chooses — under (a) that startup does not raise, under (b)
+   that it does.
 9. **Candle fetch fails for one ticker, or returns too little history** → omit a
    failed ticker, WARNING, continue the batch. Both are **degraded calls** and
    both count on **one** per-ticker consecutive counter: on the **third**
@@ -4462,8 +4716,24 @@ something else.
    The two must share a counter, or a ticker alternating between them crosses no
    threshold ever.
 9b. **A quote is rejected as non-positive, stale, or an implausible move** →
-    WARNING, omit that instrument for the cycle, alert once per cycle with the
-    count. It is **not** a broker outage: it must not increment the consecutive
+    WARNING, omit that instrument for the cycle, and **alert once, latched, with
+    the count** (v1.75): one alert on the first cycle that rejects anything, and
+    none further until a cycle rejects nothing, which re-arms it. The count is
+    named in the alert that does fire, because every price rejected at once is a
+    different event from one instrument going quiet. `app.loops` owns this and
+    implements it in the price refresh of step 2.
+
+    Until v1.75 this rule read "alert once per cycle with the count", which the
+    `app.loops` contract had already argued against in the next paragraph and
+    which no code has ever done (#106). Read literally it is roughly 510 messages
+    in an 8.5-hour session for one permanently stale instrument — the
+    repeating-alert failure rule 36 exists to forbid, written into the rule an
+    agent is told to implement from. Both texts were internally plausible and no
+    test could be red for both. The latch is now stated here as well as in §4:
+    the set-site is the first rejecting cycle, the reset-site is a cycle that
+    rejects nothing, and the alert is one.
+
+    It is **not** a broker outage: it must not increment the consecutive
     failure counter of rule 1, and it must not be retried, because the next
     reading arrives on the next cycle anyway. Treating bad data as an outage is
     how a malformed field becomes an alert about the network.
@@ -4475,11 +4745,52 @@ something else.
 11. **Database write failure on a trading-critical path** (orders, positions,
     halt state, **cooldowns** — v1.63) → hard error: halt trading, alert, stop opening anything. The bot
     must never trade what it cannot record.
+
+    **A write failure is `aiosqlite.Error`, and only that (v1.75)** That is the
+    class `db.connection.transaction()` already emits `db_write_failed` for
+    before re-raising, and the class a repository's caller may act on. **Every
+    other exception propagates unchanged** — an `AttributeError` from a rename is
+    not a database that is unavailable, and a `halt trading` path that cannot
+    tell the two apart converts a programming error into a plausible degraded
+    state (failure class 5). This is the narrowing already applied at the §4
+    level to `db.connection` (v1.61) and `market.session` (v1.59) and never
+    carried into §8, which is the text agents implement from (#107).
 12. **Database write failure on a non-critical path** (signals, snapshots,
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
+
+    **Non-propagation covers `aiosqlite.Error` and only `aiosqlite.Error`
+    (v1.75)** The swallow exists for a database that will not take the row, not
+    for every way the call site can be wrong. Any other exception propagates and
+    reaches rule 21's supervisor with its traceback. Unqualified, this rule reads
+    as `except Exception: pass` on the analytics path, and an analytics path is
+    exactly where a silently dropped `TypeError` survives longest — nothing
+    downstream misses the row until a weekly report is composed from it.
 13. **Telegram send failure** → retry, then log. **Never propagates.** Telegram
     being down never delays or blocks a trading decision.
+
+    **A send failure is `telegram.error.TelegramError`, and only that (v1.75)**
+    Every failure the library reports — `NetworkError` and its `TimedOut`,
+    `RetryAfter`, `BadRequest`, `Forbidden`, `InvalidToken` — is a subclass of
+    it, so the class covers a chat misconfigured as completely as a network that
+    is down, and both are conditions the caller can do nothing about mid-trade.
+    **Retry is for the transport failures only** — `telegram.error.NetworkError`
+    (including `TimedOut`) and `telegram.error.RetryAfter`. The rest are settings
+    that will be just as wrong on the third attempt: they are logged once, not
+    retried three times. **Any other exception propagates** to the caller and
+    thence to rule 21.
+
+    That last clause is the point of the amendment and it is deliberately
+    uncomfortable, because `alert()` is called from inside other modules' `except`
+    blocks: a defect in the notifier will now surface there rather than be
+    absorbed. It has to. `telegram.notifier` carries every alert this system
+    sends, and an unqualified "never propagates" means a rename inside it turns
+    the whole alerting channel silent while every module believes it has spoken —
+    the one degraded state with no external symptom at all (#107, failure class
+    5). `ruff`'s `BLE001` is the mechanical companion to this rule and is **not
+    enabled** in `pyproject.toml`; enabling it belongs with the code change that
+    implements this narrowing, because `telegram/notifier.py`, `ops/backup.py`
+    and `app/startup.py` all catch bare `Exception` today.
 14. **Telegram command from an unauthorised chat** → INFO log with the chat
     identifier, no reply, no state change.
 15. **Configuration missing or invalid at startup** → refuse to start, alert if
@@ -4492,6 +4803,17 @@ something else.
     trading a different system than the owner believes.
 18. **Backup failure** → ERROR, alert, trading continues. A missing backup is not
     worth stopping trading over; it is worth knowing about.
+
+    **A backup failure is `sqlite3.Error` or `OSError`, and only those
+    (v1.75).** `ops.backup` runs `sqlite3.Connection.backup` in a worker thread
+    over a live database file, so those two classes are the whole surface it can
+    legitimately fail on: the database refusing the copy, and the filesystem
+    refusing the destination — a full disk, a missing mount, a permission. Note
+    it is `sqlite3`, not `aiosqlite`: this path deliberately opens its own
+    synchronous connections rather than the shared one, and rule 30 does not
+    apply to it. **Every other exception propagates** under rule 21 rather than
+    being reported to the owner as "backup failed", which is a message that sends
+    the reader to look at the disk when the fault is in the code.
 19. **Secret exposure** → no token **and no account identifier** is ever written
     to a log, an exception message, or a Telegram message. If the redaction
     filter detects a secret in an outgoing Telegram message, the message is
@@ -4499,6 +4821,22 @@ something else.
     incident without the secret is sent in its place.
 20. **Daily loss limit breached** → halt, persist the halt, alert with the loss
     and the trades that produced it. Exits continue to run.
+
+    **"The trades that produced it" are the positions closed today, and they are
+    already in hand (v1.75).** `db.positions.list_closed()` exists, returns
+    newest exit first, and is already read this way by `reporter.weekly`, which
+    filters it to a period. No new column, no new repository function and no new
+    broker call is needed — the value was being carried and discarded (failure
+    class 13). `app.loops` owns the assembly and its contract states the shape:
+    each closed position of the current Moscow date named with its ticker, lots,
+    realised P&L and exit trigger.
+
+    Until v1.75 nothing assembled them and the alert carried a percentage and a
+    limit only, so the clause was satisfied vacuously — true because the trades
+    were never gathered, and deletable with no test going red (#108, failure
+    class 4). This is the single most consequential alert the system sends, at
+    the moment the brief says deliberate friction should force the owner to look
+    at what went wrong, and it was the one alert with no evidence in it.
 21. **Unhandled exception in a background task** → log with traceback, alert,
     restart that task with exponential backoff. One failing task must never
     terminate the process or any other task.
@@ -4609,12 +4947,41 @@ something else.
     reports it did — an order state, an executed stop, an operation — and never
     from a quote, a stop price, an entry price, or any other number the bot has
     to hand. Where the broker's own record is not yet available, the position
-    stays open and the read is retried on the next cycle; after a bounded number
-    of cycles the owner is alerted. A position closed a minute late is
+    stays open and the read is retried on the next cycle; **after three
+    consecutive cycles in which the read is still unavailable, the owner is
+    alerted once for that order, and the alert re-arms when the order settles
+    (v1.75)**. A position closed a minute late is
     recoverable and a position closed at an invented number is not, because
     nothing downstream can tell the invented one from a real one. This rule
     generalises #4, #5, #8 and #11, which are four instances of the same
     mistake.
+
+    **Where the bound applies, and where "cycle" is the wrong unit (v1.75).**
+    "A bounded number of cycles" named no bound until v1.75, which is precisely
+    what rule 2's own post-mortem calls the defect it was rewritten to remove —
+    "a threshold no code implemented and no test could fail" — live one rule
+    family over, on the path that decides whether a position stays open with real
+    money in it (#112). Three, matching rules 1, 2 and 9, because they are the
+    same shape and a second threshold in the same system is a second thing to
+    remember. **The counted path is `execution.orders.resolve_unfinished`**,
+    which runs once per cycle, already logs `order_unresolved` with an
+    `age_seconds` computed from the order's own `created_at`, and already
+    distinguishes "the broker cannot be reached" from "the broker says this order
+    was never placed". That is the full set of three parts rule 36 requires:
+    threshold, one alert, reset on settlement.
+
+    **`broker.reconcile`'s `EXIT_UNRESOLVED` is not on this counter and is not
+    a cycle.** Reconciliation runs at `app.startup` step 7 and appears in no
+    `app.loops` task list, so its retry cadence is one per process start, not one
+    per minute, and it alerts once per pass by construction. Suppressing it
+    across *restarts* would require durable state — restarts are routine (failure
+    class 15) — and whether an operator should stop being told about an
+    unresolved exit because the process has bounced is a judgement about a real
+    money-path alert, not a bug to be fixed in passing. **It is left alerting
+    once per pass**, and the question of a durable, restart-surviving latch is
+    recorded here as open and unowned. It is entangled with rule 25's open
+    decision, which is what would put a reconciliation task on a cadence in the
+    first place, and should be settled with it rather than before it.
 
 34. **An order the bot submitted is partially filled** → the filled part is real
     and the remainder is not, and which of the two is left exposed depends on the

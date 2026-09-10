@@ -61,7 +61,9 @@ One handler per command in the brief's command table.
 - Every handler first checks the sender against `TELEGRAM_CHAT_ID`; a mismatch
   emits `unauthorised_command` (INFO) with `chat_id` and `command` (v1.61), then
   returns without replying and without any state change. `chat_id` is not a
-  brokerage secret; it is the field that makes the event answerable.
+  brokerage secret; it is the field that makes the event answerable. **This is
+  rule 14 (v1.75)**, and this module owns it: no reply of any kind, not even a
+  refusal, because a refusal confirms the bot exists to whoever sent the message.
 - Replies exceeding the platform limit are truncated with an explicit note of how
   many entries were omitted.
 - No handler mutates a risk limit.
@@ -80,6 +82,29 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 13. **Telegram send failure** → retry, then log. **Never propagates.** Telegram
     being down never delays or blocks a trading decision.
+
+    **A send failure is `telegram.error.TelegramError`, and only that (v1.75)**
+    Every failure the library reports — `NetworkError` and its `TimedOut`,
+    `RetryAfter`, `BadRequest`, `Forbidden`, `InvalidToken` — is a subclass of
+    it, so the class covers a chat misconfigured as completely as a network that
+    is down, and both are conditions the caller can do nothing about mid-trade.
+    **Retry is for the transport failures only** — `telegram.error.NetworkError`
+    (including `TimedOut`) and `telegram.error.RetryAfter`. The rest are settings
+    that will be just as wrong on the third attempt: they are logged once, not
+    retried three times. **Any other exception propagates** to the caller and
+    thence to rule 21.
+
+    That last clause is the point of the amendment and it is deliberately
+    uncomfortable, because `alert()` is called from inside other modules' `except`
+    blocks: a defect in the notifier will now surface there rather than be
+    absorbed. It has to. `telegram.notifier` carries every alert this system
+    sends, and an unqualified "never propagates" means a rename inside it turns
+    the whole alerting channel silent while every module believes it has spoken —
+    the one degraded state with no external symptom at all (#107, failure class
+    5). `ruff`'s `BLE001` is the mechanical companion to this rule and is **not
+    enabled** in `pyproject.toml`; enabling it belongs with the code change that
+    implements this narrowing, because `telegram/notifier.py`, `ops/backup.py`
+    and `app/startup.py` all catch bare `Exception` today.
 
 14. **Telegram command from an unauthorised chat** → INFO log with the chat
     identifier, no reply, no state change.

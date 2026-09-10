@@ -121,8 +121,32 @@ From `technical-spec.md` §8. Handle each exactly as written.
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
 
+    **Non-propagation covers `aiosqlite.Error` and only `aiosqlite.Error`
+    (v1.75)** The swallow exists for a database that will not take the row, not
+    for every way the call site can be wrong. Any other exception propagates and
+    reaches rule 21's supervisor with its traceback. Unqualified, this rule reads
+    as `except Exception: pass` on the analytics path, and an analytics path is
+    exactly where a silently dropped `TypeError` survives longest — nothing
+    downstream misses the row until a weekly report is composed from it.
+
 20. **Daily loss limit breached** → halt, persist the halt, alert with the loss
     and the trades that produced it. Exits continue to run.
+
+    **"The trades that produced it" are the positions closed today, and they are
+    already in hand (v1.75).** `db.positions.list_closed()` exists, returns
+    newest exit first, and is already read this way by `reporter.weekly`, which
+    filters it to a period. No new column, no new repository function and no new
+    broker call is needed — the value was being carried and discarded (failure
+    class 13). `app.loops` owns the assembly and its contract states the shape:
+    each closed position of the current Moscow date named with its ticker, lots,
+    realised P&L and exit trigger.
+
+    Until v1.75 nothing assembled them and the alert carried a percentage and a
+    limit only, so the clause was satisfied vacuously — true because the trades
+    were never gathered, and deletable with no test going red (#108, failure
+    class 4). This is the single most consequential alert the system sends, at
+    the moment the brief says deliberate friction should force the owner to look
+    at what went wrong, and it was the one alert with no evidence in it.
 
 ## Test cases
 

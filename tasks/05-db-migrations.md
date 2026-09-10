@@ -32,7 +32,12 @@ Owns schema creation and version tracking.
   in ascending order, each in its own transaction.
 - Returns the resulting schema version.
 - Raises `MigrationError` if the recorded version exceeds the highest known
-  migration, and makes no modification in that case.
+  migration, and makes no modification in that case. **This is rule 16
+  (v1.75):** a schema version ahead of the code means a newer build wrote this
+  database, so the running code cannot know what its own `SELECT`s mean. It
+  refuses to start, alerts, and changes nothing — in particular it never
+  down-migrates, because §6 is forward-only and the file holds real trade
+  history.
 - Idempotent: applying twice is a no-op the second time.
 - **The one module exempt from rule 31.** It commits and rolls back the
   connection it is given, one transaction per migration file, because §6 requires
@@ -59,6 +64,16 @@ From `technical-spec.md` §8. Handle each exactly as written.
 11. **Database write failure on a trading-critical path** (orders, positions,
     halt state, **cooldowns** — v1.63) → hard error: halt trading, alert, stop opening anything. The bot
     must never trade what it cannot record.
+
+    **A write failure is `aiosqlite.Error`, and only that (v1.75)** That is the
+    class `db.connection.transaction()` already emits `db_write_failed` for
+    before re-raising, and the class a repository's caller may act on. **Every
+    other exception propagates unchanged** — an `AttributeError` from a rename is
+    not a database that is unavailable, and a `halt trading` path that cannot
+    tell the two apart converts a programming error into a plausible degraded
+    state (failure class 5). This is the narrowing already applied at the §4
+    level to `db.connection` (v1.61) and `market.session` (v1.59) and never
+    carried into §8, which is the text agents implement from (#107).
 
 16. **Schema version ahead of the code** → refuse to start, alert, change nothing.
 
