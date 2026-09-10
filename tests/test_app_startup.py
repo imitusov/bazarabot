@@ -12,6 +12,12 @@ from pathlib import Path
 
 import pytest
 
+from zarabot.broker.client import (
+    BrokerRateLimited,
+    BrokerUnavailable,
+    InstrumentNotFound,
+    PriceRejected,
+)
 from zarabot.db.connection import connect, disconnect, shared
 from zarabot.db.migrations import apply
 from zarabot.models import HaltReason, Instrument, ReconciliationReport
@@ -404,6 +410,15 @@ async def test_startup_applies_reported_stop_remedies(
     async def _instrument(ticker: str) -> Instrument:
         return instrument
 
+    async def _last_price(figi: str) -> Decimal:
+        # Step 8a prices whatever `_instrument` returned, and this stub returns
+        # the step 7 position's instrument for every ticker, whose figi is not
+        # in PRICES. Step 8a is not this test's subject; giving it a readable
+        # price keeps it out of the way. Under the narrowed catch of #201 the
+        # fixture's `KeyError` would abort startup, which is correct — a
+        # KeyError is a defect, not an unreadable instrument.
+        return Decimal("100")
+
     async def _place(pos: Position, inst: Instrument) -> Position:
         env.append("place")
         return pos
@@ -423,6 +438,7 @@ async def test_startup_applies_reported_stop_remedies(
     monkeypatch.setattr("zarabot.app.startup.list_open", _opened)
     monkeypatch.setattr("zarabot.app.startup.list_stop_orders", _stops)
     monkeypatch.setattr("zarabot.app.startup.get_instrument", _instrument)
+    monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
     monkeypatch.setattr("zarabot.app.startup.place_protective_stop", _place)
     monkeypatch.setattr("zarabot.app.startup.replace_stop", _replace)
     monkeypatch.setattr("zarabot.app.startup.adopt_existing_stop", _adopt)
@@ -650,6 +666,11 @@ async def test_stop_duplicate_cancels_every_identifier_and_retains_keep(
     """
     from zarabot.app.startup import start
 
+    # Step 8a reads every watchlist instrument, so the watchlist is deliberately
+    # not the duplicate's ticker: that is what keeps `_instrument` below able to
+    # assert "no lookup for SBER" and mean step 7.
+    monkeypatch.setenv("WATCHLIST", "GAZP")
+
     keep = _stop("keep-k", "keep-id")
     dup_one = _stop("dup-1", "dup-id-1")
     dup_two = _stop("dup-2", None)
@@ -681,7 +702,12 @@ async def test_stop_duplicate_cancels_every_identifier_and_retains_keep(
         cancelled.append(stop.key)
 
     async def _instrument(ticker: str) -> object:
-        raise AssertionError("no instrument lookup for a duplicate")
+        # Step 8a legitimately reads every watchlist instrument, and the
+        # watchlist is GAZP here precisely so this assertion still means what
+        # it says: no lookup for SBER, the duplicate's ticker.
+        if ticker == "SBER":
+            raise AssertionError("no instrument lookup for a duplicate")
+        return _instrument_of(ticker)
 
     async def _place(pos: object, inst: object) -> object:
         raise AssertionError("a duplicate is not remedied by a new stop")
@@ -1021,7 +1047,7 @@ async def test_unreadable_price_is_counted_as_neither_answer(
 
     async def _last_price(figi: str) -> Decimal:
         if figi == "FIGI-MGNT":
-            raise RuntimeError("no price")
+            raise PriceRejected("no price")
         return PRICES[figi.removeprefix("FIGI-")]
 
     monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
@@ -1046,13 +1072,19 @@ async def test_no_readable_price_reports_inconclusive_not_a_blackout(
     Failure register rule 5: a defensive fallback that turns a loud failure into
     a plausible-sounding quiet one. Reporting "nothing is affordable" off zero
     observations would be exactly that, and the owner would act on it.
+
+    Both directions, because a test that asserted only the first would pass
+    just as well against `except Exception` and would pin nothing (failure
+    class 3): a *broker* failure is excluded and reported inconclusive, and a
+    *programming* error in the same read is not — it reaches the rule 15
+    boundary, which alerts, emits `startup_failed` and refuses to start.
     """
     from zarabot.app.startup import start
 
     monkeypatch.setenv("WATCHLIST", "SBER,MGNT")
 
     async def _last_price(figi: str) -> Decimal:
-        raise RuntimeError("broker unreachable")
+        raise BrokerUnavailable("broker unreachable")
 
     monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
 
@@ -1066,14 +1098,64 @@ async def test_no_readable_price_reports_inconclusive_not_a_blackout(
     assert "cannot open a position" not in " ".join(alerts).lower()
 
 
+async def test_programming_error_reading_a_price_reaches_the_rule_15_boundary(
+    env: list[str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other direction of failure class 5, for the price read.
+
+    A renamed SDK field surfaces as `AttributeError`. Excluding the ticker and
+    calling it "unknown" would report a plausible degraded state off a defect,
+    in the module whose whole job is to establish the system is sound. It must
+    propagate to the boundary instead, which names the exception type.
+    """
+    from zarabot.app.startup import StartupError, start
+
+    monkeypatch.setenv("WATCHLIST", "SBER,MGNT")
+
+    async def _last_price(figi: str) -> Decimal:
+        raise AttributeError("'LastPrice' object has no attribute 'price'")
+
+    monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+
+    with (
+        caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"),
+        pytest.raises(StartupError),
+    ):
+        await start()
+
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "startup_failed"
+    ]
+    assert len(events) == 1
+    assert events[0].stage == "reachability"
+    assert events[0].reason == "AttributeError"
+    alerts = [item.removeprefix("alert:") for item in env if item.startswith("alert:")]
+    assert not [text for text in alerts if "running" in text.lower()], alerts
+
+
 async def test_broker_failure_in_step_8a_does_not_raise_startup_error(
     env: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A diagnostic must never be the reason the bot is not running."""
+    """A diagnostic must never be the reason the bot is not running.
+
+    Both directions, for the instrument read. Every class rule 9 enumerates for
+    `get_instrument` skips its ticker and lets startup finish; the companion
+    test below proves the catch does not also swallow a defect.
+    """
     from zarabot.app.startup import start
 
+    monkeypatch.setenv("WATCHLIST", "SBER,GAZP,MGNT")
+    failures = {
+        "SBER": BrokerUnavailable("broker unreachable"),
+        "GAZP": BrokerRateLimited("slow down"),
+        "MGNT": InstrumentNotFound("no such ticker"),
+    }
+
     async def _instrument(ticker: str) -> Instrument:
-        raise RuntimeError("broker unreachable")
+        raise failures[ticker]
 
     monkeypatch.setattr("zarabot.app.startup.get_instrument", _instrument)
 
@@ -1081,6 +1163,39 @@ async def test_broker_failure_in_step_8a_does_not_raise_startup_error(
 
     assert ctx.config.trading_mode == "live"
     assert [item for item in env if item.startswith("alert:") and "running" in item]
+
+
+async def test_programming_error_reading_an_instrument_reaches_the_boundary(
+    env: list[str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The companion direction: a defect is not a broker failure.
+
+    `except Exception` would pass the test above and fail this one, which is
+    the point of writing the pair.
+    """
+    from zarabot.app.startup import StartupError, start
+
+    async def _instrument(ticker: str) -> Instrument:
+        raise AttributeError("'Share' object has no attribute 'lot'")
+
+    monkeypatch.setattr("zarabot.app.startup.get_instrument", _instrument)
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+
+    with (
+        caplog.at_level(logging.CRITICAL, logger="zarabot.app.startup"),
+        pytest.raises(StartupError),
+    ):
+        await start()
+
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "startup_failed"
+    ]
+    assert len(events) == 1
+    assert events[0].stage == "reachability"
+    assert events[0].reason == "AttributeError"
+    assert "tinvest-secret-token" not in caplog.text
 
 
 async def test_zero_price_is_unknown_rather_than_affordable(
@@ -1117,3 +1232,64 @@ async def test_zero_price_is_unknown_rather_than_affordable(
     # observation the check is not inconclusive, and SBER is not affordable.
     assert "unaffordable=MGNT" in ready[0]
     assert "inconclusive" not in ready[0]
+
+
+async def test_startup_logs_the_observed_time_in_utc_and_msk(
+    env: list[str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 29, owned by this module: the cheapest possible clock-skew detector.
+
+    There is no runtime skew check by design, so the only symptom of a host
+    whose clock or zone database has drifted is this line. It must carry both
+    zones — UTC alone cannot show a wrong `Europe/Moscow` offset, and MSK alone
+    cannot show a wrong instant — and the instant comes from `clock.now()`,
+    which this module may not bypass with `datetime.now()`.
+    """
+    from zarabot.app.startup import start
+
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+
+    with caplog.at_level(logging.INFO, logger="zarabot.app.startup"):
+        await start()
+
+    records = [
+        record for record in caplog.records if getattr(record, "utc", None) is not None
+    ]
+    assert len(records) == 1, caplog.text
+    record = records[0]
+    # NOW is 12:00 UTC on 2026-03-16, which is 15:00 in Moscow.
+    assert record.utc == "2026-03-16T12:00:00+00:00"
+    assert record.msk == "2026-03-16T15:00:00+03:00"
+    # First line after the restart: nothing else from this module precedes it.
+    mine = [item for item in caplog.records if item.name == "zarabot.app.startup"]
+    assert mine[0] is record
+    # Rule 19: no token and no account identifier, in the message or the fields.
+    assert "tinvest-secret-token" not in caplog.text
+    assert REQUIRED_ENV["TINVEST_ACCOUNT_ID"] not in caplog.text
+
+
+async def test_observed_time_comes_from_clock_not_datetime_now(
+    env: list[str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`clock` is the sole owner of "now", so a stubbed clock moves this line.
+
+    Without this the previous test would pass against a `datetime.now(UTC)`
+    call on a host that happened to be at NOW, which is never.
+    """
+    from zarabot.app.startup import start
+
+    other = datetime(2026, 12, 31, 21, 30, tzinfo=UTC)
+    monkeypatch.setattr("zarabot.app.startup.now", lambda: other)
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+
+    with caplog.at_level(logging.INFO, logger="zarabot.app.startup"):
+        await start()
+
+    records = [
+        record for record in caplog.records if getattr(record, "utc", None) is not None
+    ]
+    assert len(records) == 1, caplog.text
+    assert records[0].utc == "2026-12-31T21:30:00+00:00"
+    # 21:30 UTC on the 31st is 00:30 on 1 January in Moscow — the date rolls,
+    # which is the case a single-zone log line cannot show at all.
+    assert records[0].msk == "2027-01-01T00:30:00+03:00"
