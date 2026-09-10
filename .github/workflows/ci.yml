@@ -60,6 +60,12 @@ jobs:
       - name: Latch resets
         run: python scripts/ci/check_latches.py
 
+      # Issue #118 item 5: every §3.2 test contract must reach a task file,
+      # and every "no test block" claim in a task file must be true. Own step
+      # so a red compose or latch gate cannot hide this one under bash -e.
+      - name: Test-contract reachability
+        run: python scripts/ci/check_test_contracts.py
+
       # Issue #183: the deployed compose file kept three log files while the
       # brief promised five. Own step — the retained window is the only
       # evidence path the health export has.
