@@ -77,8 +77,23 @@ Never write implementation before tests. Never declare done with failing tests.
 - Keep `strategies.*`, `risk.gate`, `risk.sizing` and `lifecycle.exits` pure —
   no I/O, no database, no clock except a `now` argument.
 - Read configuration only through `config`.
-- Access the database only through its owning repository module. No SQL
-  anywhere else.
+- Access the database only through its owning repository module. Every table in
+  spec §5 has exactly one owning module, named in that module's §4 contract, and
+  that module is the only code that **writes** it. Write no SQL against a table
+  you do not own; to change another module's table, call that module.
+- **A module may own its own table.** The owner need not live under
+  `zarabot/db/`: `state.halt` owns `halt_state` and `broker.reconcile` owns
+  `reconciliations`, each the sole writer of a single-purpose table. A
+  non-`db.*` owner owes every rule a repository owes — no `aiosqlite.connect`,
+  no `BEGIN`/`commit`/`rollback`, and every write inside
+  `db.connection.transaction()` on `db.connection.shared()`.
+- The rule above is about writes. Reading is unrestricted **within the owning
+  module** — `state.halt` reads `halt_state` with its own `SELECT`s — and every
+  `db/` repository reads and writes the table it owns by definition.
+- **Forward-only files under `migrations/` are the one carve-out.** A migration
+  creates and may seed a table it does not own — `001_initial.sql` seeds the
+  `halt_state` singleton row — so an owner is the sole writer at runtime, not
+  the sole writer that has ever existed.
 - Never call `aiosqlite.connect` outside `db.connection`, and never close the
   connection it owns. Repositories run on `db.connection.shared()`.
 - Never issue `BEGIN`, `commit` or `rollback` outside `db.connection`. Every

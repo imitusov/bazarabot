@@ -390,10 +390,16 @@ def main() -> None:
 
     # Tables whose ownership the spec does not state, or that nothing writes (#102).
     KNOWN_UNOWNED_TABLES = {
-        "instruments",  # no writer anywhere in zarabot/
-        "schema_version",  # §4 says "schema creation", names no table
-        "halt_state",  # §4 says "the halt flag", names no table
-        "reconciliations",  # owner stated only in interfaces.md
+        # `halt_state`, `reconciliations` and `schema_version` left this list in
+        # spec v1.77 (#177, #102): §4 now names each table under the contract of
+        # the module that writes it, and the rulebook says in writing that a
+        # module may own its own table. `instruments` is the one left, and it is
+        # here for the opposite reason — nothing in `zarabot/` writes it, so no
+        # owner can be inferred from the code. §4 names `broker.client` as its
+        # owner and records that it is unimplemented, with the open decision
+        # about building or dropping it. The entry goes when the table does, or
+        # when a writer exists.
+        "instruments",  # specified, created by 001; no writer anywhere in zarabot/
     }
 
     writers: dict[str, set[str]] = {t: set() for t in tables}

@@ -21,6 +21,34 @@ returns domain types, never SDK types. The SDK's own services — `OrdersService
 `MarketDataService`, `InstrumentsService`, `OperationsService`, `SandboxService`
 — are reachable only from inside this module.
 
+**Owner of the `instruments` table — specified, unimplemented (v1.77).** §5
+specifies `instruments`, `migrations/001_initial.sql` creates it, and rule 12
+and `db.connection`'s `critical=False` list both name "the instruments cache" as
+a writer. That writer does not exist: no file under `zarabot/` reads or writes
+the table, and this module holds instrument metadata in process memory only, for
+the lifetime of the process. The obligation is recorded here because this module
+is the only one that fetches instrument metadata at all — `share_by` and
+`get_instrument` are its calls, so a durable cache could have no other owner —
+and a table specified in §5 with no named module reaches no task at all (#102).
+
+**Nothing may be built from this paragraph.** It states an owner so the
+obligation has an address, not a contract to implement. Nothing in the bot reads
+the table today, so writing it would change no behaviour, and the memory cache
+is not a defect: the metadata this module needs is re-read cheaply on each
+process start and rule 8 already covers metadata that is unavailable
+mid-session.
+
+**Open decision — not settled here.** Either (a) `instruments` is dead schema:
+drop the table in a forward migration and strike "instruments cache" from rule
+12 and from `db.connection`'s rule-12 caller list, leaving this module's memory
+cache as the whole design; or (b) the durable cache is genuinely wanted — to
+survive a broker outage at startup, which is the only thing it would buy — in
+which case this module gains the write, on `db.connection.transaction(critical=False)`
+per rule 12, and §5 gains its refresh cadence and its staleness rule. The
+project has never chosen, and the two references to a writer that does not exist
+are the residue of assuming (b). Until the owner chooses, the table stays,
+unwritten, and this paragraph is why. Neither branch is in scope for any task.
+
 **Sandbox is selected by endpoint, never by a different method family.** The SDK
 exposes a `SandboxService` with a parallel set of methods — `post_sandbox_order`,
 `get_sandbox_order_state`, `cancel_sandbox_order` and so on. This module must
