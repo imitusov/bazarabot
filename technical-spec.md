@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.77
+**Version:** 1.78
 **Date:** 2026-09-10
 **Implements:** `business-brief.md` v1.13
 
@@ -2662,6 +2662,31 @@ module's own task never carried it (#177). No other module writes
   The close still passes `order = None`. This module records **no** order row: it
   did not submit one, and inventing one would contradict its own prohibition on
   trading.
+
+  **This close starts the ticker's cooldown, and that is a write this contract
+  now admits (v1.78).** `db.cooldowns.start(position.ticker, sale.occurred_at)`
+  is called immediately after the close, from the instant of the *sale* and not
+  the instant of detection, for the same reason the exit price comes from the
+  operations feed. A position that left the account is a position the bot just
+  exited, and every other exit path starts a cooldown; skipping it here would let
+  the next cycle re-enter a ticker the account sold minutes ago. Until v1.78 the
+  write was in the code and in no contract (#110, failure class 2), which is the
+  worst arrangement available: the next agent rebuilding this module from its
+  contract deletes the line, and nothing says it was ever required.
+
+  **A failed cooldown write is not remedied here — it propagates (v1.78).**
+  Cooldowns are rule 11, and this module has no halt path of its own. The
+  `aiosqlite.Error` leaves `reconcile`, `app.startup` fails at the `reconcile`
+  stage and refuses to start, which satisfies rule 11's "stop opening anything"
+  by the strongest means available: the bot does not run. This is sound **only
+  while reconciliation runs exclusively at startup**, which is what rule 25's
+  open decision (a) currently fixes. **Open decision — not settled here.** If
+  rule 25 is ever resolved as (b), a named `app.loops` task calling reconcile on
+  a cadence, then a propagating cooldown failure mid-session is an exception in a
+  supervised loop and not a halt, and this module needs an explicit rule-11
+  remedy of the shape `execution.orders` has. That is a money-path decision, it
+  is the owner's, and it is bound to rule 25's: whoever settles rule 25 settles
+  this. No agent may add a halt path here on its own reading.
 - **A sale that cannot be resolved is reported, not booked.** When the feed
   returns no covering sale, or is unavailable, the position **stays open** and
   the report carries
@@ -2713,8 +2738,18 @@ module's own task never carried it (#177). No other module writes
   a stop at the wrong price, **or more than one live stop on the same position** —
   and the caller performs the remedy through
   `execution.orders`, which is the only module permitted to place or cancel
-  orders. Keeping reconciliation observational is what allows it to run
-  anywhere, including read-only diagnostics, without financial side effects.
+  orders. Keeping the *order* paths out of this module is what allows every
+  remedy to be applied by the one module permitted to trade.
+
+  **"Observational" means it places no orders. It is not read-only (v1.78).**
+  This module closes positions, adopts them, adjusts lot counts, starts
+  cooldowns and writes `reconciliations` — it is a writer of trading-critical
+  state under rule 11, and running it is not a diagnostic. The earlier claim
+  that it could "run anywhere, including read-only diagnostics, without
+  financial side effects" was true of the class it checked, orders, and read as
+  covering all writes (#110, failure class 6). Only the never-place-or-cancel
+  line below is binding; nothing in this module is safe to run against a live
+  account for a look.
 - On restart an existing stop is **adopted** rather than replaced — two stops on
   one position would sell it twice.
 - **A stop is mispriced only when it differs from the position's stop by a full
@@ -3101,6 +3136,15 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
   - **spendable** — `cash × (100 − reserve_pct)%`, a buying-power reserve.
 - The returned value must satisfy, for every possible input:
   `lots × lot_size × price ≤ allocated − open_cost` and `≤ cash`.
+- **That guarantee is over `price`, the price passed in — not over the price the
+  order achieves (v1.78).** This function is pure and runs before any order
+  exists, so the fill is not knowable here. A market buy filling above `price`
+  costs more than the bound, and the excess is recorded as the position's entry
+  price and summed into the next call's `open_cost`. Nothing here is wrong; the
+  consequence is stated where it lands, under `risk.gate`'s
+  `PORTFOLIO_EXPOSURE`, whose "cannot bind" proof omitted exactly this (#111).
+  `reserve_pct` softens the cash side of it and bounds nothing on the headroom
+  side.
 - `reserve_pct` holds back a slice of cash so that fees, price movement between
   sizing and fill, and lot rounding cannot turn an approved order into one the
   broker refuses for insufficient funds. **It is a reserve, not an estimate of
@@ -3126,11 +3170,49 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 - `MAX_POSITIONS` applies at or above the configured maximum.
 - **`PORTFOLIO_EXPOSURE`** rejects when the summed cost of open positions leaves
   less headroom than one lot: `allocated − open_cost < lot_cost`.
-  **It cannot bind on a portfolio the gate sized by itself**, and that is not a
-  defect. If every open position cost at most one budget and at most
-  `max_open_positions − 1` are open, the surviving configuration bound
+  **It CAN bind on a portfolio the gate sized by itself. The old proof was
+  wrong, and this is the bound (v1.78).** Until v1.78 this contract said the
+  check "cannot bind on a portfolio the gate sized by itself", reasoning that if
+  every open position cost at most one budget and at most
+  `max_open_positions − 1` are open, the configuration bound
   `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT ≤ 100` guarantees headroom for another.
-  It binds on holdings the gate did not size: a position adopted by
+  The antecedent does not hold. `risk.sizing.size_position` bounds lots at the
+  **pre-submission** price; `execution.orders.open_position` fills at a market
+  price and the position's recorded entry price — the one `open_cost` is summed
+  from — is the *fill*. A fill above the sized price makes a position cost more
+  than one budget (#111, failure class 4: a guarantee true only because nobody
+  computed the case that breaks it).
+
+  Write `s_i ≥ 0` for entry `i`'s upward fill slippage as a fraction of its
+  sized price, so that position costs at most `budget × (1 + s_i)`. With
+  `M = max_open_positions`, `P = POSITION_SIZE_PCT`, `k ≤ M − 1` positions open
+  and `S = Σ s_i` over them, headroom is at least
+
+      allocated − k × budget − S × budget
+
+  and at the configuration bound's worst case, `M × P = 100` and `k = M − 1`,
+  that is `budget × (1 − S)`. So `PORTFOLIO_EXPOSURE` binds on a self-sized
+  portfolio exactly when the accumulated slippage across the open positions
+  exceeds one budget less one lot: `S > 1 − lot_cost / budget`. A configuration
+  with slack — `M × P < 100` — carries `allocated × (100 − M × P) / 100` of
+  extra room before that point. The bound is on the **sum**, not on any single
+  entry: many small slippages reach it exactly as one large one does.
+
+  **A binding `PORTFOLIO_EXPOSURE` on a self-sized portfolio is therefore
+  correct behaviour, not a bug** — it is the headroom rule doing its job on real
+  fills, and refusing an entry is the right outcome, since the money genuinely
+  is not there. The diagnosis lives elsewhere: `config.fill_slippage_alert_pct`
+  (v1.74) and the per-entry alert in `execution.orders.open_position` (v1.74)
+  measure each `s_i` as it happens, so a portfolio that drifts into this state
+  announced every step. **No repair is available in this module**: `risk.gate`
+  is pure, sizing decides before any fill exists, and the difference between a
+  sized price and an achieved one is not knowable at the moment of sizing. What
+  a *pre-emptive* bound would take — sizing at a haircut to the reference price,
+  or a slippage budget deducted from `allocated` — is a money-path behaviour
+  change, and **it is an open decision the owner has not made**. Nothing here
+  implements one.
+
+  It also binds on holdings the gate did not size: a position adopted by
   `broker.reconcile` during crash recovery, or `ALLOCATED_CAPITAL` lowered
   between runs. Those are precisely the runtime cases #16 names, and the ones a
   configuration-time check cannot see. The gate
@@ -3319,6 +3401,20 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
 **`async close_executed_stop(position: Position, fill: OrderRecord) → Position`**
 - Books the close of a position whose **exchange** stop fired. Never submits a
   sell — the exchange already did.
+- **Starts the cooldown for the position's ticker, exactly as `close_position`
+  does (v1.78).** Rule 26 has always required it — "close the position from the
+  fill with `exit_trigger = STOP_LOSS`, start the cooldown, alert" — but this
+  contract never said so, and the obligation reached the code only because both
+  functions happen to share a private helper (#109, failure class 2). A rebuild
+  of this function from this contract alone would drop the cooldown, and the bot
+  would re-enter on the next cycle the ticker the exchange had just stopped it
+  out of. The cooldown is started from the same instant the close is booked at.
+- **A failed cooldown write halts but does not fail the close**, on exactly the
+  terms `close_position` states above: the position row is already `CLOSED` and
+  the exchange has already sold, so raising here would report a completed exit
+  as failed. Cooldowns are rule 11, so the failure takes the rule-11 remedy —
+  alert and halt — and this function returns the closed position, because it did
+  close.
 - **`fill` is the broker's own record of that execution**, obtained from
   `broker.client.get_executed_stop_fills`. The exit price is
   `fill.filled_price` and the exit commission is `fill.commission`. Neither may

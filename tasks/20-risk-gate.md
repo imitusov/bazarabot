@@ -27,11 +27,49 @@ Module **20** of 42 in `dependency-order.md`. Everything before it is complete a
 - `MAX_POSITIONS` applies at or above the configured maximum.
 - **`PORTFOLIO_EXPOSURE`** rejects when the summed cost of open positions leaves
   less headroom than one lot: `allocated − open_cost < lot_cost`.
-  **It cannot bind on a portfolio the gate sized by itself**, and that is not a
-  defect. If every open position cost at most one budget and at most
-  `max_open_positions − 1` are open, the surviving configuration bound
+  **It CAN bind on a portfolio the gate sized by itself. The old proof was
+  wrong, and this is the bound (v1.78).** Until v1.78 this contract said the
+  check "cannot bind on a portfolio the gate sized by itself", reasoning that if
+  every open position cost at most one budget and at most
+  `max_open_positions − 1` are open, the configuration bound
   `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT ≤ 100` guarantees headroom for another.
-  It binds on holdings the gate did not size: a position adopted by
+  The antecedent does not hold. `risk.sizing.size_position` bounds lots at the
+  **pre-submission** price; `execution.orders.open_position` fills at a market
+  price and the position's recorded entry price — the one `open_cost` is summed
+  from — is the *fill*. A fill above the sized price makes a position cost more
+  than one budget (#111, failure class 4: a guarantee true only because nobody
+  computed the case that breaks it).
+
+  Write `s_i ≥ 0` for entry `i`'s upward fill slippage as a fraction of its
+  sized price, so that position costs at most `budget × (1 + s_i)`. With
+  `M = max_open_positions`, `P = POSITION_SIZE_PCT`, `k ≤ M − 1` positions open
+  and `S = Σ s_i` over them, headroom is at least
+
+      allocated − k × budget − S × budget
+
+  and at the configuration bound's worst case, `M × P = 100` and `k = M − 1`,
+  that is `budget × (1 − S)`. So `PORTFOLIO_EXPOSURE` binds on a self-sized
+  portfolio exactly when the accumulated slippage across the open positions
+  exceeds one budget less one lot: `S > 1 − lot_cost / budget`. A configuration
+  with slack — `M × P < 100` — carries `allocated × (100 − M × P) / 100` of
+  extra room before that point. The bound is on the **sum**, not on any single
+  entry: many small slippages reach it exactly as one large one does.
+
+  **A binding `PORTFOLIO_EXPOSURE` on a self-sized portfolio is therefore
+  correct behaviour, not a bug** — it is the headroom rule doing its job on real
+  fills, and refusing an entry is the right outcome, since the money genuinely
+  is not there. The diagnosis lives elsewhere: `config.fill_slippage_alert_pct`
+  (v1.74) and the per-entry alert in `execution.orders.open_position` (v1.74)
+  measure each `s_i` as it happens, so a portfolio that drifts into this state
+  announced every step. **No repair is available in this module**: `risk.gate`
+  is pure, sizing decides before any fill exists, and the difference between a
+  sized price and an achieved one is not knowable at the moment of sizing. What
+  a *pre-emptive* bound would take — sizing at a haircut to the reference price,
+  or a slippage budget deducted from `allocated` — is a money-path behaviour
+  change, and **it is an open decision the owner has not made**. Nothing here
+  implements one.
+
+  It also binds on holdings the gate did not size: a position adopted by
   `broker.reconcile` during crash recovery, or `ALLOCATED_CAPITAL` lowered
   between runs. Those are precisely the runtime cases #16 names, and the ones a
   configuration-time check cannot see. The gate

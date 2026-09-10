@@ -42,6 +42,15 @@ Module **12** of 42 in `dependency-order.md`. Everything before it is complete a
   - **spendable** — `cash × (100 − reserve_pct)%`, a buying-power reserve.
 - The returned value must satisfy, for every possible input:
   `lots × lot_size × price ≤ allocated − open_cost` and `≤ cash`.
+- **That guarantee is over `price`, the price passed in — not over the price the
+  order achieves (v1.78).** This function is pure and runs before any order
+  exists, so the fill is not knowable here. A market buy filling above `price`
+  costs more than the bound, and the excess is recorded as the position's entry
+  price and summed into the next call's `open_cost`. Nothing here is wrong; the
+  consequence is stated where it lands, under `risk.gate`'s
+  `PORTFOLIO_EXPOSURE`, whose "cannot bind" proof omitted exactly this (#111).
+  `reserve_pct` softens the cash side of it and bounds nothing on the headroom
+  side.
 - `reserve_pct` holds back a slice of cash so that fees, price movement between
   sizing and fill, and lot rounding cannot turn an approved order into one the
   broker refuses for insufficient funds. **It is a reserve, not an estimate of
