@@ -253,7 +253,7 @@ the condition it would guard: a job is no longer skipped, only run late. The
 weekly report carries its own timestamp, so lateness is visible in the artefact
 rather than in a second alert with a threshold nobody chose.
 
-**`async run(ctx) → None`** — **the sole owner of composition.** Every
+**`async run(ctx: AppContext) → None`** — **the sole owner of composition.** Every
 long-running task in the system is started here and nowhere else, and this list
 is exhaustive:
 

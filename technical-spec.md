@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.75
+**Version:** 1.76
 **Date:** 2026-09-10
 **Implements:** `business-brief.md` v1.13
 
@@ -340,6 +340,15 @@ it proves.
   (proves a configuration that can never profit is rejected).
 - An empty `WATCHLIST` raises `ConfigError` (proves the bot cannot start with
   nothing to trade).
+- A cross-field failure whose message names two variables sets `variable` to the
+  field being validated — `TAKE_PROFIT_PCT` for the take-profit-versus-stop-loss
+  check — and the message still names both (proves the attribute picks the
+  offender rather than the first word of the message).
+- A raise site that omits the `variable` keyword raises `TypeError` (proves the
+  keyword is required. This is the case worth having: a test asserting only that
+  `variable` holds the right string stays green against a literal hardcoded
+  inside the raising helper, because the helper's message begins with that same
+  word).
 - The string form of the config object contains neither token (proves accidental
   logging of the whole config leaks nothing).
 - `allow_foreign_holdings` defaults to false when unset, and a near-miss spelling
@@ -507,6 +516,47 @@ it proves.
   reason captured).
 - A terminal order cannot transition back to a non-terminal state (proves the
   status machine is one-way).
+
+**`db.stop_orders`**
+- `record_placing` writes a `PLACING` row that `active_for_position` then returns
+  (happy path — proves the intent is durable before the broker is called, which
+  is the whole reason the row exists).
+- `activate` moves that row to `ACTIVE` and reads the broker's `stop_order_id`
+  back off it (proves the identifier the cancel path later needs is stored, not
+  reconstructed).
+- `record_placing` twice with the same key raises `DuplicateOrderError` and
+  leaves one row (proves the uniqueness invariant is enforced at the storage
+  layer, as it is for `db.orders`).
+- `settle` to each of `CANCELLED`, `EXECUTED`, `ORPHANED` and `FAILED` reads back
+  that status with its `settled_at` (proves all four terminal outcomes are
+  recordable — a stop the exchange fired and a stop that never stood must be
+  distinguishable afterwards).
+- `settle` on an already-settled row raises `OrderStateError` and leaves the
+  first outcome in place (proves the transition out of a terminal status is
+  refused, per the contract, so a late duplicate report cannot rewrite what
+  happened).
+- `settle` to a non-terminal status raises `OrderStateError` (proves the status
+  argument is validated rather than written through).
+- `activate` on an already-terminal row raises `OrderStateError` (proves a stop
+  that has been cancelled cannot be resurrected as standing — the state in which
+  both owners would believe they hold the trigger).
+- `activate` or `settle` on a key that was never recorded raises
+  `OrderStateError` (proves an unknown key is an error, never a silent no-op that
+  would leave the caller believing a stop is standing).
+- `settle` with a naive `settled_at` raises `ValueError` (proves rule 22 at this
+  boundary).
+- `active_for_position` returns `None` for a position with no standing stop, and
+  the single row when one stands (proves the "never a list" contract is a scalar
+  result, so no caller branches on a collection).
+- With two standing rows forced onto one position, `active_for_position` raises
+  `OrderStateError` (proves the invariant is detected rather than resolved by
+  picking one — this is the table that decides who holds a position's stop, and
+  guessing here is how a position ends up sold twice).
+- `list_active` returns only `ACTIVE` rows, oldest first, and an empty list when
+  none stand (proves reconciliation sees standing stops and never `None`).
+- A settled stop disappears from `list_active` and from `active_for_position`
+  (proves settling is what retires a stop from both reconciliation views, so a
+  fired stop is not re-adopted on the next restart).
 
 **`db.cooldowns`**
 - A ticker with no recorded cooldown is not in cooldown (happy path).
@@ -861,10 +911,40 @@ Additionally, `strategies.ml_model`:
   `max_position_pct=20`, a state `config.load()` rejects — so a green test
   asserted behaviour the assembled system could not produce (#15).
 - A clean signal in an unremarkable portfolio is approved (happy path).
-- Each rejection reason is produced by a state constructed to trigger exactly it:
-  halted, session closed, position cap, maximum positions, cooldown active,
-  insufficient cash, zero lots, instrument not trading, and an existing position
-  in the same ticker (proves every branch, one test each).
+- Each rejection reason this module can produce is produced by a state
+  constructed to trigger exactly it: `HALTED`, `SESSION_CLOSED`,
+  `INSTRUMENT_NOT_TRADING`, `DUPLICATE_TICKER`, `MAX_POSITIONS`,
+  `COOLDOWN_ACTIVE`, `INSUFFICIENT_CASH`, `PORTFOLIO_EXPOSURE` and `ZERO_LOTS`
+  (proves every branch, one test each — nine reasons, in the priority order the
+  contract fixes).
+- **The list said "position cap" until v1.76 (#99).** `POSITION_CAP` was removed
+  in v1.30 and `PORTFOLIO_EXPOSURE` took its place (§4 `models`), so the
+  enumeration required a test for a reason no code can produce while claiming to
+  prove every branch — in the module held to a 95% floor precisely because a
+  missed branch here is a financial defect. The `PORTFOLIO_EXPOSURE` case above
+  is the one that replaces it.
+- **`BROKER_LOT_LIMIT` is deliberately absent from this list.** #99 read the
+  enumeration as omitting a live reason; it is not live. The reason is defined in
+  `RejectionReason` (§4 `models`) and produced by no module in `zarabot/` today.
+  It cannot be produced *here*: the broker's per-account maximum is read with
+  `broker.client.get_max_lots`, and this module is pure — no I/O, no broker (the
+  purity test below asserts exactly that). A test constructing it in `risk.gate`
+  would be a test of an unreachable branch, which is the shape of the
+  `POSITION_CAP` case this contract already deleted once.
+
+  **Open decision — not settled here.** `BROKER_LOT_LIMIT` has no producer.
+  Either (a) it belongs to `execution.orders`, which already reads
+  `get_max_lots` and, on a maximum of zero, cancels the entry and settles the
+  order `REJECTED` with the message "max lots is 0" (§4 `execution.orders`) —
+  in which case the reason should be recorded on that path, or the enum member
+  should go and the order row's message is the whole record; or (b) the lot
+  ceiling should be read before the gate and passed in as a plain argument, which
+  keeps `risk.gate` pure and makes the reason the gate's to return. **Until it is
+  decided, (a)-without-the-enum is what is built**: the rejection is recorded as
+  an order row and no `RejectionReason` of that name is ever constructed. No
+  agent may add a producer, a test, or a `signals` row for this reason on its own
+  reading — the enum member is inert and that is the settled state of the code,
+  not an oversight to be tidied.
 - With several violations present at once, the rejection reason is the
   highest-priority one, deterministically (proves rejection reporting is stable
   and not order-dependent).
@@ -1432,6 +1512,28 @@ and only separate reasons make the rejection log diagnostic.
 `SessionInfo`, `RiskDecision`, `HaltState`, `ReconciliationReport`,
 `TradingCalendar`, `BacktestResult`.
 
+**`SessionInfo` carries one predicate over its own two fields (v1.76).**
+
+**`in_closing_window(now: datetime, minutes: int = 15) → bool`** — a method on
+`SessionInfo`. True during the final `minutes` of that session, inclusive of the
+window start and exclusive of `end`; `False` when the day is not a trading day or
+either instant is absent. Raises `ValueError` on a naive `now`. No I/O, no clock,
+no configuration — it reads `start`, `end` and its two arguments and nothing
+else, which is why it is a comparison over the dataclass's own fields rather than
+the "logic" the paragraph above excludes.
+
+This is written down because `lifecycle.exits.evaluate` calls
+`session.in_closing_window(now)` on a `SessionInfo` (§4 `lifecycle.exits`), and
+until v1.76 the only function of that name the spec defined was
+`market.session.in_closing_window(now, minutes)` — a module function, in a module
+that does I/O, taking two arguments where the caller passes one (#100). The call
+therefore resolved to nothing in the spec, and an implementer either invented a
+method on a type §4 granted none, or made the pure exit path call an I/O module.
+The built code has had the method since `models` was written
+(`SessionInfo.in_closing_window`, recorded in `interfaces.md`); the spec is
+catching up to it, and `market.session.in_closing_window` stays as the
+module-level convenience that resolves "the current session" and delegates here.
+
 `OrderRecord` carries `broker_order_id` and `commission_alerted_at` (v1.39).
 `key` is the bot's own idempotency key, and for a row describing an execution the
 **exchange** performed — a stop the broker fired on the bot's behalf — the broker
@@ -1532,6 +1634,19 @@ Loads and validates every setting once at startup.
   security control that one environment variable can switch off silently is a
   control nobody can audit after the fact. `app.startup` raises the matching
   alert — see its own contract.
+- **`ConfigError(message: str, *, variable: str)` (v1.76).** `variable` is the
+  environment variable name, set at the raise site from the name being validated,
+  and it is never derived by parsing the message. The keyword is **required**:
+  a raise site that omits it is a `TypeError`, which is what stops the attribute
+  from quietly becoming optional and then absent. Where a check compares two
+  variables, `variable` is the one being validated and the message names both —
+  `TAKE_PROFIT_PCT` for the take-profit-versus-stop-loss check,
+  `MAX_OPEN_POSITIONS` for the allocation check. `app.startup` reads
+  `exc.variable` to name the offender in its CRITICAL line, so this is a
+  contract, not an implementation detail. It was recorded in `interfaces.md` and
+  described in no contract until v1.76, which meant a re-run of `01-config` from
+  the spec alone would have produced a three-argument constructor and dropped the
+  attribute, taking `app.startup`'s alert with it (#166).
 - Raises `ConfigError` naming the offending variable when: a required variable is
   missing or empty; a numeric value is out of range;
   `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `CASH_RESERVE_PCT` is
@@ -1596,7 +1711,7 @@ Configures structured logging and enforces secret redaction.
 
 Owns schema creation and version tracking.
 
-**`async apply(conn: Connection) → int`**
+**`async apply(conn: aiosqlite.Connection) → int`**
 - Applies every migration whose version exceeds the database's recorded version,
   in ascending order, each in its own transaction.
 - Returns the resulting schema version.
@@ -2069,7 +2184,9 @@ its own (rule 31).
 
 **`async active_until(ticker: str, minutes: int) → datetime | None`** — for display in command replies.
 
-### `zarabot/db/signals.py`, `zarabot/db/snapshots.py`
+### `zarabot/db/signals.py`
+
+**Sole owner of `signals` rows.**
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
@@ -2079,11 +2196,12 @@ its own (rule 31).
 
 **`async record(signal: Signal, decision: RiskDecision) → None`** — stores every signal, approved or rejected, with its reason.
 
-**`async list_for_period(start: date, end: date) → list[...]`** — for the weekly report.
+**`async list_for_period(start: date, end: date) → list[tuple[Signal, RiskDecision]]`**
+— every signal whose Moscow calendar date falls in `[start, end]`, oldest first,
+each paired with the decision recorded against it. For the weekly report. Empty
+list when none.
 
-**`async write_daily(snapshot) → None`** — upserts on the Moscow date; a second write for the same date updates rather than duplicates.
-
-**These two modules own rule 12 (v1.75).** Signals, snapshots and the instruments
+**Owns rule 12 (v1.75, split v1.76).** Signals, snapshots and the instruments
 cache are the non-critical write paths: a failed write here is logged at ERROR
 and does not propagate, because losing an analytics row must not stop trading.
 The swallow is `aiosqlite.Error` and nothing wider — every other exception
@@ -2091,6 +2209,42 @@ propagates and reaches rule 21's supervisor with its traceback. An analytics
 path is where a silently dropped `TypeError` survives longest, since nothing
 downstream misses the row until a weekly report is composed without it. Contrast
 `db.cooldowns` above, which is rule 11 and propagates everything.
+
+### `zarabot/db/snapshots.py`
+
+**Sole owner of `daily_snapshots` rows.**
+
+Must not call `aiosqlite.connect` and must not close the connection it uses. All
+SQL runs on `db.connection.shared()`; a private connection is a contract
+violation. **Every write runs inside `db.connection.transaction()`**; this module
+never issues `BEGIN`, `commit` or `rollback` itself, and holds no write lock of
+its own (rule 31).
+
+**`async write_daily(snapshot: DailySnapshot) → None`** — upserts on the Moscow date; a second write for the same date updates rather than duplicates.
+
+**`async list_for_period(start: date, end: date) → list[DailySnapshot]`** — rows
+whose `trade_date` falls in `[start, end]`, oldest first. For the weekly report.
+Empty list when none.
+
+**Owns rule 12 (v1.75, split v1.76).** Signals, snapshots and the instruments
+cache are the non-critical write paths: a failed write here is logged at ERROR
+and does not propagate, because losing an analytics row must not stop trading.
+The swallow is `aiosqlite.Error` and nothing wider — every other exception
+propagates and reaches rule 21's supervisor with its traceback. An analytics
+path is where a silently dropped `TypeError` survives longest, since nothing
+downstream misses the row until a weekly report is composed without it. Contrast
+`db.cooldowns` above, which is rule 11 and propagates everything.
+
+**Why this heading was split (v1.76).** Until v1.76 these two modules shared one
+`###` heading, and `list_for_period` was written once as
+`→ list[...]` because the elision was standing for two different real return
+types — `list[tuple[Signal, RiskDecision]]` here and `list[DailySnapshot]` there
+(#116). One heading cannot carry two signatures of the same name: the signature
+comparison in `scripts/ci/check_docs.py` reads the last one and compares it
+against both modules, so one of the two was guaranteed to be wrong and the
+divergence lived in an allowlist instead. Splitting the heading is what makes
+each signature exact, which is what `AGENTS.md` requires. `make_tasks.py` needs
+no change: its spec-keys are already the two distinct file paths.
 
 ### `zarabot/broker/client.py`
 
@@ -2676,15 +2830,23 @@ already names it.
   for `opens_at` and `closes_at` only, which required a `trade_date` the
   `SessionInfo` cannot supply. Emit **`clock.moscow_date(clock.now())`**
   instead.
-- **`refresh` takes no `now` parameter, and calls `clock` itself (v1.68).**
+- **`refresh` takes no `now` parameter, and calls `clock` itself (v1.68;
+  corrected v1.76).**
   v1.67 said "where `now` is the refresh instant" while the signature above is
   `refresh(days: int) → None`, so `now` was unbound in the contract — an
   implementer had to invent either a parameter that does not exist or a call the
   contract had not named. `clock` is the sole owner of "now" (§Global
   conventions), and this module already does I/O, so calling `clock.now()` here
   is allowed and is the intended reading. The signature does not change: adding
-  a `now` argument would push the decision onto every caller for no gain, and
-  `app.startup` and `app.loops` both call `refresh` without one.
+  a `now` argument would push the decision onto every caller for no gain.
+- **That sentence used to end "and `app.startup` and `app.loops` both call
+  `refresh` without one", which read as argument-free (corrected v1.76).** It is
+  true of `now` only. `days` is a required positional parameter and every caller
+  supplies it: `app.startup` and `app.loops` each call
+  `await refresh(_SCHEDULE_DAYS)`, a module constant of 14 days. Startup step 5
+  wrote the call as `market.session.refresh()`, which no implementation could
+  satisfy and which contradicted the signature three lines above it (#104); it is
+  written with its argument now.
 - **`opens_at` and `closes_at` are null on `session_closed`, and that is the
   whole point of the event.** A closed day has no open and no close; what the
   record must still answer is *which day*. A `session_closed` whose `trade_date`
@@ -2822,7 +2984,7 @@ is the failure this cadence exists to prevent.
 
 **`Strategy` protocol** — `name: str`, `lookback: int`, and:
 
-**`evaluate(ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
 - Pure. No I/O, no clock, no database, no broker.
 - Returns a `BUY` signal or `None`. **Must never return a `SELL` signal** —
   strategies enter, the lifecycle exits.
@@ -2865,7 +3027,7 @@ unknown name.
   no other code computes these features. Duplicating it is a critical defect —
   see the sandbox contract.
 
-**`evaluate(...) → Signal | None`** — as the protocol, returning `None` below
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`** — as the protocol, returning `None` below
 `CONFIDENCE_THRESHOLD`, a module constant rather than an environment variable.
 The threshold is a property of the trained model, not of the deployment: moving
 it changes what the model means, so it travels with the code and a redeploy, the
@@ -2967,7 +3129,10 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
   recorded on the position, not inferred.
 - `TAKE_PROFIT` when `price ≥ position.target_price`.
 - `MAX_AGE` when `trading_days_open ≥ MAX_HOLDING_DAYS` **and**
-  `session.in_closing_window(now)`.
+  `session.in_closing_window(now)` — the `SessionInfo` method (§4 `models`),
+  with `minutes` left at its default of 15. This is a comparison over the
+  `SessionInfo` argument's own fields, so the module stays pure: it does not call
+  `market.session`, which does I/O.
 - **`trading_days_open` is `None` when the age could not be measured, and then
   `MAX_AGE` never fires (v1.44).** The recorded calendar may not reach back to a
   position's entry after an outage longer than the schedule window, and the
@@ -3505,7 +3670,7 @@ Fixed ordering; each step completes before the next begins:
    not at import, and not inside a repository — and `apply` receives the shared
    connection rather than opening a second one.
 4. `strategies.registry.enabled()`, including model load if configured.
-5. `market.session.refresh()`.
+5. `market.session.refresh(days)`, with the caller's schedule window — 14 days.
 6. `execution.orders.resolve_unfinished()`.
 7. `broker.reconcile.reconcile()`, then apply its remedies via
    `execution.orders`: re-protect unprotected positions, cancel orphaned stops,
@@ -3876,7 +4041,7 @@ the condition it would guard: a job is no longer skipped, only run late. The
 weekly report carries its own timestamp, so lateness is visible in the artefact
 rather than in a second alert with a threshold nobody chose.
 
-**`async run(ctx) → None`** — **the sole owner of composition.** Every
+**`async run(ctx: AppContext) → None`** — **the sole owner of composition.** Every
 long-running task in the system is started here and nowhere else, and this list
 is exhaustive:
 
@@ -3913,7 +4078,7 @@ restarted with backoff. A failure in one task must never terminate another.
 
 ### `zarabot/app/shutdown.py`
 
-**`async shutdown(ctx, signal) → None`**
+**`async shutdown(ctx: AppContext, signal: int) → None`**
 - **Stops entries before it drains, and now actually does (v1.45).** It calls
   `app.loops.stop_entries()` first, then settles. This contract and the
   function's own docstring both claimed it stopped accepting new signals, and
@@ -4021,7 +4186,7 @@ by historical bars. It is the piece that makes a backtest mean something,
 because with it the simulation does not *resemble* the live path — it **is** the
 live path, with only the broker and the clock replaced.
 
-- **`SimulatedExchange(bars, instruments, cash, slippage, commission)`** holds
+- **`SimulatedExchange(bars: dict[str, list[Candle]], instruments: dict[str, Instrument], cash: Decimal, slippage: Decimal, commission: Commission, reject_stops: bool = False)`** holds
   simulated cash, holdings, submitted orders and standing stop orders, and a
   cursor into the bars. `advance(moment, phase)` moves the cursor and reports
   that **phase** of each instrument's current bar as its last price — `OPEN`,

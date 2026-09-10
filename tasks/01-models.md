@@ -56,6 +56,28 @@ and only separate reasons make the rejection log diagnostic.
 `SessionInfo`, `RiskDecision`, `HaltState`, `ReconciliationReport`,
 `TradingCalendar`, `BacktestResult`.
 
+**`SessionInfo` carries one predicate over its own two fields (v1.76).**
+
+**`in_closing_window(now: datetime, minutes: int = 15) → bool`** — a method on
+`SessionInfo`. True during the final `minutes` of that session, inclusive of the
+window start and exclusive of `end`; `False` when the day is not a trading day or
+either instant is absent. Raises `ValueError` on a naive `now`. No I/O, no clock,
+no configuration — it reads `start`, `end` and its two arguments and nothing
+else, which is why it is a comparison over the dataclass's own fields rather than
+the "logic" the paragraph above excludes.
+
+This is written down because `lifecycle.exits.evaluate` calls
+`session.in_closing_window(now)` on a `SessionInfo` (§4 `lifecycle.exits`), and
+until v1.76 the only function of that name the spec defined was
+`market.session.in_closing_window(now, minutes)` — a module function, in a module
+that does I/O, taking two arguments where the caller passes one (#100). The call
+therefore resolved to nothing in the spec, and an implementer either invented a
+method on a type §4 granted none, or made the pure exit path call an I/O module.
+The built code has had the method since `models` was written
+(`SessionInfo.in_closing_window`, recorded in `interfaces.md`); the spec is
+catching up to it, and `market.session.in_closing_window` stays as the
+module-level convenience that resolves "the current session" and delegates here.
+
 `OrderRecord` carries `broker_order_id` and `commission_alerted_at` (v1.39).
 `key` is the bot's own idempotency key, and for a row describing an execution the
 **exchange** performed — a stop the broker fired on the bot's behalf — the broker

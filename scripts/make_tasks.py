@@ -24,7 +24,7 @@ M = [
  ("5b","db.connection","zarabot/db/connection.py","`db.connection`",[],[11,30],"Sole owner of the process-wide SQLite connection. Opened by app.startup, closed by app.shutdown, never at import. Repositories, state.halt and broker.reconcile all run their SQL on it and none opens its own."),
  (6,"db.positions","zarabot/db/positions.py","`db.positions`",["positions","position_events"],[11,12,30],"Sole owner of position rows. Positions are never deleted; closing is a state transition, because the history is the point of the project."),
  (7,"db.orders","zarabot/db/orders.py","`db.orders`",["orders"],[5,11,12,30],"Sole owner of order rows. Records intent BEFORE the broker is called, which is what makes a crash mid-submission recoverable."),
- (8,"db.stop_orders","zarabot/db/stop_orders.py",None,["stop_orders"],[11,12,30],"Sole owner of stop-order rows. Tracks the standing stop the exchange holds for each open position."),
+ (8,"db.stop_orders","zarabot/db/stop_orders.py","`db.stop_orders`",["stop_orders"],[11,12,30],"Sole owner of stop-order rows. Tracks the standing stop the exchange holds for each open position."),
  ("8b","db.job_runs","zarabot/db/job_runs.py","`db.job_runs`",["job_runs"],[12,30],"Sole owner of job_runs. Periodic jobs ask has_run so a restart cannot double-send the weekly report or skip a backup forever."),
  ("8c","db.trading_days","zarabot/db/trading_days.py","`db.trading_days`",["trading_days"],[12,30],"Sole owner of trading_days. The cached exchange calendar, including days that later become holidays."),
  (9,"db.cooldowns","zarabot/db/cooldowns.py","`db.cooldowns`",["cooldowns"],[12,30],"Sole owner of per-instrument re-entry cooldowns, which replace a daily order cap as the runaway-loop protection."),

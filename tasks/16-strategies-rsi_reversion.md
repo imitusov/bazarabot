@@ -18,7 +18,7 @@ Module **16** of 42 in `dependency-order.md`. Everything before it is complete a
 
 **`Strategy` protocol** — `name: str`, `lookback: int`, and:
 
-**`evaluate(ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
 - Pure. No I/O, no clock, no database, no broker.
 - Returns a `BUY` signal or `None`. **Must never return a `SELL` signal** —
   strategies enter, the lifecycle exits.

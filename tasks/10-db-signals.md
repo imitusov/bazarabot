@@ -30,7 +30,9 @@ Module **10** of 42 in `dependency-order.md`. Everything before it is complete a
 
 ## Module contract
 
-### `zarabot/db/signals.py`, `zarabot/db/snapshots.py`
+### `zarabot/db/signals.py`
+
+**Sole owner of `signals` rows.**
 
 Must not call `aiosqlite.connect` and must not close the connection it uses. All
 SQL runs on `db.connection.shared()`; a private connection is a contract
@@ -40,11 +42,12 @@ its own (rule 31).
 
 **`async record(signal: Signal, decision: RiskDecision) → None`** — stores every signal, approved or rejected, with its reason.
 
-**`async list_for_period(start: date, end: date) → list[...]`** — for the weekly report.
+**`async list_for_period(start: date, end: date) → list[tuple[Signal, RiskDecision]]`**
+— every signal whose Moscow calendar date falls in `[start, end]`, oldest first,
+each paired with the decision recorded against it. For the weekly report. Empty
+list when none.
 
-**`async write_daily(snapshot) → None`** — upserts on the Moscow date; a second write for the same date updates rather than duplicates.
-
-**These two modules own rule 12 (v1.75).** Signals, snapshots and the instruments
+**Owns rule 12 (v1.75, split v1.76).** Signals, snapshots and the instruments
 cache are the non-critical write paths: a failed write here is logged at ERROR
 and does not propagate, because losing an analytics row must not stop trading.
 The swallow is `aiosqlite.Error` and nothing wider — every other exception

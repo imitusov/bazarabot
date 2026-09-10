@@ -42,7 +42,7 @@ Fixed ordering; each step completes before the next begins:
    not at import, and not inside a repository — and `apply` receives the shared
    connection rather than opening a second one.
 4. `strategies.registry.enabled()`, including model load if configured.
-5. `market.session.refresh()`.
+5. `market.session.refresh(days)`, with the caller's schedule window — 14 days.
 6. `execution.orders.resolve_unfinished()`.
 7. `broker.reconcile.reconcile()`, then apply its remedies via
    `execution.orders`: re-protect unprotected positions, cancel orphaned stops,

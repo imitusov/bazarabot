@@ -16,7 +16,7 @@ Module **34** of 42 in `dependency-order.md`. Everything before it is complete a
 
 ### `zarabot/app/shutdown.py`
 
-**`async shutdown(ctx, signal) → None`**
+**`async shutdown(ctx: AppContext, signal: int) → None`**
 - **Stops entries before it drains, and now actually does (v1.45).** It calls
   `app.loops.stop_entries()` first, then settles. This contract and the
   function's own docstring both claimed it stopped accepting new signals, and

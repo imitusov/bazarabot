@@ -105,7 +105,45 @@ From `technical-spec.md` §8. Handle each exactly as written.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-No dedicated test block in §3.2. Derive cases from the contract above: happy path, every early return, every boundary, and every documented exception.
+- `record_placing` writes a `PLACING` row that `active_for_position` then returns
+  (happy path — proves the intent is durable before the broker is called, which
+  is the whole reason the row exists).
+- `activate` moves that row to `ACTIVE` and reads the broker's `stop_order_id`
+  back off it (proves the identifier the cancel path later needs is stored, not
+  reconstructed).
+- `record_placing` twice with the same key raises `DuplicateOrderError` and
+  leaves one row (proves the uniqueness invariant is enforced at the storage
+  layer, as it is for `db.orders`).
+- `settle` to each of `CANCELLED`, `EXECUTED`, `ORPHANED` and `FAILED` reads back
+  that status with its `settled_at` (proves all four terminal outcomes are
+  recordable — a stop the exchange fired and a stop that never stood must be
+  distinguishable afterwards).
+- `settle` on an already-settled row raises `OrderStateError` and leaves the
+  first outcome in place (proves the transition out of a terminal status is
+  refused, per the contract, so a late duplicate report cannot rewrite what
+  happened).
+- `settle` to a non-terminal status raises `OrderStateError` (proves the status
+  argument is validated rather than written through).
+- `activate` on an already-terminal row raises `OrderStateError` (proves a stop
+  that has been cancelled cannot be resurrected as standing — the state in which
+  both owners would believe they hold the trigger).
+- `activate` or `settle` on a key that was never recorded raises
+  `OrderStateError` (proves an unknown key is an error, never a silent no-op that
+  would leave the caller believing a stop is standing).
+- `settle` with a naive `settled_at` raises `ValueError` (proves rule 22 at this
+  boundary).
+- `active_for_position` returns `None` for a position with no standing stop, and
+  the single row when one stands (proves the "never a list" contract is a scalar
+  result, so no caller branches on a collection).
+- With two standing rows forced onto one position, `active_for_position` raises
+  `OrderStateError` (proves the invariant is detected rather than resolved by
+  picking one — this is the table that decides who holds a position's stop, and
+  guessing here is how a position ends up sold twice).
+- `list_active` returns only `ACTIVE` rows, oldest first, and an empty list when
+  none stand (proves reconciliation sees standing stops and never `None`).
+- A settled stop disappears from `list_active` and from `active_for_position`
+  (proves settling is what retires a stop from both reconciliation views, so a
+  fired stop is not re-adopted on the next restart).
 
 ## Expected output
 

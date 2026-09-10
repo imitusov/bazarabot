@@ -63,15 +63,23 @@ Module **22** of 42 in `dependency-order.md`. Everything before it is complete a
   for `opens_at` and `closes_at` only, which required a `trade_date` the
   `SessionInfo` cannot supply. Emit **`clock.moscow_date(clock.now())`**
   instead.
-- **`refresh` takes no `now` parameter, and calls `clock` itself (v1.68).**
+- **`refresh` takes no `now` parameter, and calls `clock` itself (v1.68;
+  corrected v1.76).**
   v1.67 said "where `now` is the refresh instant" while the signature above is
   `refresh(days: int) → None`, so `now` was unbound in the contract — an
   implementer had to invent either a parameter that does not exist or a call the
   contract had not named. `clock` is the sole owner of "now" (§Global
   conventions), and this module already does I/O, so calling `clock.now()` here
   is allowed and is the intended reading. The signature does not change: adding
-  a `now` argument would push the decision onto every caller for no gain, and
-  `app.startup` and `app.loops` both call `refresh` without one.
+  a `now` argument would push the decision onto every caller for no gain.
+- **That sentence used to end "and `app.startup` and `app.loops` both call
+  `refresh` without one", which read as argument-free (corrected v1.76).** It is
+  true of `now` only. `days` is a required positional parameter and every caller
+  supplies it: `app.startup` and `app.loops` each call
+  `await refresh(_SCHEDULE_DAYS)`, a module constant of 14 days. Startup step 5
+  wrote the call as `market.session.refresh()`, which no implementation could
+  satisfy and which contradicted the signature three lines above it (#104); it is
+  written with its argument now.
 - **`opens_at` and `closes_at` are null on `session_closed`, and that is the
   whole point of the event.** A closed day has no open and no close; what the
   record must still answer is *which day*. A `session_closed` whose `trade_date`

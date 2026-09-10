@@ -35,7 +35,7 @@ by historical bars. It is the piece that makes a backtest mean something,
 because with it the simulation does not *resemble* the live path — it **is** the
 live path, with only the broker and the clock replaced.
 
-- **`SimulatedExchange(bars, instruments, cash, slippage, commission)`** holds
+- **`SimulatedExchange(bars: dict[str, list[Candle]], instruments: dict[str, Instrument], cash: Decimal, slippage: Decimal, commission: Commission, reject_stops: bool = False)`** holds
   simulated cash, holdings, submitted orders and standing stop orders, and a
   cursor into the bars. `advance(moment, phase)` moves the cursor and reports
   that **phase** of each instrument's current bar as its last price — `OPEN`,
