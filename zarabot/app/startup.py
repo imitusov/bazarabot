@@ -9,12 +9,16 @@ from decimal import Decimal
 from typing import NoReturn
 
 from zarabot.broker.client import (
+    BrokerRateLimited,
+    BrokerUnavailable,
+    InstrumentNotFound,
+    PriceRejected,
     get_instrument,
     get_last_price,
     list_stop_orders,
 )
 from zarabot.broker.reconcile import reconcile
-from zarabot.clock import now
+from zarabot.clock import now, to_moscow
 from zarabot.config import Config, ConfigError, load
 from zarabot.db.connection import connect, shared
 from zarabot.db.migrations import MigrationError, apply
@@ -271,6 +275,17 @@ class _Reachability:
         return not self.affordable and bool(self.unaffordable)
 
 
+# Rule 9's classes for `get_instrument` and `get_last_price`, plus the quote
+# rejection `get_last_price` raises on an implausible price. These are what
+# "the instrument or price cannot be read" means; anything else is a defect.
+_UNREADABLE = (
+    BrokerUnavailable,
+    BrokerRateLimited,
+    InstrumentNotFound,
+    PriceRejected,
+)
+
+
 async def _reachability(cfg: Config) -> _Reachability:
     """Step 8a: compare each watchlist lot cost against one position budget.
 
@@ -290,14 +305,22 @@ async def _reachability(cfg: Config) -> _Reachability:
             instrument = await get_instrument(ticker)
             price = await get_last_price(instrument.figi)
             lot_cost = Decimal(instrument.lot) * price
-        except Exception:  # noqa: BLE001 — step 8a never prevents startup
+        except _UNREADABLE:
             # §4 `app.startup` step 8a: "a ticker whose instrument or price
             # cannot be read is excluded from the judgement and named
             # separately", and "this step never raises `StartupError`, and
             # never prevents startup". A diagnostic that refused to run would
-            # abandon every open position, its exits and its stops, so this
-            # one catch stays blind by contract. The tickers it excludes are
-            # reported as `unknown`, never folded into either count.
+            # abandon every open position, its exits and its stops. The
+            # tickers it excludes are reported as `unknown`, never folded into
+            # either count.
+            #
+            # Exactly as broad as that sentence, and no broader (#201). "Cannot
+            # be read" is a broker condition, and `_UNREADABLE` is the full set
+            # of them these two calls raise. An `AttributeError` from a renamed
+            # SDK field is not one: swallowing it would report a wrong
+            # cheapest-lot figure as though the check had run, in the module
+            # whose job is to establish the system is sound. It propagates to
+            # the rule 15 boundary below, which alerts and names the type.
             unknown.append(ticker)
             continue
         if lot_cost <= 0:
@@ -421,6 +444,32 @@ def _ready_text(
     )
 
 
+def _log_observed_time() -> None:
+    """Rule 29: the observed host time, in UTC and MSK, before anything else.
+
+    Clock accuracy is a deployment requirement (V9 confirms NTP), so there is
+    deliberately no runtime skew check — the broker exposes no server
+    wall-clock, and the one timestamp available lags arbitrarily in a quiet
+    market. This line is the whole detector: a host whose clock or zone
+    database has drifted produces trading decisions at the wrong moment with
+    no other symptom, and both zones are needed because UTC alone cannot show
+    a wrong Moscow offset and MSK alone cannot show a wrong instant.
+
+    Emitted immediately after `logging_setup.configure`, which is the earliest
+    point at which a log line is redacted and structured, so it is the first
+    line this module writes after every restart. The instant comes from
+    `clock.now()`; this module may not call `datetime.now()`. It carries no
+    token and no account identifier (rule 19).
+    """
+    moment = now()
+    _LOG.info(
+        "observed system time utc=%s msk=%s",
+        moment.isoformat(),
+        to_moscow(moment).isoformat(),
+        extra={"utc": moment.isoformat(), "msk": to_moscow(moment).isoformat()},
+    )
+
+
 async def start() -> AppContext:
     """Load, recover, reconcile, then alert ready. Raises StartupError."""
     try:
@@ -444,6 +493,7 @@ async def start() -> AppContext:
         cfg.log_level,
         [cfg.tinvest_token, cfg.telegram_bot_token, cfg.tinvest_account_id],
     )
+    _log_observed_time()
     stage = "database"
     try:
         await connect(str(cfg.db_path))
