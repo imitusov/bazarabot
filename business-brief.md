@@ -1,7 +1,7 @@
 # Zarabot — Business Brief
 
-**Version:** 1.12
-**Date:** 2026-08-28
+**Version:** 1.13
+**Date:** 2026-09-10
 **Status:** Ready for technical spec
 
 **Companion document.** Implementation contracts are in `technical-spec.md`.
@@ -503,12 +503,28 @@ no listening ports.
 - **`MAX_POSITION_PCT` is withdrawn.** It could never bind, and it was displayed
   in the bot's own risk summary as an active control. A limit that cannot bind is
   worse than no limit, because it is believed.
-- **Concentration risk remains unmodelled, knowingly.** Ten positions in ten
-  Russian banks are ten independent bets to every check the bot makes, and one
-  position at ten times the size to the market. A sector cap is required before
-  the watchlist holds two names in one sector; today it holds four names in four
-  sectors, so the control would bind on nothing and is deliberately deferred
-  rather than written and left untested.
+- **Concentration is not managed by sector, and a sector or correlation cap is
+  out of scope.** Ten positions in ten Russian banks are ten independent bets to
+  every check the bot makes, and one position at ten times the size to the
+  market. That is understood and accepted. This was previously written as a
+  control deferred until the watchlist held two names in one sector; that
+  promise is withdrawn, because a deferral reads as a control that will arrive
+  and this one will not. Sector is not an axis this system measures anything on:
+  it holds no sector data, a hand-written ticker→sector map would become a
+  silent concentration hole the first time it went stale, and a limit nobody can
+  check is worse than a limit nobody has — the same reasoning that withdrew
+  `MAX_POSITION_PCT` above.
+- **The axis that matters here is strategy, not sector.** Each strategy produces
+  its own signals, and per-strategy results are already the whole evidence base
+  for turning a strategy off. Grouping positions by what decided them is
+  meaningful in this system in a way that grouping them by industry is not.
+  **No per-strategy limit is set by this document**, and none may be inferred
+  from naming the axis: no number, no cap, no rejection reason. Exposure stays
+  bounded by the ceilings on the risk-limits table.
+  *Re-open condition:* if a grouping limit is ever wanted, it is per-strategy,
+  and it requires its own decision in this brief naming the number before any
+  code is written. This replaces the "two names in one sector" trigger, which no
+  longer means anything.
 - **A trade is never credited to a strategy that did not produce it.** When the
   bot recovers a fill after a crash and cannot find the signal behind it, the
   position is recorded as unattributed and shown under that name. It used to be
@@ -609,6 +625,28 @@ alerted. An entry order is never blindly resubmitted, since the usual causes —
 insufficient funds, instrument suspended, bad lot size — will only reject again.
 A rejected **exit** is the exception and is retried, as described under
 *Position lifecycle*.
+
+**When a fill lands far from the price the order was sized on.** Every entry is
+a market order, so the price the risk check sized against — the reference price
+on the signal — is not necessarily the price that is paid. When the fill lands
+beyond a configured tolerance from that reference price, **the bot alerts the
+owner and keeps the position.** It never sells a fill back automatically.
+
+The reason is that unwinding is not a correction, it is a second real trade:
+cancelling the standing stop, sending a market sell into the same book that just
+moved, and starting a re-entry cooldown on the ticker. An automatic unwind is a
+trade nobody asked for, taken at the worst moment to be trading that name, and
+it would realise a loss to undo a position whose stop and target are computed
+from the actual fill and are therefore already correct in percentage terms. What
+is wrong after a bad fill is the position's rouble size relative to the
+allocation, and that is a thing to be told about, not a thing to trade on. The
+owner is told, with the numbers, and decides.
+
+The tolerance is configuration (`FILL_SLIPPAGE_ALERT_PCT`, §18). It is an alert
+threshold and nothing else — it never blocks an order, never rejects a signal,
+and never triggers a sale. Liquidity is handled where it always has been, by
+watchlist selection: illiquid instruments are excluded (§20), not screened for
+at order time.
 
 **Uncertain order outcomes.** If a submission times out or the process dies
 between sending and confirming, the bot does not assume anything. On recovery it
@@ -758,6 +796,7 @@ of its own behaviour.
 | `ALLOCATED_CAPITAL` | Yes | — | Capital the bot may deploy, in roubles. Every risk limit is a percentage of this. |
 | `POSITION_SIZE_PCT` | No | `10` | Size of each new position as a percentage of allocated capital. |
 | `CASH_RESERVE_PCT` | No | `1` | Slice of cash held back from every order so fees and rounding cannot make an approved order unaffordable. Bounded 0–50. Not an estimate of commission. |
+| `FILL_SLIPPAGE_ALERT_PCT` | No | `2` | How far an entry fill may land from the signal's reference price before the owner is alerted. Alert only — it never blocks an order and never unwinds a position. |
 | `STOP_LOSS_PCT` | No | `5` | How far below entry price a position is closed automatically. |
 | `TAKE_PROFIT_PCT` | No | `10` | How far above entry price a position is closed automatically. |
 | `MAX_HOLDING_DAYS` | No | `3` | Trading days after which an open position is closed regardless of result. |

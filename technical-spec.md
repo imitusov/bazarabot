@@ -1,8 +1,8 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.73
-**Date:** 2026-09-08
-**Implements:** `business-brief.md` v1.11
+**Version:** 1.74
+**Date:** 2026-09-10
+**Implements:** `business-brief.md` v1.13
 
 **Companion document.** Read the brief first. When this spec and the brief
 conflict, **the brief takes precedence**.
@@ -922,6 +922,13 @@ Additionally, `strategies.ml_model`:
   (v1.61).
 - A rejected entry emits `order_rejected` and no `position_opened`.
 - A `LOCAL` degrade after three stop failures emits `stop_protection_degraded`.
+- An entry whose fill price differs from `signal.reference_price` by more than
+  `FILL_SLIPPAGE_ALERT_PCT` alerts the owner, and the position is still opened,
+  still has its stop placed, and is **not** sold back — no cancel, no sell, no
+  cooldown, and `close_position` is never called (proves the brief's alert-only
+  policy; unwinding here would be a second real trade).
+- A fill inside the tolerance raises no such alert, and the alert never changes
+  the outcome of the entry either way (proves it is an alert, not a control).
 
 **stop-order lifecycle** (`execution.orders`, `broker.reconcile`)
 - Opening a position places exactly one stop order at the computed price
@@ -1496,6 +1503,12 @@ Loads and validates every setting once at startup.
 - Adds `cash_reserve_pct`, default **1**, the slice of cash `risk.sizing` holds
   back so fees and rounding cannot make an approved order unaffordable. Bounded
   0–50; a reserve above half of cash is a configuration error, not a preference.
+- Adds `fill_slippage_alert_pct`, default **2** (v1.74), from
+  `FILL_SLIPPAGE_ALERT_PCT`. It is how far an entry fill may land from the
+  signal's reference price before `execution.orders` alerts the owner. Bounded
+  0–100. It is an **alert threshold, not a risk limit**: nothing rejects an
+  order or unwinds a position because of it, `risk.gate` never reads it, and a
+  missing value therefore takes its default rather than failing the load.
 - Adds `allow_foreign_holdings`, defaulting to **false**. The trading account is
   the bot's alone (brief v1.8); this flag is the owner's explicit acknowledgement
   that it is not, and it is deliberately awkward to set by accident. It is not a
@@ -2953,6 +2966,22 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   `lifecycle.exits` enforces that position's stop by polling instead. Force
   selling a sound position because a secondary order failed would convert an
   operational problem into a realised loss.
+- **Slippage is alerted, never unwound (v1.74).** After the entry settles, this
+  module — the only one that sees both `signal.reference_price` and the actual
+  fill price — compares them. When
+  `abs(fill_price - signal.reference_price) / signal.reference_price` exceeds
+  `config.fill_slippage_alert_pct`, it calls `telegram.notifier.alert` naming the
+  ticker, the reference price, the fill price and the difference as a percentage.
+  The position is opened, stopped and managed exactly as any other. It is **not**
+  sold back, under any tolerance: unwinding is a second real trade (cancel the
+  stop, market sell, start a cooldown) and the brief's policy is alert-and-keep.
+  Stop and target are already derived from the fill, so the percentage risk is
+  correct; what is wrong is the position's rouble size, which is reportable, not
+  tradeable. The comparison is a pure `Decimal` calculation on values already in
+  hand — no extra broker call — and a failure to send the alert must never fail
+  the entry, which has already executed. There is no §7.1 event for this: the
+  numbers are already in `order_filled` and `position_opened`, and the obligation
+  is that the owner is told.
 - Raises `OrderRejected` after recording the rejection. The entry is **not**
   retried.
 - Ordering constraint: the database write strictly precedes the broker call.
