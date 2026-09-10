@@ -410,6 +410,15 @@ async def test_startup_applies_reported_stop_remedies(
     async def _instrument(ticker: str) -> Instrument:
         return instrument
 
+    async def _last_price(figi: str) -> Decimal:
+        # Step 8a prices whatever `_instrument` returned, and this stub returns
+        # the step 7 position's instrument for every ticker, whose figi is not
+        # in PRICES. Step 8a is not this test's subject; giving it a readable
+        # price keeps it out of the way. Under the narrowed catch of #201 the
+        # fixture's `KeyError` would abort startup, which is correct — a
+        # KeyError is a defect, not an unreadable instrument.
+        return Decimal("100")
+
     async def _place(pos: Position, inst: Instrument) -> Position:
         env.append("place")
         return pos
@@ -429,6 +438,7 @@ async def test_startup_applies_reported_stop_remedies(
     monkeypatch.setattr("zarabot.app.startup.list_open", _opened)
     monkeypatch.setattr("zarabot.app.startup.list_stop_orders", _stops)
     monkeypatch.setattr("zarabot.app.startup.get_instrument", _instrument)
+    monkeypatch.setattr("zarabot.app.startup.get_last_price", _last_price)
     monkeypatch.setattr("zarabot.app.startup.place_protective_stop", _place)
     monkeypatch.setattr("zarabot.app.startup.replace_stop", _replace)
     monkeypatch.setattr("zarabot.app.startup.adopt_existing_stop", _adopt)
@@ -656,6 +666,11 @@ async def test_stop_duplicate_cancels_every_identifier_and_retains_keep(
     """
     from zarabot.app.startup import start
 
+    # Step 8a reads every watchlist instrument, so the watchlist is deliberately
+    # not the duplicate's ticker: that is what keeps `_instrument` below able to
+    # assert "no lookup for SBER" and mean step 7.
+    monkeypatch.setenv("WATCHLIST", "GAZP")
+
     keep = _stop("keep-k", "keep-id")
     dup_one = _stop("dup-1", "dup-id-1")
     dup_two = _stop("dup-2", None)
@@ -687,7 +702,12 @@ async def test_stop_duplicate_cancels_every_identifier_and_retains_keep(
         cancelled.append(stop.key)
 
     async def _instrument(ticker: str) -> object:
-        raise AssertionError("no instrument lookup for a duplicate")
+        # Step 8a legitimately reads every watchlist instrument, and the
+        # watchlist is GAZP here precisely so this assertion still means what
+        # it says: no lookup for SBER, the duplicate's ticker.
+        if ticker == "SBER":
+            raise AssertionError("no instrument lookup for a duplicate")
+        return _instrument_of(ticker)
 
     async def _place(pos: object, inst: object) -> object:
         raise AssertionError("a duplicate is not remedied by a new stop")
