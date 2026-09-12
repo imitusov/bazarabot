@@ -99,10 +99,41 @@ permanently — mislabelled history cannot be repaired.
 | `created_at` | TEXT NOT NULL | |
 | `settled_at` | TEXT NULL | |
 
+Owned by `db.stop_orders`, which is the only module that writes it.
+
 **Invariants.** At most one stop order in `ACTIVE` or `PLACING` per open
-position, enforced by a partial unique index on `position_id`. `EXECUTED` means
+position, enforced by the partial unique index `idx_stop_orders_one_live`
+recorded below. `EXECUTED` means
 the exchange sold the position; the corresponding position must be closed with
 `exit_trigger = 'STOP_LOSS'`.
+
+**Constraints (v1.80).** Both are created by `001_initial.sql` and both are part
+of this contract, not incidental schema. They were unwritten until v1.80 (#206):
+a migration dropping either would have violated no stated line, and the only
+change an owner would see is that a class of row the database currently refuses
+becomes merely detectable afterwards.
+
+- **`idx_stop_orders_one_live`** — `CREATE UNIQUE INDEX
+  idx_stop_orders_one_live ON stop_orders (position_id) WHERE status IN
+  ('ACTIVE', 'PLACING')`. What it makes impossible: a second live stop for a
+  position ever reaching the table. The
+  duplicate `INSERT` fails, so two rows can never each claim one position's
+  trigger, and `record_placing` for a position that already has a live stop
+  raises at the database — before the broker is called, which is the moment at
+  which a duplicate would otherwise become a real second stop order standing at
+  the exchange. This is the storage half of the one-owner rule; the detection
+  half is `active_for_position` raising `OrderStateError` when two standing rows
+  are found (§3.2), which is a second line of defence and not the primary one —
+  its test must `DROP INDEX` to reach the case at all, and a reader who saw only
+  that test would conclude duplicates are possible and merely caught.
+- **`position_id INTEGER NOT NULL REFERENCES positions (id)`** — what it makes
+  impossible: a stop row that names no position, or names one that does not
+  exist. Every row therefore answers "whose trigger is this?" from the row
+  itself, which is what lets reconciliation match standing stops to open
+  positions and cancel the ones that match nothing. Enforcement is
+  per-connection and depends on `PRAGMA foreign_keys = ON`, which
+  `db.connection` issues on the shared connection and `db.migrations` issues on
+  its own (§4); without that pragma SQLite parses the clause and ignores it.
 
 ### `cooldowns`
 
@@ -618,6 +649,58 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   duplicate-protection path, verified by asserting no new stop order is created).
 - A stop reported `EXECUTED` closes the position with `exit_trigger = STOP_LOSS`
   and starts the cooldown (proves the exchange-initiated close path).
+
+**partial fills** (`execution.orders`)
+- A `post_market_order` returning `SUBMITTED` with 2 of 3 lots filled cancels the
+  order and re-reads it with `get_order_state`; the position is opened from the
+  **re-read**, not from the response that came back alongside the cancel (proves
+  the number written down is the broker's settled one, per rule 33).
+- The re-read showing 2 filled opens a position of 2 with stop and target from
+  the achieved price, and places a stop for 2 (proves sizing follows the fill,
+  and that the stop quantity matches what is actually held — the mismatch #10
+  named).
+- No follow-up buy is submitted for the abandoned remainder (proves it is
+  cancelled, not chased).
+- A partial entry alerts (proves the liquidity signal reaches the owner).
+- `cancel_order` raising `BrokerUnavailable` leaves the order unresolved, opens
+  no position and writes nothing (proves an unconfirmed outcome is never written
+  down, and that the recovery path — not a guess — is what resolves it).
+- A `SUBMITTED` entry with **zero** lots filled is not cancelled (proves a merely
+  pending market order is not converted into a missed entry).
+- A cooldown write failing with `aiosqlite.Error` during `close_position` leaves
+  the position `CLOSED`, returns it, and halts trading with an alert rather than
+  raising (v1.63; proves a completed exit is never reported as failed, which
+  would retry a sell the account cannot cover).
+- `close_position` submits exactly one sell order and, when the broker reports a
+  partial, raises `ExitFailed` having submitted nothing further (proves the
+  slicing loop is gone, and with it the unbounded submission it allowed).
+- `resolve_unfinished` settling an `EXIT` order `CANCELLED` with 2 of 5 lots
+  filled calls `update_lots(3)`, leaves the position **open**, and alerts (proves
+  the book and the account agree on quantity, and that a half-exited position is
+  never closed at a price for lots it still holds).
+- That same case writes a `LOTS_ADJUSTED` event and no `CLOSED` event (proves the
+  unbooked slice is recorded rather than silent).
+- `resolve_unfinished` settling an `EXIT` order whose `filled_lots` reaches the
+  position's count closes it (proves a cancel landing after a full fill still
+  books the exit).
+
+Additionally, on exits booked from an exchange stop:
+- `close_executed_stop` records the **broker's** executed price, not the price
+  `get_last_price` would return at that moment: a fill at 95.00 while the quote
+  says 92.00 records 95.00 (proves the invented-price path is closed — this is
+  #4's own verification case).
+- `close_executed_stop` with a `fill` whose `filled_price` is `None` raises
+  rather than substituting any other number.
+- `close_executed_stop` records `fill.key` as the order row's `broker_order_id`
+  (proves the row the exchange's execution is filed under can be re-queried —
+  without it, `get_order_state` on the bot's invented UUID can only ever return
+  `OrderNotFound`).
+- `close_executed_stop` with a `fill` whose `commission` is `None` still closes
+  the position (proves the commission is a correction, not the substance: a stop
+  exit left open would be found by reconciliation and filed as `EXTERNAL`, which
+  is the wrong trigger recorded permanently).
+- The exit commission on the closed position is the broker's
+  `executed_commission`, never zero and never estimated.
 
 ## Expected output
 
