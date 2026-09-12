@@ -1,7 +1,7 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.79
-**Date:** 2026-09-10
+**Version:** 1.80
+**Date:** 2026-09-12
 **Implements:** `business-brief.md` v1.13
 
 **Companion document.** Read the brief first. When this spec and the brief
@@ -292,6 +292,16 @@ be scripted to succeed, reject, time out, or return a stale state.
 Each case states an input, an expected output or side effect, and the invariant
 it proves.
 
+**How these blocks are delivered (v1.80).** `scripts/make_tasks.py` cuts this
+section by heading: a line whose whole content is `**text**` opens a block and
+closes the one before it, and only a heading named in the generator's `M` table
+reaches a task file. A sub-group therefore never gets a bare bold heading of its
+own — it carries trailing prose naming the module that owes it, the way the
+stop-order lifecycle and partial-fill groups below name `execution.orders`,
+which keeps its cases inside the owning module's block. A bare heading that no
+`M` row names is a group of cases written for nobody: eleven `execution.orders`
+partial-fill cases sat unreachable that way until v1.80 (#189).
+
 **`models`**
 - A dataclass constructed with a naive datetime raises `ValueError`, for every
   type carrying a timestamp (proves the timezone invariant is enforced at the
@@ -540,9 +550,12 @@ it proves.
 - `activate` on an already-terminal row raises `OrderStateError` (proves a stop
   that has been cancelled cannot be resurrected as standing — the state in which
   both owners would believe they hold the trigger).
-- `activate` or `settle` on a key that was never recorded raises
-  `OrderStateError` (proves an unknown key is an error, never a silent no-op that
-  would leave the caller believing a stop is standing).
+- `activate` on a key that was never recorded raises `OrderStateError` (proves
+  an unknown key is an error, never a silent no-op that would leave the caller
+  believing a stop it never wrote down is standing).
+- `settle` on a key that was never recorded raises `OrderStateError` (split from
+  the case above in v1.80: two calls, two cases, so neither can be half-enforced
+  behind one bullet's word "or").
 - `settle` with a naive `settled_at` raises `ValueError` (proves rule 22 at this
   boundary).
 - `active_for_position` returns `None` for a position with no standing stop, and
@@ -1056,7 +1069,7 @@ Additionally, `strategies.ml_model`:
 - A stop reported `EXECUTED` closes the position with `exit_trigger = STOP_LOSS`
   and starts the cooldown (proves the exchange-initiated close path).
 
-**partial fills**
+**partial fills** (`execution.orders`)
 - A `post_market_order` returning `SUBMITTED` with 2 of 3 lots filled cancels the
   order and re-reads it with `get_order_state`; the position is opened from the
   **re-read**, not from the response that came back alongside the cancel (proves
@@ -4672,10 +4685,41 @@ permanently — mislabelled history cannot be repaired.
 | `created_at` | TEXT NOT NULL | |
 | `settled_at` | TEXT NULL | |
 
+Owned by `db.stop_orders`, which is the only module that writes it.
+
 **Invariants.** At most one stop order in `ACTIVE` or `PLACING` per open
-position, enforced by a partial unique index on `position_id`. `EXECUTED` means
+position, enforced by the partial unique index `idx_stop_orders_one_live`
+recorded below. `EXECUTED` means
 the exchange sold the position; the corresponding position must be closed with
 `exit_trigger = 'STOP_LOSS'`.
+
+**Constraints (v1.80).** Both are created by `001_initial.sql` and both are part
+of this contract, not incidental schema. They were unwritten until v1.80 (#206):
+a migration dropping either would have violated no stated line, and the only
+change an owner would see is that a class of row the database currently refuses
+becomes merely detectable afterwards.
+
+- **`idx_stop_orders_one_live`** — `CREATE UNIQUE INDEX
+  idx_stop_orders_one_live ON stop_orders (position_id) WHERE status IN
+  ('ACTIVE', 'PLACING')`. What it makes impossible: a second live stop for a
+  position ever reaching the table. The
+  duplicate `INSERT` fails, so two rows can never each claim one position's
+  trigger, and `record_placing` for a position that already has a live stop
+  raises at the database — before the broker is called, which is the moment at
+  which a duplicate would otherwise become a real second stop order standing at
+  the exchange. This is the storage half of the one-owner rule; the detection
+  half is `active_for_position` raising `OrderStateError` when two standing rows
+  are found (§3.2), which is a second line of defence and not the primary one —
+  its test must `DROP INDEX` to reach the case at all, and a reader who saw only
+  that test would conclude duplicates are possible and merely caught.
+- **`position_id INTEGER NOT NULL REFERENCES positions (id)`** — what it makes
+  impossible: a stop row that names no position, or names one that does not
+  exist. Every row therefore answers "whose trigger is this?" from the row
+  itself, which is what lets reconciliation match standing stops to open
+  positions and cancel the ones that match nothing. Enforcement is
+  per-connection and depends on `PRAGMA foreign_keys = ON`, which
+  `db.connection` issues on the shared connection and `db.migrations` issues on
+  its own (§4); without that pragma SQLite parses the clause and ignores it.
 
 ### `signals`
 

@@ -9,7 +9,9 @@ arrangement can be wrong silently, and both have been:
 
   * a §3.2 block reachable from no `M` entry — written cases no agent is ever
     shown (`sandbox.exchange`, still live; and `partial fills`, eleven cases
-    for the highest-risk module in the project);
+    for the highest-risk module in the project, closed by spec v1.80 (#189)
+    which gave the sub-block trailing prose naming `execution.orders` so its
+    cases sit inside that module's block);
   * a `None` key whose §3.2 block exists — the task file tells the agent to
     invent cases the spec already wrote (#114, `ops.commissions`, fixed as a
     single datum by #156 with no check behind it);
@@ -66,11 +68,6 @@ KNOWN_UNREACHED_TEST_BLOCKS: dict[str, str] = {
     "`sandbox.exchange`": (
         "#114/#118 — sandbox/exchange.py has a §3.2 block and no `M` entry at "
         "all; adding the entry is issue #118 gate 4's territory"
-    ),
-    "partial fills": (
-        "#118 — eleven execution.orders cases under their own bold heading, so "
-        "`test_block` stops before them and tasks/26 never receives them; the "
-        "fix is a spec amendment folding them under `execution.orders`"
     ),
 }
 
