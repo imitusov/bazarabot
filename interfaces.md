@@ -1288,7 +1288,9 @@ not cover the request is extended by fetching only the missing span.
 A simulated broker backed by historical bars. Never imported by `zarabot/`.
 Every function matches its `broker.client` counterpart's signature and raises
 the same exception for the same condition. Also answers `get_trading_schedule`,
-so `market.session` runs on top rather than being stubbed.
+so `market.session` runs on top rather than being stubbed. Its `SessionInfo`s
+carry `trade_date = clock.moscow_date(start)`, the same producer obligation the
+live client owes, never a date derived from list position (v1.81).
 
 **`Commission(pct: Decimal, minimum: Decimal)`** — the broker's tariff.
 `on(turnover)` is the fee for one fill.
