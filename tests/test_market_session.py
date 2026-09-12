@@ -39,19 +39,30 @@ HOLIDAY = datetime(2026, 3, 9, 10, 0, tzinfo=UTC)  # Monday 9 Mar 2026 as a holi
 
 
 def _weekday() -> SessionInfo:
-    return SessionInfo(start=OPEN, end=CLOSE, is_trading_day=True)
+    return SessionInfo(
+        trade_date=date(2026, 3, 16), start=OPEN, end=CLOSE, is_trading_day=True
+    )
+
+
+def _closed(day: date) -> SessionInfo:
+    """The only shape `get_trading_schedule` can return for a closed day.
+
+    `trade_date` set, `start` and `end` `None` (v1.81). Until then `_saturday`
+    and `_holiday` here gave closed days session times — a shape the producer
+    cannot emit — so every closed entry had a distinct sort key in the tests and
+    collapsed only in production. That fixture is the reason #51 survived; the
+    contract on closed-day fixtures in this file is pinned by
+    `test_no_closed_day_fixture_in_this_file_carries_session_times` below.
+    """
+    return SessionInfo(trade_date=day, start=None, end=None, is_trading_day=False)
 
 
 def _saturday() -> SessionInfo:
-    start = datetime(2026, 3, 14, 6, 50, tzinfo=UTC)
-    end = datetime(2026, 3, 14, 15, 50, tzinfo=UTC)
-    return SessionInfo(start=start, end=end, is_trading_day=False)
+    return _closed(date(2026, 3, 14))
 
 
 def _holiday() -> SessionInfo:
-    start = datetime(2026, 3, 9, 6, 50, tzinfo=UTC)
-    end = datetime(2026, 3, 9, 15, 50, tzinfo=UTC)
-    return SessionInfo(start=start, end=end, is_trading_day=False)
+    return _closed(date(2026, 3, 9))
 
 
 @pytest.fixture(autouse=True)
@@ -93,10 +104,13 @@ async def store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[SessionIn
 def _day(n: int) -> SessionInfo:
     base = datetime(2026, 3, n, tzinfo=UTC)
     trading = base.weekday() < 5
+    if not trading:
+        return _closed(date(2026, 3, n))
     return SessionInfo(
-        start=base.replace(hour=6, minute=50) if trading else None,
-        end=base.replace(hour=15, minute=50) if trading else None,
-        is_trading_day=trading,
+        trade_date=date(2026, 3, n),
+        start=base.replace(hour=6, minute=50),
+        end=base.replace(hour=15, minute=50),
+        is_trading_day=True,
     )
 
 
@@ -114,7 +128,9 @@ async def test_refresh_records_the_whole_window_not_only_today(
     await refresh(14)
 
     recorded = await list_since(date(2026, 3, 1))
-    assert len(recorded) == 10, "ten weekdays in the fortnight, all recorded"
+    assert len(recorded) == 14, "every day of the fortnight, closed ones included"
+    trading = [day for day in recorded if day.is_trading_day]
+    assert len(trading) == 10, "ten weekdays in the fortnight"
 
 
 async def test_calendar_remembers_a_day_that_has_since_passed(
@@ -133,7 +149,7 @@ async def test_calendar_remembers_a_day_that_has_since_passed(
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _later)
     await refresh(5)
 
-    dates = [s.start.date() for s in calendar().sessions if s.start is not None]
+    dates = [s.trade_date for s in calendar().sessions]
     assert date(2026, 3, 2) in dates, "the earlier window is remembered"
     assert date(2026, 3, 20) in dates
     assert dates == sorted(dates)
@@ -315,7 +331,12 @@ async def test_rollover_refresh_clears_cache_exhausted(
     async def _rollover(days: int) -> list[SessionInfo]:
         return [
             _weekday(),
-            SessionInfo(start=next_open_start, end=next_open_end, is_trading_day=True),
+            SessionInfo(
+                trade_date=date(2026, 3, 17),
+                start=next_open_start,
+                end=next_open_end,
+                is_trading_day=True,
+            ),
         ]
 
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _rollover)
@@ -430,16 +451,17 @@ async def test_successful_refresh_of_a_holiday_emits_session_closed(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """v1.67: closed days have no timestamps; trade_date still comes from clock."""
+    """The holiday case is built from the shape the broker actually returns: a
+    closed day with a `trade_date` and no session times (v1.81). The record still
+    names the day it is talking about — a `session_closed` whose `trade_date` is
+    also null says only that some unspecified day was shut."""
 
-    closed = SessionInfo(start=None, end=None, is_trading_day=False)
-    refresh_at = datetime(2026, 3, 9, 10, 0, tzinfo=UTC)
+    closed = _closed(date(2026, 3, 9))
 
     async def _fetch(days: int) -> list[SessionInfo]:
         return [closed, _weekday()]
 
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
-    monkeypatch.setattr("zarabot.clock.now", lambda: refresh_at)
     with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
         await refresh(7)
 
@@ -458,13 +480,23 @@ async def test_session_open_trade_date_is_moscow_not_utc(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """v1.67: 21:30 UTC is the next calendar date in Moscow."""
+    """21:30 UTC is the next calendar date in Moscow (v1.67). As of v1.81 the
+    conversion under test is `broker.client`'s; this module reports
+    `first.trade_date`, and the fixture supplies the Moscow date the broker
+    would have sent."""
 
     start = datetime(2026, 3, 16, 21, 30, tzinfo=UTC)
     end = datetime(2026, 3, 17, 6, 40, tzinfo=UTC)
 
     async def _fetch(days: int) -> list[SessionInfo]:
-        return [SessionInfo(start=start, end=end, is_trading_day=True)]
+        return [
+            SessionInfo(
+                trade_date=date(2026, 3, 17),
+                start=start,
+                end=end,
+                is_trading_day=True,
+            )
+        ]
 
     monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
     with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
@@ -492,3 +524,180 @@ async def test_unavailable_refresh_does_not_emit_session_events(
     with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
         await refresh(7)
     assert _session_events(caplog) == []
+
+
+# --------------------------------------------------------------------------
+# #51 — the calendar is the calendar, and the events name the day they describe.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "first,expected_event",
+    [(_day(16), "session_open"), (_closed(date(2026, 3, 21)), "session_closed")],
+)
+async def test_both_events_report_first_trade_date_verbatim(
+    store: list[SessionInfo],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    first: SessionInfo,
+    expected_event: str,
+) -> None:
+    """`clock.now` is patched to a Moscow date nowhere near the window, so a
+    record derived from the clock cannot pass. v1.67 left two producers of this
+    one field standing — `first.trade_date` and `clock.moscow_date(clock.now())`
+    — and they separate whenever a refresh straddles Moscow midnight. The
+    surviving source is the entry being described (v1.81)."""
+    elsewhere = datetime(2025, 12, 31, 22, 30, tzinfo=UTC)  # 1 Jan 2026 in Moscow
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        # A window with no trading session at all is "unavailable" under rule 10
+        # and emits nothing, so the closed day leads a window that has one.
+        return [first, _day(23)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    monkeypatch.setattr("zarabot.clock.now", lambda: elsewhere)
+    with caplog.at_level(logging.INFO, logger="zarabot.market.session"):
+        await refresh(7)
+
+    events = _session_events(caplog)
+    assert len(events) == 1
+    assert events[0].event == expected_event
+    assert events[0].trade_date == first.trade_date
+    assert events[0].trade_date != date(2026, 1, 1)
+
+
+async def test_a_fortnight_with_four_weekend_days_yields_fourteen_entries(
+    store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#51 returned one. Every non-trading day shared the `datetime.min` sort
+    key and collapsed onto a single entry, so `calendar()` returned something
+    that was not the calendar."""
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [_day(n) for n in range(16, 30)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    await refresh(14)
+
+    sessions = calendar().sessions
+    assert len(sessions) == 14
+    closed = [s for s in sessions if not s.is_trading_day]
+    assert len(closed) == 4
+    assert [s.trade_date for s in closed] == [
+        date(2026, 3, 21),
+        date(2026, 3, 22),
+        date(2026, 3, 28),
+        date(2026, 3, 29),
+    ]
+    dates = [s.trade_date for s in sessions]
+    assert dates == sorted(dates)
+    assert len(set(dates)) == 14
+
+
+async def test_a_date_in_both_history_and_the_live_window_appears_once(
+    store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dedupe the collapse was hiding inside still works, and the newer
+    answer about a date wins — as `db.trading_days` requires.
+
+    History and cache diverge on the production path the contract already
+    describes: the second window's write fails with `aiosqlite.Error`, which is
+    logged and does not propagate, so `_history` keeps the older observation
+    while `_cache` holds the newer one.
+    """
+    short_end = datetime(2026, 3, 18, 12, 0, tzinfo=UTC)
+    revised = SessionInfo(
+        trade_date=date(2026, 3, 18),
+        start=datetime(2026, 3, 18, 6, 50, tzinfo=UTC),
+        end=short_end,
+        is_trading_day=True,
+    )
+
+    async def _first(days: int) -> list[SessionInfo]:
+        return [_day(17), _day(18)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _first)
+    await refresh(2)
+
+    async def _second(days: int) -> list[SessionInfo]:
+        return [revised, _day(19)]
+
+    async def _boom(sessions: list[SessionInfo]) -> int:
+        raise aiosqlite.Error("disk full")
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _second)
+    monkeypatch.setattr("zarabot.market.session.record_many", _boom)
+    await refresh(2)
+
+    sessions = calendar().sessions
+    dates = [s.trade_date for s in sessions]
+    assert dates == [date(2026, 3, 17), date(2026, 3, 18), date(2026, 3, 19)]
+    assert dates.count(date(2026, 3, 18)) == 1
+    revised_entry = next(s for s in sessions if s.trade_date == date(2026, 3, 18))
+    assert revised_entry.end == short_end, "the live observation wins"
+
+
+async def test_trading_days_between_is_unchanged_by_carrying_closed_days(
+    store: list[SessionInfo], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A requirement, not a hope: the entries this fix stops discarding have
+    `is_trading_day` false and a null `start`, and the count reads neither, so
+    the same window must yield the same count as it did before. `MAX_AGE` is
+    what this measures, so a quiet change here would be a financial defect."""
+    from zarabot.clock import trading_days_between
+
+    async def _fetch(days: int) -> list[SessionInfo]:
+        return [_day(n) for n in range(16, 30)]
+
+    monkeypatch.setattr("zarabot.market.session.get_trading_schedule", _fetch)
+    await refresh(14)
+
+    full = calendar()
+    assert len(full.sessions) == 14
+    trading_only = TradingCalendar(
+        sessions=tuple(s for s in full.sessions if s.is_trading_day)
+    )
+    assert len(trading_only.sessions) == 10, "what the collapsed calendar counted"
+
+    entry = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
+    now = datetime(2026, 3, 27, 12, 0, tzinfo=UTC)
+    assert trading_days_between(entry, now, full) == trading_days_between(
+        entry, now, trading_only
+    )
+    assert trading_days_between(entry, now, full) == 9
+
+
+def test_no_closed_day_fixture_in_this_file_carries_session_times() -> None:
+    """A contract on the fixtures, not a behaviour (v1.81).
+
+    The impossible fixture is the whole reason #51 survived: `_saturday` and
+    `_holiday` gave closed days a start and an end, a shape
+    `get_trading_schedule` can never return, so every closed entry had a
+    distinct sort key here and collapsed only in production (failure class 9).
+    A promise would rot; this reads the file.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    checked = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "SessionInfo"):
+            continue
+        kwargs = {kw.arg: kw.value for kw in node.keywords}
+        flag = kwargs.get("is_trading_day")
+        if not (isinstance(flag, ast.Constant) and flag.value is False):
+            continue
+        checked += 1
+        for field in ("start", "end"):
+            value = kwargs.get(field)
+            assert isinstance(value, ast.Constant) and value.value is None, (
+                f"a non-trading SessionInfo in this file sets {field}; "
+                "get_trading_schedule cannot return that shape"
+            )
+        assert "trade_date" in kwargs, "a closed day must still say which day"
+    assert checked >= 1, "no closed-day fixture found — has the guard gone stale?"
