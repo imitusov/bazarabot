@@ -711,10 +711,17 @@ Requests `exchange="MOEX"` by name — the main equity board, weekends closed �
 never a substring match over the 53 MOEX-prefixed exchanges (#43). The range is
 anchored to the start of the current UTC day and `days` may not exceed 14;
 `ValueError` if it does, because the broker rejects a longer horizon with
-`INVALID_ARGUMENT` / `30002` (#39). One `SessionInfo` per day returned, in
-order. A day that is not a session — `is_trading_day` false, or `1970-01-01`
-timestamps whatever the flag says — comes back as
-`SessionInfo(start=None, end=None, is_trading_day=False)`. Empty list when the
+`INVALID_ARGUMENT` / `30002` (#39). One `SessionInfo` per day returned,
+**ascending by `trade_date`** (v1.81), so `market.session` may read `fetched[0]`
+as the window's first day. A day that is not a session — `is_trading_day` false,
+or `1970-01-01` timestamps whatever the flag says — comes back as
+`SessionInfo(trade_date=<its own date>, start=None, end=None, is_trading_day=False)`:
+`trade_date` is read from `TradingDay.date`, which is populated and correct on a
+closed day (§2.1), converted with `clock.moscow_date` where the SDK hands back
+an instant and used as-is where it hands back a `date` — never `.date()` on the
+UTC value, never from `start_time`, never from list position (v1.81, #51). A day
+whose `date` is absent or below the 1971 epoch guard is **omitted** and logged
+at WARNING; the rest of the window is still returned. Empty list when the
 exchange is absent from the response.
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 `confirm_margin_trade=False`. Raises `OrderRejected`. `commission` is
