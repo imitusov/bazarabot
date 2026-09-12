@@ -1934,3 +1934,113 @@ async def test_slippage_alert_propagates_a_non_telegram_exception(
     monkeypatch.setattr("zarabot.execution.orders.alert", _alert)
     with pytest.raises(AttributeError):
         await open_position(_signal_at(Decimal("90")), 2, _instrument())
+
+
+async def test_cooldown_write_failure_halts_and_returns_the_closed_position(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v1.63: "A failed cooldown write halts but does not fail the exit."
+
+    The cooldown is written after the sell has executed and after the position
+    row is already CLOSED, so raising out of `close_position` would report a
+    completed exit as failed and the caller would retry a sell that already
+    happened. Cooldowns are rule 11, so the failure takes the rule-11 remedy —
+    alert and halt — and `close_position` returns the closed position.
+    """
+    position = await open_position(_signal(), 2, _instrument())
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise aiosqlite.Error("disk")
+
+    monkeypatch.setattr("zarabot.execution.orders.start_cooldown", boom)
+    with caplog.at_level(logging.INFO, logger="zarabot.execution.orders"):
+        closed = await close_position(position, ExitTrigger.TAKE_PROFIT)
+
+    # Does not fail the exit.
+    assert closed.status == "CLOSED"
+    assert closed.exit_trigger is ExitTrigger.TAKE_PROFIT
+    # Halts, observably: rule 11's remedy, alert and halt.
+    assert await is_halted() is True
+    assert any("trading halted" in text for text in env.alerts)
+
+
+async def test_cooldown_write_failure_still_commits_and_reports_the_close(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The exit is not half-reported: the close row is committed and
+    `position_closed` is emitted even though the cooldown write failed."""
+    position = await open_position(_signal(), 2, _instrument())
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise aiosqlite.Error("disk")
+
+    monkeypatch.setattr("zarabot.execution.orders.start_cooldown", boom)
+    with caplog.at_level(logging.INFO, logger="zarabot.execution.orders"):
+        await close_position(position, ExitTrigger.TAKE_PROFIT)
+
+    stored = await get_position(position.id)
+    assert stored is not None
+    assert stored.status == "CLOSED"
+    assert await list_open() == []
+    events = _order_events(caplog, "position_closed")
+    assert len(events) == 1
+    assert events[0].position_id == position.id
+    assert events[0].exit_trigger == ExitTrigger.TAKE_PROFIT.value
+    # The cooldown itself is genuinely lost — the halt is the remedy, not a
+    # retry that quietly writes it anyway.
+    from zarabot.db.cooldowns import is_active
+
+    assert await is_active("SBER", NOW, 120) is False
+
+
+async def test_defect_in_the_cooldown_write_propagates(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: red against `except Exception`.
+
+    Rule 11 (v1.75): a write failure is `aiosqlite.Error`, and only that.
+    An `AttributeError` from a rename is not a database that is unavailable,
+    and swallowing it here would leave the cooldown silently unwritten on every
+    exit with nothing said about it.
+    """
+    position = await open_position(_signal(), 2, _instrument())
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise AttributeError("cooldowns renamed")
+
+    monkeypatch.setattr("zarabot.execution.orders.start_cooldown", boom)
+    with pytest.raises(AttributeError):
+        await close_position(position, ExitTrigger.TAKE_PROFIT)
+
+
+async def test_cooldown_write_failure_does_not_fail_an_executed_stop_close(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v1.78/v1.63 on `close_executed_stop`, on exactly the terms
+    `close_position` states: the exchange has already sold and the position row
+    is already CLOSED, so the failure halts and the close is returned."""
+    position = await open_position(_signal(), 2, _instrument())
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise aiosqlite.Error("disk")
+
+    monkeypatch.setattr("zarabot.execution.orders.start_cooldown", boom)
+    closed = await close_executed_stop(position, _stop_fill(Decimal("95")))
+    assert closed.status == "CLOSED"
+    assert closed.exit_trigger is ExitTrigger.STOP_LOSS
+    assert await is_halted() is True
+    assert any("trading halted" in text for text in env.alerts)
+
+
+async def test_defect_in_the_cooldown_write_propagates_from_an_executed_stop(
+    env: _Broker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction on the exchange-initiated path."""
+    position = await open_position(_signal(), 2, _instrument())
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise AttributeError("cooldowns renamed")
+
+    monkeypatch.setattr("zarabot.execution.orders.start_cooldown", boom)
+    with pytest.raises(AttributeError):
+        await close_executed_stop(position, _stop_fill(Decimal("95")))
