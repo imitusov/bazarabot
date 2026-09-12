@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -129,6 +129,17 @@ def _validate_money(name: str, value: object) -> None:
         raise TypeError(f"{name} must be Decimal, not {type(value).__name__}")
     if name in _PRICE_FIELDS and value < 0:
         raise ValueError(f"{name} must not be negative")
+
+
+def _validate_trade_date(value: object) -> None:
+    """A `date` and not a `datetime`, which `isinstance` would accept silently.
+
+    A `datetime` here keys `trading_days` on an ISO string with a time in it and
+    makes two observations of one day two rows. `None` is refused for the same
+    reason the field has no default: the primary key admits neither.
+    """
+    if isinstance(value, datetime) or not isinstance(value, date):
+        raise ValueError("trade_date must be a date, not a datetime or None")
 
 
 def _validate_common(instance: Any) -> None:
@@ -297,12 +308,24 @@ class PortfolioState:
 
 @dataclass(frozen=True)
 class SessionInfo:
+    # `trade_date` is the entry's identity: the primary key of `trading_days`
+    # (§5) and the uniqueness key of `market.session.calendar()`. It is present
+    # on every day, open or closed, and carries no default — a site that forgets
+    # it must fail at construction naming the producer, not compile and put a
+    # `None` into a primary key, which is where #51 started.
+    #
+    # Where `is_trading_day` is true it must equal `clock.moscow_date(start)`.
+    # That is an obligation on producers, not checked here: `clock` imports this
+    # module, so importing `clock` would be a cycle, and re-deriving the Moscow
+    # conversion would make this the second owner of arithmetic `clock` owns.
+    trade_date: date
     start: datetime | None
     end: datetime | None
     is_trading_day: bool
 
     def __post_init__(self) -> None:
         _validate_common(self)
+        _validate_trade_date(self.trade_date)
 
     def in_closing_window(self, now: datetime, minutes: int = 15) -> bool:
         """True during the final `minutes` of this session. Pure; no I/O."""

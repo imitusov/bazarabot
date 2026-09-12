@@ -66,8 +66,18 @@ ties a fee to the trade that incurred it (#11).
 **`PortfolioState(cash: Decimal, positions: tuple[Position, ...])`**
 Broker-authoritative cash and holdings.
 
-**`SessionInfo(start: datetime | None, end: datetime | None, is_trading_day: bool)`**
-One calendar day's session. `in_closing_window(now: datetime, minutes: int = 15) → bool` is true during the final `minutes` of the session (`now` inclusive of the window start, exclusive of `end`). Raises `ValueError` on naive `now`. Not I/O.
+**`SessionInfo(trade_date: date, start: datetime | None, end: datetime | None, is_trading_day: bool)`**
+One calendar day's session. `trade_date` is the Moscow calendar date the entry
+describes; it is **first**, present on every day open or closed, never `None`,
+and carries **no default** — a site that omits it raises `TypeError` at
+construction (v1.81, #51). `trade_date=None`, a `datetime`, or anything that is
+not a `date` raises `ValueError`; `datetime` subclasses `date`, so `isinstance`
+alone would accept one and key `trading_days` on an ISO string with a time in
+it. Where `is_trading_day` is true, `trade_date` **must** equal
+`clock.moscow_date(start)` — an obligation on producers
+(`broker.client.get_trading_schedule`, `db.trading_days`, `sandbox.exchange`,
+every fixture), not a `__post_init__` check, because `clock` imports `models`.
+`in_closing_window(now: datetime, minutes: int = 15) → bool` is true during the final `minutes` of the session (`now` inclusive of the window start, exclusive of `end`). Raises `ValueError` on naive `now`. Not I/O.
 
 **`RiskDecision(approved: bool, lots: int | None, reason: RejectionReason | None)`**
 Exactly one of: approved with `lots > 0` and `reason is None`, or rejected with `reason` set and `lots is None`. Raises `ValueError` if both, neither, or approved with zero lots.
