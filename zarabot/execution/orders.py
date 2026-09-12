@@ -384,7 +384,24 @@ async def _finish_close(
     closed = await _write(
         close_row(position.id, trigger, order.filled_price, moment, order)
     )
-    await start_cooldown(position.ticker, moment)
+    try:
+        await start_cooldown(position.ticker, moment)
+    except aiosqlite.Error:
+        # "A failed cooldown write halts but does not fail the exit" (v1.63).
+        # Deliberately not `_write`: that halts *and* re-raises, which is right
+        # for the close row and wrong here. The row above is already committed
+        # and the sell has already executed, so raising would report a
+        # completed exit as failed and the caller would retry a sell the
+        # account can no longer cover. Cooldowns are rule 11, so the failure
+        # takes the rule-11 remedy — alert and halt — and the close is still
+        # returned and still reported. Halting is what covers the lost
+        # cooldown: it stops the bot re-entering the ticker it just exited,
+        # and everything else besides. `aiosqlite.Error` and only that; every
+        # other exception propagates, because a rename is not a database that
+        # is unavailable.
+        await _halt_on_db_failure(
+            f"cooldown write failed after closing {position.ticker}"
+        )
     fields: dict[str, object] = {
         "position_id": closed.id,
         "ticker": closed.ticker,
