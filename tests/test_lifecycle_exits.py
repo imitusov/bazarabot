@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -54,7 +54,12 @@ def _config(max_holding_days: int = 3) -> Config:
 
 
 def _session() -> SessionInfo:
-    return SessionInfo(start=SESSION_START, end=SESSION_END, is_trading_day=True)
+    return SessionInfo(
+        trade_date=date(2026, 3, 16),  # the Moscow date of SESSION_START
+        start=SESSION_START,
+        end=SESSION_END,
+        is_trading_day=True,
+    )
 
 
 def _position(**overrides: object) -> Position:

@@ -6,7 +6,7 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, NoReturn
 
@@ -588,8 +588,37 @@ async def get_portfolio() -> PortfolioState:
     return PortfolioState(cash=cash, positions=tuple(holdings))
 
 
-def _session_from_day(day: object) -> SessionInfo:
-    """One calendar day. A day that is not a session is marked, never invented."""
+def _trade_date(day: object) -> date | None:
+    """The Moscow calendar date of `TradingDay.date`, or None when undateable.
+
+    Field 1 is populated and correct on a closed day, measured against the live
+    account (§2.1) — the 1970 sentinel lives in fields 3 and 4 only, so the date
+    must not be derived from `start_time`, nor from the entry's position in the
+    list, which would turn a short response into a silently mis-dated calendar
+    (#51). Never `.date()` on the UTC value: that is wrong by one day whenever
+    the broker expresses midnight Moscow rather than midnight UTC.
+    """
+    raw = getattr(day, "date", None)
+    if isinstance(raw, datetime):
+        moment = _aware(raw)
+        if moment is None or moment < _EPOCH_GUARD:
+            return None
+        return clock.moscow_date(moment)
+    if isinstance(raw, date):
+        return raw if raw >= _EPOCH_GUARD.date() else None
+    return None
+
+
+def _session_from_day(day: object) -> SessionInfo | None:
+    """One calendar day. A day that is not a session is marked, never invented.
+
+    `None` when the day carries no usable date: it cannot be keyed, recorded or
+    deduped, and the two alternatives — a date fabricated from list position, or
+    a `None` admitted back into `SessionInfo` — are each the defect #51 was.
+    """
+    trade_date = _trade_date(day)
+    if trade_date is None:
+        return None
     start = _aware(getattr(day, "start_time", None))
     end = _aware(getattr(day, "end_time", None))
     trading = bool(getattr(day, "is_trading_day", False))
@@ -598,8 +627,10 @@ def _session_from_day(day: object) -> SessionInfo:
         # be another way to believe the market is open.
         trading = False
     if not trading:
-        return SessionInfo(start=None, end=None, is_trading_day=False)
-    return SessionInfo(start=start, end=end, is_trading_day=True)
+        return SessionInfo(
+            trade_date=trade_date, start=None, end=None, is_trading_day=False
+        )
+    return SessionInfo(trade_date=trade_date, start=start, end=end, is_trading_day=True)
 
 
 async def get_trading_schedule(days: int) -> list[SessionInfo]:
@@ -630,7 +661,23 @@ async def get_trading_schedule(days: int) -> list[SessionInfo]:
     for exchange in response.exchanges:
         if str(exchange.exchange).upper() != _EXCHANGE:
             continue
-        sessions.extend(_session_from_day(day) for day in exchange.days)
+        for day in exchange.days:
+            session = _session_from_day(day)
+            if session is None:
+                # No honest fallback exists, so the day is left out rather than
+                # given a date from its list position. Omission shortens the
+                # window, which `market.session.covers` reports; a mis-dated day
+                # is something nothing would report (#51).
+                _log.warning(
+                    "trading schedule day has no usable date; omitting it",
+                    extra={"method": "get_trading_schedule"},
+                )
+                continue
+            sessions.append(session)
+    # The broker returns one contiguous entry per day, oldest first (§2.1). Stated
+    # here so `market.session` may read `fetched[0]` as the window's first day
+    # without depending on a response shape nothing pins.
+    sessions.sort(key=lambda session: session.trade_date)
     _note_success("get_trading_schedule")
     return sessions
 

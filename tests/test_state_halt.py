@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -265,6 +265,7 @@ async def test_halt_does_not_block_exits_or_exit_orders(db: Path) -> None:
         stop_order_key=None,
     )
     session = SessionInfo(
+        trade_date=date(2026, 3, 16),  # the Moscow date of NOW
         start=NOW,
         end=NOW + timedelta(hours=4),
         is_trading_day=True,

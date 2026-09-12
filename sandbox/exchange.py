@@ -23,6 +23,7 @@ from zarabot.broker.client import (
     OrderRejected,
     StopOrderRejected,
 )
+from zarabot.clock import moscow_date
 from zarabot.models import (
     Candle,
     ExitTrigger,
@@ -396,6 +397,11 @@ class SimulatedExchange:
         for bar in next(iter(self.bars.values()), []):
             sessions.append(
                 SessionInfo(
+                    # The same producer obligation the live client owes: the
+                    # Moscow date of `start` on a trading day, never a date
+                    # fabricated from the entry's position in the list (§4
+                    # `models`, §4 `broker.client`).
+                    trade_date=moscow_date(bar.timestamp),
                     start=bar.timestamp,
                     end=bar.timestamp.replace(hour=15, minute=45),
                     is_trading_day=True,

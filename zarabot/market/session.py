@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 
 import aiosqlite
 
-from zarabot import clock
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
@@ -69,20 +68,23 @@ def _emit_session_state(first: SessionInfo) -> None:
     """Log whether the first day of a successful fetch is a trading session.
 
     A log, not a Telegram alert — the brief does not alert session open/close.
-    Closed days from the broker have no timestamps; `trade_date` then comes from
-    `clock.now()` (v1.67 / v1.68). `opens_at` / `closes_at` are null on close.
+
+    `trade_date` is `first.trade_date` on **both** branches, and nothing else
+    (v1.81, superseding v1.67). v1.67 derived it from `clock.now()` because the
+    type had no date; it has one now, so the workaround is withdrawn. One field,
+    one source, and the source is the entry being described: `first.trade_date`
+    is the broker's own answer for the day the record is *about*, whereas the
+    clock answers for the day the fetch happened, and a refresh straddling
+    Moscow midnight separates them. `opens_at` / `closes_at` are null on close —
+    a closed day has no open and no close; what the record must still answer is
+    *which day*.
     """
+    trade_date = first.trade_date
     if first.is_trading_day:
         event = "session_open"
-        trade_date = (
-            clock.moscow_date(first.start)
-            if first.start is not None
-            else clock.moscow_date(clock.now())
-        )
         opens_at, closes_at = first.start, first.end
     else:
         event = "session_closed"
-        trade_date = clock.moscow_date(clock.now())
         opens_at, closes_at = None, None
     _LOG.info(
         event,
@@ -114,12 +116,6 @@ async def _remember(fetched: list[SessionInfo]) -> None:
         _LOG.exception("could not record the observed trading calendar")
 
 
-def _sort_key(session: SessionInfo) -> datetime:
-    if session.start is None:
-        return datetime.min.replace(tzinfo=UTC)
-    return session.start
-
-
 def calendar() -> TradingCalendar:
     """Recorded history plus the live window, oldest first.
 
@@ -129,12 +125,29 @@ def calendar() -> TradingCalendar:
     the question it serves is asked about the past, and the broker will not
     serve a schedule for any date before today (#45). Empty when nothing is
     known; never `None`.
+
+    The union is taken on `trade_date` — one entry per recorded calendar date,
+    closed days included, oldest first. A date in both the history and the live
+    window appears once, and the live window's entry wins, matching
+    `db.trading_days`' rule that the broker's most recent answer about a date is
+    the one to keep.
+
+    Until v1.81 the key was the session's start instant with `datetime.min`
+    standing in wherever there was none, so every non-trading day shared one key
+    and collapsed onto one entry: a fortnight containing four weekend days came
+    back with one (#51). `trade_date` is a total, unique key over exactly the set
+    of days the calendar is about, which is what the dedupe needed and lacked.
+    `clock.trading_days_between` is unchanged by this, and §3.2 pins that: it
+    counts entries with `is_trading_day` true and a non-null `start`, and the
+    entries this stops discarding satisfy neither.
     """
-    merged = list(_history or ()) + list(_cache or ())
-    by_day: dict[datetime, SessionInfo] = {}
-    for session in sorted(merged, key=_sort_key):
-        by_day[_sort_key(session)] = session
-    return TradingCalendar(sessions=tuple(by_day.values()))
+    by_day: dict[date, SessionInfo] = {}
+    # History first, then the live window, so the newer observation overwrites.
+    for session in list(_history or ()) + list(_cache or ()):
+        by_day[session.trade_date] = session
+    return TradingCalendar(
+        sessions=tuple(by_day[day] for day in sorted(by_day)),
+    )
 
 
 def covers(day: date) -> bool:

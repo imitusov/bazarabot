@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import fields as dataclass_fields
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -176,7 +176,10 @@ def test_operation_carries_the_brokers_own_type_and_state() -> None:
 
 
 def _session(**overrides: object) -> SessionInfo:
+    # `trade_date` is the Moscow date of `start` — the producer obligation every
+    # fixture owes (§4 `models`), since `models` cannot import `clock` to check it.
     fields: dict[str, object] = {
+        "trade_date": date(2026, 3, 15),
         "start": AWARE,
         "end": datetime(2026, 3, 15, 16, 0, tzinfo=UTC),
         "is_trading_day": True,
@@ -318,6 +321,69 @@ def test_order_naive_settled_at_raises() -> None:
 def test_session_naive_end_raises() -> None:
     with pytest.raises(ValueError):
         _session(end=NAIVE)
+
+
+# --- SessionInfo.trade_date (v1.81, #51) -------------------------------------
+
+
+def test_session_without_trade_date_raises_type_error() -> None:
+    """The field carries no default, so a site that forgets it fails at
+    construction naming the producer, rather than compiling and writing a
+    `None` into the `trading_days` primary key."""
+    with pytest.raises(TypeError):
+        SessionInfo(  # type: ignore[call-arg]
+            start=AWARE,
+            end=datetime(2026, 3, 15, 16, 0, tzinfo=UTC),
+            is_trading_day=True,
+        )
+
+
+def test_session_with_null_trade_date_raises_value_error() -> None:
+    """The second way #51 could come back: a null admitted into the field."""
+    with pytest.raises(ValueError):
+        _session(trade_date=None)
+
+
+def test_session_with_datetime_trade_date_raises_value_error() -> None:
+    """`datetime` subclasses `date`, so `isinstance` accepts one silently. A
+    `datetime` here keys `trading_days` on an ISO string with a time in it and
+    makes two observations of one day two rows."""
+    with pytest.raises(ValueError):
+        _session(trade_date=datetime(2026, 3, 15, 10, 0, tzinfo=UTC))
+
+
+def test_session_with_non_date_trade_date_raises_value_error() -> None:
+    with pytest.raises(ValueError):
+        _session(trade_date="2026-03-15")
+
+
+def test_closed_session_constructs_and_reports_its_day() -> None:
+    """The whole of #51: the type can say *which day* about a day with no
+    session. This is the shape `get_trading_schedule` returns for a closed day."""
+    closed = SessionInfo(
+        trade_date=date(2026, 9, 12),
+        start=None,
+        end=None,
+        is_trading_day=False,
+    )
+    assert closed.trade_date == date(2026, 9, 12)
+    assert closed.start is None
+    assert closed.end is None
+    assert closed.is_trading_day is False
+
+
+def test_trade_date_is_the_first_field_and_part_of_identity() -> None:
+    """Field order is pinned here so a later edit that moves it fails in this
+    file rather than at a construction site."""
+    assert [field.name for field in dataclass_fields(SessionInfo)] == [
+        "trade_date",
+        "start",
+        "end",
+        "is_trading_day",
+    ]
+    assert _session(trade_date=date(2026, 3, 16)) != _session(
+        trade_date=date(2026, 3, 15)
+    )
 
 
 # --- negative lots / prices / non-positive lot size --------------------------

@@ -66,8 +66,18 @@ ties a fee to the trade that incurred it (#11).
 **`PortfolioState(cash: Decimal, positions: tuple[Position, ...])`**
 Broker-authoritative cash and holdings.
 
-**`SessionInfo(start: datetime | None, end: datetime | None, is_trading_day: bool)`**
-One calendar day's session. `in_closing_window(now: datetime, minutes: int = 15) → bool` is true during the final `minutes` of the session (`now` inclusive of the window start, exclusive of `end`). Raises `ValueError` on naive `now`. Not I/O.
+**`SessionInfo(trade_date: date, start: datetime | None, end: datetime | None, is_trading_day: bool)`**
+One calendar day's session. `trade_date` is the Moscow calendar date the entry
+describes; it is **first**, present on every day open or closed, never `None`,
+and carries **no default** — a site that omits it raises `TypeError` at
+construction (v1.81, #51). `trade_date=None`, a `datetime`, or anything that is
+not a `date` raises `ValueError`; `datetime` subclasses `date`, so `isinstance`
+alone would accept one and key `trading_days` on an ISO string with a time in
+it. Where `is_trading_day` is true, `trade_date` **must** equal
+`clock.moscow_date(start)` — an obligation on producers
+(`broker.client.get_trading_schedule`, `db.trading_days`, `sandbox.exchange`,
+every fixture), not a `__post_init__` check, because `clock` imports `models`.
+`in_closing_window(now: datetime, minutes: int = 15) → bool` is true during the final `minutes` of the session (`now` inclusive of the window start, exclusive of `end`). Raises `ValueError` on naive `now`. Not I/O.
 
 **`RiskDecision(approved: bool, lots: int | None, reason: RejectionReason | None)`**
 Exactly one of: approved with `lots > 0` and `reason is None`, or rejected with `reason` set and `lots is None`. Raises `ValueError` if both, neither, or approved with zero lots.
@@ -355,17 +365,26 @@ date rather than what happened. Exists because the broker serves no schedule
 before today (§2.1), so the past must be remembered rather than fetched (#45).
 
 **`async record_many(sessions: list[SessionInfo]) → int`**
-Upserts one row per day on the Moscow date, newer observation winning, in one
-transaction. Returns how many were written. A session with no `start` — a
-non-trading day, which carries no timestamps — is skipped, not stored under a
-null key.
+Upserts one row per day on `SessionInfo.trade_date`, newer observation winning,
+in one transaction. Returns how many were written. **Every day of the window is
+recorded, closed days included** (v1.81, #51): a non-trading day is written with
+`is_trading_day = 0` and `session_start`/`session_end` null, which
+`006_trading_days.sql` has declared `TEXT NULL` from the start, so no migration
+was needed. The old "a session with no `start` is skipped" clause is withdrawn —
+`trade_date` is a `date` and never `None`, so there is nothing left to skip.
 
 **`async list_since(start: date) → list[SessionInfo]`**
-Recorded days from `start` onwards, oldest first. `[]` when none, never `None`.
+Recorded days from `start` onwards, oldest first, **closed days included**, so
+the round trip through the table is lossless. `trade_date` is read from the
+`trade_date` column, never reconstructed from `session_start` (v1.81). `[]` when
+none, never `None`.
 
 **`async earliest() → date | None`**
 The oldest recorded date, or `None` when nothing has been recorded. Coverage is
-defined against this.
+defined against this. It is the oldest recorded **calendar** day, not the oldest
+recorded trading day (v1.81): recording closed days moves it backwards, never
+forwards, so `market.session.covers` becomes true for days it was false for and
+false for none it was true for.
 
 ## `zarabot.db.orders`
 
@@ -701,10 +720,17 @@ Requests `exchange="MOEX"` by name — the main equity board, weekends closed �
 never a substring match over the 53 MOEX-prefixed exchanges (#43). The range is
 anchored to the start of the current UTC day and `days` may not exceed 14;
 `ValueError` if it does, because the broker rejects a longer horizon with
-`INVALID_ARGUMENT` / `30002` (#39). One `SessionInfo` per day returned, in
-order. A day that is not a session — `is_trading_day` false, or `1970-01-01`
-timestamps whatever the flag says — comes back as
-`SessionInfo(start=None, end=None, is_trading_day=False)`. Empty list when the
+`INVALID_ARGUMENT` / `30002` (#39). One `SessionInfo` per day returned,
+**ascending by `trade_date`** (v1.81), so `market.session` may read `fetched[0]`
+as the window's first day. A day that is not a session — `is_trading_day` false,
+or `1970-01-01` timestamps whatever the flag says — comes back as
+`SessionInfo(trade_date=<its own date>, start=None, end=None, is_trading_day=False)`:
+`trade_date` is read from `TradingDay.date`, which is populated and correct on a
+closed day (§2.1), converted with `clock.moscow_date` where the SDK hands back
+an instant and used as-is where it hands back a `date` — never `.date()` on the
+UTC value, never from `start_time`, never from list position (v1.81, #51). A day
+whose `date` is absent or below the 1971 epoch guard is **omitted** and logged
+at WARNING; the rest of the window is still returned. Empty list when the
 exchange is absent from the response.
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 `confirm_margin_trade=False`. Raises `OrderRejected`. `commission` is
@@ -769,19 +795,29 @@ age counting must not stop the bot trading. Other exceptions from that write
 path propagate (F-52 / v1.59). Does not raise on an unavailable broker schedule.
 On a successful refresh, emits `session_open` or `session_closed` (INFO) for the
 first day of the fetched window, with `trade_date`, `opens_at`, `closes_at`
-(v1.61). `session_closed.trade_date` is `clock.moscow_date(clock.now())`;
-`opens_at` and `closes_at` are null (v1.67). Not a Telegram alert.
+(v1.61). **`trade_date` on both events is `first.trade_date` and nothing else
+(v1.81, supersedes v1.67);** the `clock.moscow_date(clock.now())` derivation is
+withdrawn, and this module now reads no clock at all. `opens_at` and `closes_at`
+are null on `session_closed`. Not a Telegram alert.
 
 **`calendar() → TradingCalendar`**
-Recorded history plus the live window, oldest first, one entry per day. Empty
-when nothing is known; never `None`. `app.loops` reads this instead of fetching
-a fourteen-day schedule every cycle (#19), and it spans the past because the
-broker serves no schedule before today (#45).
+Recorded history plus the live window, **one entry per Moscow `trade_date`,
+oldest first, closed days included** (v1.81). A date in both the history and the
+live window appears once and the **live** observation wins. Empty when nothing is
+known; never `None`. `app.loops` reads this instead of fetching a fourteen-day
+schedule every cycle (#19), and it spans the past because the broker serves no
+schedule before today (#45). Before v1.81 the dedupe keyed on the session start
+with `datetime.min` for a closed day, so a fortnight with four weekend days came
+back with one entry (#51). `clock.trading_days_between` is unchanged by the fix
+and §3.2 pins that — it counts entries with `is_trading_day` true and a non-null
+`start`, which the restored entries are not.
 
 **`covers(day: date) → bool`**
 Whether the recorded calendar reaches back to `day`. `False` with no history.
 Lets a caller tell a count it can stand behind from one it cannot — an
-uncovered day is simply not counted, and nothing raises.
+uncovered day is simply not counted, and nothing raises. It is coverage of the
+calendar, not of the trading calendar (v1.81): `db.trading_days.earliest()` is
+now the oldest recorded calendar day, so the boundary moves backwards only.
 
 **`is_open(now: datetime) → bool`**
 True iff `now` is in a trading session, inclusive of `start`, exclusive of
@@ -1252,7 +1288,9 @@ not cover the request is extended by fetching only the missing span.
 A simulated broker backed by historical bars. Never imported by `zarabot/`.
 Every function matches its `broker.client` counterpart's signature and raises
 the same exception for the same condition. Also answers `get_trading_schedule`,
-so `market.session` runs on top rather than being stubbed.
+so `market.session` runs on top rather than being stubbed. Its `SessionInfo`s
+carry `trade_date = clock.moscow_date(start)`, the same producer obligation the
+live client owes, never a date derived from list position (v1.81).
 
 **`Commission(pct: Decimal, minimum: Decimal)`** — the broker's tariff.
 `on(turnover)` is the fee for one fill.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -26,7 +26,7 @@ from t_tech.invest.schemas import (
 from t_tech.invest.utils import decimal_to_money, decimal_to_quotation
 
 import zarabot.broker.client as broker_client
-from zarabot import config
+from zarabot import clock, config
 from zarabot.broker.client import (
     BrokerRateLimited,
     BrokerUnavailable,
@@ -1125,6 +1125,158 @@ async def test_epoch_stamps_yield_no_session_even_when_flagged_trading(
     assert sessions[0].start is None
     assert sessions[0].end is None
     assert sessions[0].is_trading_day is False
+
+
+# --------------------------------------------------------------------------
+# #51 — the date of a day is field 1, and the sentinel lives in fields 3 and 4.
+# --------------------------------------------------------------------------
+
+
+async def test_closed_day_keeps_its_date_when_the_sentinel_is_normalised_away(
+    capture: _Capture,
+) -> None:
+    """The closed day's own `date` survives; only `start_time` and `end_time`
+    are mapped to `None`. Its date is deliberately NOT the neighbouring trading
+    day's, and is not derived from its position in the list — a fixture where
+    either coincides pins nothing (#51)."""
+    saturday = datetime(2026, 3, 21, 0, 0, tzinfo=UTC)
+    monday = datetime(2026, 3, 23, 0, 0, tzinfo=UTC)
+    capture.schedule_override = [
+        SimpleNamespace(
+            exchange="MOEX",
+            days=[
+                SimpleNamespace(
+                    date=saturday,
+                    is_trading_day=False,
+                    start_time=EPOCH,
+                    end_time=EPOCH,
+                ),
+                SimpleNamespace(
+                    date=monday,
+                    is_trading_day=True,
+                    start_time=monday.replace(hour=7),
+                    end_time=monday.replace(hour=15, minute=54, second=59),
+                ),
+            ],
+        )
+    ]
+    sessions = await get_trading_schedule(1)
+
+    closed, open_day = sessions
+    assert closed.trade_date == date(2026, 3, 21)
+    assert closed.start is None
+    assert closed.end is None
+    assert closed.is_trading_day is False
+    assert closed.trade_date != open_day.trade_date
+
+
+async def test_trading_days_trade_date_matches_the_moscow_date_of_its_start(
+    capture: _Capture,
+) -> None:
+    """The producer obligation `models` cannot check — it cannot import `clock`
+    without a cycle — checked at the producer that can (§4 `models`)."""
+    sessions = await get_trading_schedule(SCHEDULE_DAYS)
+    trading = [session for session in sessions if session.is_trading_day]
+    assert trading
+    for session in trading:
+        assert session.start is not None
+        assert session.trade_date == clock.moscow_date(session.start)
+
+
+async def test_trade_date_is_the_moscow_date_of_field_one_not_its_utc_date(
+    capture: _Capture,
+) -> None:
+    """A `date` expressed as midnight Moscow is 21:00 UTC on the previous
+    calendar day. `.date()` on the UTC value is wrong by one day; a fixture at
+    midnight UTC is satisfied by either conversion and pins neither (#51)."""
+    midnight_moscow = datetime(2026, 3, 15, 21, 0, tzinfo=UTC)
+    assert midnight_moscow.date() == date(2026, 3, 15)
+    session_start = datetime(2026, 3, 16, 7, 0, tzinfo=UTC)
+    capture.schedule_override = [
+        SimpleNamespace(
+            exchange="MOEX",
+            days=[
+                SimpleNamespace(
+                    date=midnight_moscow,
+                    is_trading_day=True,
+                    start_time=session_start,
+                    end_time=session_start.replace(hour=15, minute=54, second=59),
+                )
+            ],
+        )
+    ]
+    sessions = await get_trading_schedule(1)
+
+    assert sessions[0].trade_date == date(2026, 3, 16)
+
+
+async def test_trading_schedule_returns_days_ascending_by_trade_date(
+    capture: _Capture,
+) -> None:
+    """`market.session` reads `fetched[0]` as the window's first day, so the
+    order is contracted rather than left to a response shape nothing pins."""
+    days = [
+        datetime(2026, 3, 18, 0, 0, tzinfo=UTC),
+        datetime(2026, 3, 16, 0, 0, tzinfo=UTC),
+        datetime(2026, 3, 17, 0, 0, tzinfo=UTC),
+    ]
+    capture.schedule_override = [
+        SimpleNamespace(
+            exchange="MOEX",
+            days=[
+                SimpleNamespace(
+                    date=day,
+                    is_trading_day=True,
+                    start_time=day.replace(hour=7),
+                    end_time=day.replace(hour=15, minute=54, second=59),
+                )
+                for day in days
+            ],
+        )
+    ]
+    sessions = await get_trading_schedule(1)
+
+    assert [session.trade_date for session in sessions] == [
+        date(2026, 3, 16),
+        date(2026, 3, 17),
+        date(2026, 3, 18),
+    ]
+
+
+@pytest.mark.parametrize("undateable", [None, EPOCH])
+async def test_undateable_day_is_omitted_and_logged_at_warning(
+    capture: _Capture, caplog: pytest.LogCaptureFixture, undateable: object
+) -> None:
+    """There is no honest fallback: an entry with no date cannot be keyed,
+    recorded or deduped. Omission shortens the window, which
+    `market.session.covers` reports — fabricating a date from list position
+    mis-dates a day, which nothing would report (#51)."""
+    good = datetime(2026, 3, 16, 0, 0, tzinfo=UTC)
+    capture.schedule_override = [
+        SimpleNamespace(
+            exchange="MOEX",
+            days=[
+                SimpleNamespace(
+                    date=undateable,
+                    is_trading_day=True,
+                    start_time=good.replace(hour=7),
+                    end_time=good.replace(hour=15, minute=54, second=59),
+                ),
+                SimpleNamespace(
+                    date=good,
+                    is_trading_day=True,
+                    start_time=good.replace(hour=7),
+                    end_time=good.replace(hour=15, minute=54, second=59),
+                ),
+            ],
+        )
+    ]
+    with caplog.at_level(logging.WARNING, logger="zarabot.broker.client"):
+        sessions = await get_trading_schedule(1)
+
+    # One bad entry does not take the window down.
+    assert [session.trade_date for session in sessions] == [date(2026, 3, 16)]
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
 
 
 # --------------------------------------------------------------------------

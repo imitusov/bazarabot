@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from zarabot.db.connection import connect, disconnect
+from zarabot.db.connection import connect, disconnect, shared
 from zarabot.db.migrations import apply
 from zarabot.db.trading_days import earliest, list_since, record_many
 from zarabot.models import SessionInfo
@@ -28,15 +28,23 @@ REQUIRED_ENV = {
 def _trading(day: int) -> SessionInfo:
     base = datetime(2026, 3, day, tzinfo=UTC)
     return SessionInfo(
+        trade_date=date(2026, 3, day),
         start=base.replace(hour=7),
         end=base.replace(hour=15, minute=54),
         is_trading_day=True,
     )
 
 
-def _closed() -> SessionInfo:
-    """A non-trading day, which by contract carries no timestamps at all."""
-    return SessionInfo(start=None, end=None, is_trading_day=False)
+def _closed(day: int) -> SessionInfo:
+    """A non-trading day: no timestamps, but a date of its own (v1.81, #51).
+
+    This is the shape `broker.client.get_trading_schedule` returns — the 1970
+    sentinel is normalised away in `start`/`end`, and `TradingDay.date` is
+    populated and correct on a closed day (§2.1).
+    """
+    return SessionInfo(
+        trade_date=date(2026, 3, day), start=None, end=None, is_trading_day=False
+    )
 
 
 @pytest.fixture
@@ -58,6 +66,11 @@ async def test_recorded_window_reads_back_oldest_first(db: Path) -> None:
     written = await record_many([_trading(18), _trading(16), _trading(17)])
     assert written == 3
     days = await list_since(date(2026, 3, 1))
+    assert [day.trade_date for day in days] == [
+        date(2026, 3, 16),
+        date(2026, 3, 17),
+        date(2026, 3, 18),
+    ]
     starts = [s.start for s in days if s.start is not None]
     assert starts == sorted(starts)
     assert len(days) == 3
@@ -68,6 +81,7 @@ async def test_a_later_observation_replaces_an_earlier_one(db: Path) -> None:
     true about a date, and the broker's latest answer about a date wins."""
     await record_many([_trading(16)])
     moved = SessionInfo(
+        trade_date=date(2026, 3, 16),
         start=datetime(2026, 3, 16, 7, 0, tzinfo=UTC),
         end=datetime(2026, 3, 16, 12, 0, tzinfo=UTC),  # a short session
         is_trading_day=True,
@@ -76,6 +90,20 @@ async def test_a_later_observation_replaces_an_earlier_one(db: Path) -> None:
     days = await list_since(date(2026, 3, 16))
     assert len(days) == 1, "one row per date, not one per observation"
     assert days[0].end == datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
+
+
+async def test_a_day_that_becomes_a_holiday_is_overwritten(db: Path) -> None:
+    """A holiday announced after the fact replaces the earlier answer. Before
+    v1.81 the closed observation could not be recorded at all, so the stale
+    trading row stood."""
+    await record_many([_trading(16)])
+    await record_many([_closed(16)])
+    days = await list_since(date(2026, 3, 16))
+    assert len(days) == 1
+    assert days[0].is_trading_day is False
+    assert days[0].start is None
+    assert days[0].end is None
+    assert days[0].trade_date == date(2026, 3, 16)
 
 
 async def test_earliest_is_none_on_an_empty_table(db: Path) -> None:
@@ -87,13 +115,66 @@ async def test_earliest_returns_the_oldest_recorded_date(db: Path) -> None:
     assert await earliest() == date(2026, 3, 16)
 
 
-async def test_an_undated_day_is_skipped_not_stored(db: Path) -> None:
-    """Only trading days carry a date. A closed day cannot be keyed, and it does
-    not need to be: nothing counts it, and `earliest` is defined in terms of the
-    oldest recorded TRADING day, which is exactly what coverage depends on."""
-    written = await record_many([_trading(16), _closed(), _trading(17)])
-    assert written == 2
-    assert len(await list_since(date(2026, 3, 1))) == 2
+async def test_every_day_of_the_window_is_recorded_closed_ones_included(
+    db: Path,
+) -> None:
+    """v1.81 withdraws "a day with no date is skipped": `trade_date` is a `date`
+    and never `None`, so the input that case described can no longer be
+    constructed — `models` refuses it. The skip was the mechanism by which this
+    table held trading days only, and it is replaced by a lossless round trip.
+
+    `006_trading_days.sql` has declared `session_start` and `session_end`
+    `TEXT NULL` since it was written, so no migration is required.
+    """
+    written = await record_many([_trading(16), _closed(21), _closed(22), _trading(23)])
+    assert written == 4
+    days = await list_since(date(2026, 3, 1))
+    assert [day.trade_date for day in days] == [
+        date(2026, 3, 16),
+        date(2026, 3, 21),
+        date(2026, 3, 22),
+        date(2026, 3, 23),
+    ]
+    closed = [day for day in days if not day.is_trading_day]
+    assert len(closed) == 2
+    for day in closed:
+        assert day.start is None
+        assert day.end is None
+
+    cursor = await shared().execute(
+        "SELECT is_trading_day, session_start, session_end FROM trading_days "
+        "WHERE trade_date = ?",
+        ("2026-03-21",),
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row["is_trading_day"] == 0
+    assert row["session_start"] is None
+    assert row["session_end"] is None
+
+
+async def test_a_closed_day_reports_its_date_from_the_trade_date_column(
+    db: Path,
+) -> None:
+    """Not reconstructed from `session_start`, which is null on exactly the rows
+    that made #51 invisible."""
+    await record_many([_closed(21)])
+    days = await list_since(date(2026, 3, 1))
+    assert len(days) == 1
+    assert days[0].trade_date == date(2026, 3, 21)
+    assert days[0].start is None
+
+
+async def test_earliest_is_the_oldest_calendar_day_not_the_oldest_trading_day(
+    db: Path,
+) -> None:
+    """A Saturday at the head of an observed window is a day the bot was told
+    about and wrote down. Reporting it as uncovered understated the calendar,
+    which is what `market.session.covers` was built on (v1.81)."""
+    # 21 March 2026 is a Saturday.
+    assert date(2026, 3, 21).weekday() == 5
+    await record_many([_closed(21), _closed(22), _trading(23)])
+    assert await earliest() == date(2026, 3, 21)
 
 
 async def test_list_since_excludes_earlier_days(db: Path) -> None:
