@@ -21,7 +21,7 @@ from zarabot.broker.client import (
     OrderRejected,
     StopOrderRejected,
 )
-from zarabot.db.connection import connect, disconnect
+from zarabot.db.connection import connect, disconnect, shared
 from zarabot.db.migrations import apply
 from zarabot.db.orders import get as get_order
 from zarabot.db.orders import list_unresolved
@@ -2044,3 +2044,74 @@ async def test_defect_in_the_cooldown_write_propagates_from_an_executed_stop(
     monkeypatch.setattr("zarabot.execution.orders.start_cooldown", boom)
     with pytest.raises(AttributeError):
         await close_executed_stop(position, _stop_fill(Decimal("95")))
+
+
+# --- The halt above is reachable from the real `db.cooldowns` (issue #210). ---
+# Every test above patches `start_cooldown` to raise, so all of them stayed
+# green while `db.cooldowns.start` swallowed `aiosqlite.Error` and nothing in
+# production could reach the handler they exercise (failure class 4, stacked
+# across two modules so neither module's suite noticed). These two drive a real
+# database failure through the real `db.cooldowns.start` instead: the SQL, the
+# transaction, the re-raise and this module's catch are all production code.
+
+
+async def _drop_the_cooldowns_table() -> None:
+    """Make the next real cooldown write fail as a damaged database would."""
+    conn = shared()
+    await conn.execute("DROP TABLE cooldowns")
+    await conn.commit()
+
+
+async def test_a_real_cooldown_write_failure_reaches_the_halt(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The end-to-end proof that the two halves connect.
+
+    Nothing is patched: `close_position` calls the real `start_cooldown`, the
+    real `transaction()` re-raises `aiosqlite.Error`, and rule 11's remedy runs
+    here. If the swallow in `db.cooldowns.start` ever comes back, this is the
+    test that goes red.
+    """
+    position = await open_position(_signal(), 2, _instrument())
+    await _drop_the_cooldowns_table()
+
+    with caplog.at_level(logging.INFO):
+        closed = await close_position(position, ExitTrigger.TAKE_PROFIT)
+
+    # The halt from #208 actually fires.
+    assert await is_halted() is True
+    assert any("trading halted" in text for text in env.alerts)
+    # `db.connection` reported it as trading-critical on the way through.
+    failures = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "db_write_failed"
+    ]
+    assert failures and failures[-1].critical is True
+    # And the exit is still an exit: returned closed, committed, reported.
+    assert closed.status == "CLOSED"
+    assert closed.exit_trigger is ExitTrigger.TAKE_PROFIT
+    stored = await get_position(position.id)
+    assert stored is not None
+    assert stored.status == "CLOSED"
+    assert await list_open() == []
+    events = _order_events(caplog, "position_closed")
+    assert len(events) == 1
+    assert events[0].position_id == position.id
+
+
+async def test_a_real_cooldown_write_failure_reaches_the_halt_from_a_stop(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same, unpatched, on the exchange-initiated path."""
+    position = await open_position(_signal(), 2, _instrument())
+    await _drop_the_cooldowns_table()
+
+    with caplog.at_level(logging.INFO):
+        closed = await close_executed_stop(position, _stop_fill(Decimal("95")))
+
+    assert await is_halted() is True
+    assert any("trading halted" in text for text in env.alerts)
+    assert closed.status == "CLOSED"
+    assert closed.exit_trigger is ExitTrigger.STOP_LOSS
+    assert len(_order_events(caplog, "position_closed")) == 1
