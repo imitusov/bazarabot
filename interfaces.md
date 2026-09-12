@@ -795,19 +795,29 @@ age counting must not stop the bot trading. Other exceptions from that write
 path propagate (F-52 / v1.59). Does not raise on an unavailable broker schedule.
 On a successful refresh, emits `session_open` or `session_closed` (INFO) for the
 first day of the fetched window, with `trade_date`, `opens_at`, `closes_at`
-(v1.61). `session_closed.trade_date` is `clock.moscow_date(clock.now())`;
-`opens_at` and `closes_at` are null (v1.67). Not a Telegram alert.
+(v1.61). **`trade_date` on both events is `first.trade_date` and nothing else
+(v1.81, supersedes v1.67);** the `clock.moscow_date(clock.now())` derivation is
+withdrawn, and this module now reads no clock at all. `opens_at` and `closes_at`
+are null on `session_closed`. Not a Telegram alert.
 
 **`calendar() → TradingCalendar`**
-Recorded history plus the live window, oldest first, one entry per day. Empty
-when nothing is known; never `None`. `app.loops` reads this instead of fetching
-a fourteen-day schedule every cycle (#19), and it spans the past because the
-broker serves no schedule before today (#45).
+Recorded history plus the live window, **one entry per Moscow `trade_date`,
+oldest first, closed days included** (v1.81). A date in both the history and the
+live window appears once and the **live** observation wins. Empty when nothing is
+known; never `None`. `app.loops` reads this instead of fetching a fourteen-day
+schedule every cycle (#19), and it spans the past because the broker serves no
+schedule before today (#45). Before v1.81 the dedupe keyed on the session start
+with `datetime.min` for a closed day, so a fortnight with four weekend days came
+back with one entry (#51). `clock.trading_days_between` is unchanged by the fix
+and §3.2 pins that — it counts entries with `is_trading_day` true and a non-null
+`start`, which the restored entries are not.
 
 **`covers(day: date) → bool`**
 Whether the recorded calendar reaches back to `day`. `False` with no history.
 Lets a caller tell a count it can stand behind from one it cannot — an
-uncovered day is simply not counted, and nothing raises.
+uncovered day is simply not counted, and nothing raises. It is coverage of the
+calendar, not of the trading calendar (v1.81): `db.trading_days.earliest()` is
+now the oldest recorded calendar day, so the boundary moves backwards only.
 
 **`is_open(now: datetime) → bool`**
 True iff `now` is in a trading session, inclusive of `start`, exclusive of
