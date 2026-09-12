@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.83
+**Version:** 1.84
 **Date:** 2026-09-12
 **Implements:** `business-brief.md` v1.13
 
@@ -2725,13 +2725,20 @@ consecutive-failure alert and is retried as though waiting would help.
   contract states it so that `market.session` may read `fetched[0]` as the
   window's first day without depending on a response shape nothing pins. Sort if
   the response ever arrives otherwise.
-- **A day whose `date` is absent or below the epoch guard is omitted from the
-  result, logged at WARNING (v1.81).** There is no honest fallback: an entry
-  with no date cannot be keyed, cannot be recorded, and cannot be deduped, and
-  the two available alternatives — fabricating a date from list position, or
-  admitting a `None` back into `SessionInfo` — are each the defect this
-  amendment removes. Omission is the same posture
-  `get_executed_stop_fills` already takes toward a stop whose
+- **A day whose `date` is undateable is omitted from the result, logged at
+  WARNING (v1.81; the condition written out in v1.84).** Undateable means any of:
+  the field is absent; it is below the epoch guard; it is a naive `datetime`; or
+  it is neither a `date` nor a `datetime`. The last two were implemented with the
+  first two and are named here because the code omitted more than this clause
+  said (#51). A naive instant is the interesting one: it cannot be converted to a
+  Moscow date without choosing a timezone on its behalf, and choosing one is
+  exactly the fabrication this amendment exists to remove — so it is undateable
+  in the same sense as a missing field, not a lesser case to be salvaged.
+  There is no honest fallback: an entry with no date cannot be keyed, cannot be
+  recorded, and cannot be deduped, and the two available alternatives —
+  fabricating a date from list position, or admitting a `None` back into
+  `SessionInfo` — are each the defect this amendment removes. Omission is the
+  same posture `get_executed_stop_fills` already takes toward a stop whose
   `exchange_order_id` does not resolve: leave it out rather than substitute a
   guess. It shortens the window, which `market.session.covers` reports, instead
   of mis-dating a day, which nothing would report. This has never been observed;
