@@ -4,6 +4,13 @@
 python-telegram-bot>=22.8
 aiosqlite>=0.22
 structlog>=26
+# The ML stack is here for INFERENCE, never training (spec §9). `strategies.
+# ml_model` imports joblib and numpy directly; scikit-learn — and scipy behind
+# it — is needed because unpickling the model bundle requires the estimator's
+# own classes to be importable. Nothing on the server calls `fit`, so this reads
+# like 100MB of dead weight and is not: remove it and `ml_model.load` fails on
+# the first bundle it opens. Training uses the same three from
+# requirements-sandbox.txt, which pulls this file in.
 scikit-learn>=1.9
 joblib>=1.5
 numpy>=2.5
