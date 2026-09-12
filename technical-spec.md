@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.81
+**Version:** 1.82
 **Date:** 2026-09-12
 **Implements:** `business-brief.md` v1.13
 
@@ -121,8 +121,17 @@ application code is written, prints exactly one summary line beginning `PASS` or
 `FAIL`, and **exits 0 on pass and 1 on failure**. Partial success is failure: a
 script that verifies three things and confirms two exits 1.
 
-The suite is run by `scripts/verify/run_all.sh`, which executes every script in
-order, stops at the first non-zero exit, and itself exits non-zero.
+The suite is run by `scripts/verify/run_all.sh`, which executes every script it
+lists, stops at the first non-zero exit, and itself exits non-zero.
+
+**The order it runs them in is a dependency order, not the numbering below
+(v1.82).** `run_all.sh` puts V10 and V9 first because neither needs a token,
+then the read-only checks, then the three that place a real sandbox order — V2,
+V6, V11 — and V8 last, because it waits for the owner to reply to a message. The
+numbers are identifiers, assigned in the order the checks were written, and
+`run_all.sh` is the authority on sequence. The numbering below is ascending so
+that a reader can find a check by its number; until v1.82 V11 was written above
+V10, which read as a run order and was not one.
 
 **V1 — `verify_token.py`.** Authenticates with `TINVEST_TOKEN` and retrieves the
 account list. PASS requires: authentication succeeds, and `TINVEST_ACCOUNT_ID`
@@ -167,9 +176,22 @@ forbidden (#92).
 
 This remains the most important verification in the suite, but its status has
 changed: the behaviour is now **documented** by the broker rather than assumed by
-this spec, so V6 confirms that documentation matches reality on a live account
-instead of discovering whether the design is viable at all. V6 checks the one mechanism the crash-recovery path
-uses; there is no second one to fall back to (v1.73, #92).
+this spec, so V6 confirms that documentation matches reality instead of
+discovering whether the design is viable at all. V6 checks the one mechanism the
+crash-recovery path uses; there is no second one to fall back to (v1.73, #92).
+
+**V6 runs on the sandbox account, and never on the live one (v1.82).** Until
+v1.82 the paragraph above said it confirmed the documentation "on a live
+account", contradicting its own first sentence, and V2's prohibition three
+paragraphs up. V6 places a real order, so it carries V2's rule verbatim: the
+positive action is to run it against the sandbox endpoint with a sandbox account
+id, which is what `verify_order_state.py` does and the only way it may be run.
+What this costs is recorded rather than argued away: a sandbox result is evidence
+about the sandbox, and the one measurement §2.1 has from the live account — that
+a duplicate idempotency key is refused with `INVALID_ARGUMENT`/`30057` — was not
+made by V6 and is not V6's to make. Widening the confirmation to the live account
+would mean placing a live order from a verification script, which is a decision
+the owner has not made and which no agent may take on its own.
 
 **V7 — `verify_rate_limits.py`.** Issues requests to the candle endpoint at a
 measured, increasing rate until the broker signals a limit. PASS requires: the
@@ -189,22 +211,21 @@ NTP source, the deploy's data directory writable, and outbound connectivity to
 both the
 broker API and Telegram. FAIL otherwise.
 
-**V11 — `verify_stop_orders.py`.** On the sandbox account: buys one lot, places
-a good-till-cancel stop-loss against it, confirms the exchange reports the stop
-as standing, cancels it cleanly, and flattens. PASS requires all five. FAIL
-otherwise. This verifies the mechanism the position-protection design depends on
-— that the exchange will hold a stop indefinitely without the bot present.
-
 **V10 — `verify_sdk_index.py`.** Runs on the machine that builds the image, and
 needs no token. PASS requires: the T-Bank index is reachable; the resolved wheel
 matches the recorded sha256; `from t_tech.invest import AsyncClient` succeeds;
 `OrderIdType.ORDER_ID_TYPE_REQUEST` exists; and `post_order` and
 `get_order_state` carry the `order_id`, `order_id_type` and
-`confirm_margin_trade` parameters this spec depends on. FAIL otherwise.
-
-Each of these was confirmed against wheel 1.49.1 on 2026-08-18, so V10 is a
+`confirm_margin_trade` parameters this spec depends on. FAIL otherwise. Each of
+those five was confirmed against wheel 1.49.1 on 2026-08-18, so V10 is a
 regression check against a future SDK version silently removing or renaming
 something load-bearing — not a discovery step.
+
+**V11 — `verify_stop_orders.py`.** On the sandbox account: buys one lot, places
+a good-till-cancel stop-loss against it, confirms the exchange reports the stop
+as standing, cancels it cleanly, and flattens. PASS requires all five. FAIL
+otherwise. This verifies the mechanism the position-protection design depends on
+— that the exchange will hold a stop indefinitely without the bot present.
 
 ### 2.1 Measured values
 
@@ -228,7 +249,7 @@ that inspection could not have falsified.
 | **Trading schedule, past** | **Not obtainable.** Any `from_` before today's midnight is rejected with `INVALID_ARGUMENT` / **30003** | Measured 2026-08-28 against the live account across seven ranges — 14 days back, 7, 1, and every end date from midnight to +7d. Every one failed; only a range starting at today's midnight is served. This is why `MAX_AGE` cannot simply be given a backward window (#45) |
 | **Trading schedule, a closed day's `date`** | **Populated and correct.** `TradingDay.date` carries the real calendar date on a **non-trading** day; `start_time` and `end_time` carry the `1970-01-01T00:00:00+00:00` sentinel, not null. The returned sequence is **contiguous** — one entry per calendar day, no gaps | Measured 2026-09-12 against the live account, one read-only `trading_schedules` call over today +14d. Five closed days in the window returned `2026-09-12`, `09-13`, `09-19`, `09-20`, `09-26` — the actual weekends. Field 1 is therefore a usable key for a day with no session, which is what `SessionInfo.trade_date` rests on (#51), and contiguity is what makes "oldest first by `trade_date`" a total order rather than an aspiration. It also explains why #51 was invisible: a closed day genuinely has no session times, so mapping them to `None` looks right, and discarding the date alongside them looks like part of the same normalisation. It is not — the sentinel is in fields 3 and 4 only |
 | Longest legitimate candle gap | **6 calendar days** (2025-12-30 → 2026-01-05, the New Year closure) | Recurs annually; a continuity check below it fails on correct data |
-| Market-data rate limit | 200 requests / 60s | Measured headroom 400× the loop's 1.0 calls/min |
+| Market-data rate limit | 200 requests / 60s | Measured headroom **200×** the loop's 1.0 calls/min — 200 requests per minute against one poll per minute, the whole watchlist in a single call. Read 400× until v1.82, which no arithmetic on this row produces; V7's gate is "headroom is under 2×", so nothing broke, but this is the figure an operator would cite when shortening `POLL_INTERVAL_SECONDS` |
 | **`PostOrder` rate limit** | **2 / second** | The one limit close enough to matter; an exit loop slicing an order can reach it |
 | Price polling cost | `get_last_prices` takes the **whole watchlist in one call** | A poll cycle costs 1 request, not one per instrument (#19) |
 | Calendar horizon | **14 days measured from the start of the day** | Exceeding it returns `INVALID_ARGUMENT`/`30002`, "The required period should not exceed 14 days" (#39) |
@@ -1308,6 +1329,14 @@ Additionally, on exits booked from an exchange stop:
   trading against. Written as a caller-shaped test: drive `/halt`, do not stub
   `state.halt`. A test that stubbed the halt would pass with the broker call
   still in place).
+- **An open position whose `strategy` is `UNATTRIBUTED` appears in `/positions`
+  and under no strategy in `/strategies` (v1.82; proves this module's half of
+  rule 35 — the sentinel is reported and never credited).** Owed, and not written
+  when v1.82 was issued: nothing in `tests/test_telegram_commands.py` mentions
+  either sentinel today, so the `/strategies` half rests on `enabled` happening to
+  be the thing iterated. The `reporter.weekly` half is pinned —
+  `test_recovered_entry_without_a_signal_is_unattributed` asserts on
+  `_strategy_section` — and this is the same assertion for the other reader.
 
 **`telegram.notifier`**
 - A failed send is retried and, if still failing, emits `telegram_send_failed`
@@ -3361,10 +3390,83 @@ is the failure this cadence exists to prevent.
 - Returns `None` rather than raising on degenerate input such as a flat series.
 - Deterministic: identical inputs produce identical outputs.
 
-`ma_crossover`, `rsi_reversion`, `momentum` each implement this protocol and
-declare their own parameters and lookback. `registry.enabled(config) → list[Strategy]`
-builds the active set from `ENABLED_STRATEGIES`, raising `ConfigError` on an
-unknown name.
+`ma_crossover`, `rsi_reversion`, `momentum` and `ml_model` each implement this
+protocol and each has its own contract below, naming its parameters, its lookback
+and its entry condition. `registry` builds the active set, also below, under its
+own heading.
+
+**Those four contracts are separate headings as of v1.82.** Until v1.82 this
+section was the only specification the three rule-based strategies had: no entry
+condition, no parameter and no lookback appeared anywhere, and
+`scripts/make_tasks.py` pointed tasks 15, 16, 17 and 19 at *this* heading, so four
+task files carried one identical contract that never named the strategy being
+built. That is failure class 2 in its plainest form — the generator cuts the spec
+by heading and nothing else, so a contract under the wrong heading reaches nobody.
+All four were implemented and tested before the contract existed, so what v1.82
+records is the behaviour that shipped, read back from the modules and from
+`interfaces.md`, which already carried each strategy's parameters and lookback.
+Every number below is a choice already made and running in the live path; none of
+them is decided here.
+
+### `zarabot/strategies/ma_crossover.py`
+
+Implements the `Strategy` protocol specified under `zarabot/strategies/base.py`,
+which applies here unchanged — pure, no I/O and no clock beyond `now`, entry-only,
+`BUY` or `None`, never `SELL`, deterministic. `name` is `"ma_crossover"` and
+`lookback` is **31**: the slow window plus one bar, because a crossover is a
+comparison between two consecutive bars and not a state of one.
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+- Parameters: a simple moving average of the last **10** closes (fast) against one
+  of the last **30** (slow). Both are module constants rather than configuration,
+  on the same reasoning as `ml_model`'s confidence threshold: changing one changes
+  what the strategy means, so it travels with the code and a redeploy.
+- Returns a `BUY` when the fast average was **at or below** the slow average one
+  bar ago and is **strictly above** it on the latest bar. The condition is the
+  crossing, not the ordering: a series that has been above for weeks crosses
+  nothing and returns `None`.
+- `reference_price` on the returned `Signal` is the latest close, and
+  `generated_at` is the `now` it was given.
+- Returns `None` when fewer than `lookback` candles are supplied, and `None` when
+  every supplied close is identical — a flat series is the degenerate input the
+  protocol requires be answered with `None` rather than an exception.
+
+### `zarabot/strategies/rsi_reversion.py`
+
+Implements the `Strategy` protocol under `zarabot/strategies/base.py`, unchanged
+and in full. `name` is `"rsi_reversion"` and `lookback` is **15**: the RSI period
+plus one close, since fourteen changes need fifteen closes.
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+- Parameters: RSI period **14**, oversold threshold **30**. Module constants
+  rather than configuration: changing either changes what the strategy means, so
+  it travels with the code and a redeploy.
+- RSI is computed from the last 14 close-to-close changes as
+  `100 − 100 / (1 + mean gain / mean loss)`, both means taken over the period
+  rather than over the number of up or down bars.
+- Returns a `BUY` when that value is **strictly below 30**. At or above 30 is not
+  oversold and returns `None`.
+- Two windows have no RSI and therefore yield no signal: one with neither a gain
+  nor a loss, and one with no loss at all, which reads as 100 — the opposite end
+  of the scale from the entry this strategy takes.
+- Returns `None` when fewer than `lookback` candles are supplied, and `None` on a
+  flat series.
+
+### `zarabot/strategies/momentum.py`
+
+Implements the `Strategy` protocol under `zarabot/strategies/base.py`, unchanged
+and in full. `name` is `"momentum"` and `lookback` is **21**: the twenty prior
+bars the breakout is measured against, plus the bar that breaks out.
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+- Parameter: a **20**-bar prior window. A module constant rather than
+  configuration, for the reason the other two give.
+- Returns a `BUY` when the latest **close** is strictly above the highest **high**
+  of the twenty bars before it. High, not close: the level a breakout has to clear
+  is the level the instrument actually reached, and comparing closes would signal
+  on a move that had already been rejected intraday.
+- Returns `None` when fewer than `lookback` candles are supplied, when the close
+  does not exceed that high, and on a flat series.
 
 ### `zarabot/strategies/ml_model.py`
 
@@ -3401,6 +3503,25 @@ unknown name.
 The threshold is a property of the trained model, not of the deployment: moving
 it changes what the model means, so it travels with the code and a redeploy, the
 same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Absent from the registry entirely when `ML_MODEL_PATH` is unset.
+
+### `zarabot/strategies/registry.py`
+
+**`enabled(config: Config) → list[Strategy]`**
+- Builds the active strategy set from `ENABLED_STRATEGIES`, instantiating one
+  strategy per name **in the order the setting lists them**, and returning an
+  empty list rather than `None` when it enables nothing.
+- Raises `ConfigError` naming `ENABLED_STRATEGIES` on a name it does not know.
+  This is the whole of the module's validation, and it happens at startup rather
+  than mid-session: a typo in a strategy name must stop the bot, never silently
+  trade a smaller set than the owner configured.
+- `ml_model` is the one name with a condition attached: it is **omitted entirely**
+  when `ML_MODEL_PATH` is unset, and otherwise `ml_model.load` is called here, so
+  `ModelLoadError` and `ModelContractError` propagate out of this function to
+  `app.startup` step 4, which is rule 17's refusal to start. Omitting it is not a
+  silent disable — an unset path is the owner saying ML is off.
+- Pure apart from that one load: no clock, no database, no broker, no I/O of its
+  own. `load` is the exception, and it is the reason this function is called once
+  at startup and never on the trading path.
 
 ### `zarabot/risk/sizing.py`
 
@@ -3813,11 +3934,17 @@ recorded is a different kind of thing from a wrong number that looks right.
   `ma_crossover` — a real strategy whose weekly figures decide whether it stays
   enabled — so every crash-recovered trade biased the evidence for one named
   strategy, systematically and always in the same direction (#11).
-  `UNATTRIBUTED` is a sentinel in the same family as `ADOPTED`: the `positions`
-  schema already accepts it, `telegram.commands` iterates the *enabled*
-  strategies and so never shows it under one, and `reporter.weekly` groups by the
-  stored name and so shows it under a heading of its own. It is reported, and it
-  is never credited.
+  `UNATTRIBUTED` is a sentinel in the same family as `ADOPTED`, and the
+  `positions` schema already accepts it. This module owns the **writing** half of
+  rule 35 and nothing more: that a recovered entry with no signal is stored under
+  the sentinel. The **reporting** half — that the sentinel is shown rather than
+  dropped, and never folded into a named strategy's figures — is owed by
+  `telegram.commands` and by `reporter.weekly`, and as of v1.82 it is written
+  under each of their §4 headings instead of only here. It was stated only here
+  until v1.82: `make_tasks.py` cuts by heading, so neither module's agent was ever
+  shown the obligation its half of rule 35 rests on (#117 item 11, failure class
+  2). Rule 35 holds when both halves hold — it is reported, and it is never
+  credited.
 - **The signal lookup spans the order's life, not one calendar date.** It reads
   `db.signals.list_for_period(moscow_date(order.created_at), moscow_date(now))`.
   Searching only today's Moscow date meant an order that filled at 23:58 MSK and
@@ -4057,6 +4184,17 @@ One handler per command in the brief's command table.
   "to `state.halt` and to nothing else" while calling `pnl` — and that line is
   correct as written; it is v1.69 that was wrong. `/status` already reports the
   day's position on demand, so the figure remains one command away.
+- **This module owns half of rule 35's reporting (v1.82).** `/strategies` lists
+  the strategies `registry.enabled` returns and reports each by that name, so a
+  position whose stored `strategy` is a sentinel — `UNATTRIBUTED` from
+  crash recovery, `ADOPTED` from reconciliation — is **never shown under a named
+  strategy and never counted into one's figures**. The positive action is that it
+  is still shown: `/positions` prints each open position's stored `strategy`
+  verbatim, sentinel included, so a trade the bot did not decide on is visible to
+  the owner on demand rather than absent from every reply. Do not add a sentinel
+  to the `/strategies` listing by iterating stored names instead of enabled ones:
+  that is the credit rule 35 forbids. `reporter.weekly` owns the other half, and
+  the writing half is `execution.orders`'.
 
 ### `zarabot/reporter/weekly.py`
 
@@ -4066,6 +4204,18 @@ One handler per command in the brief's command table.
   intended-versus-actual exit price for gapped exits.
 - A week with no closed trades produces a valid report saying so.
 - Undefined metrics are reported as not applicable, never as zero.
+- **The per-strategy section groups by the `strategy` value stored on the
+  position, not by the enabled set (v1.82).** This module owns half of rule 35's
+  reporting: a sentinel — `UNATTRIBUTED` from crash recovery, `ADOPTED` from
+  reconciliation — therefore appears **under a heading of its own**, with its own
+  P&L and trade count, and is never added to a named strategy's figures. Both
+  directions matter. Crediting it to a real strategy is the systematic bias rule
+  35 exists to prevent, and filtering it out so the section only lists enabled
+  strategies is the other way to break the rule: the week's totals would then
+  disagree with the sum of its per-strategy lines, and a trade the bot did not
+  decide on would be invisible in the one document the owner reads weekly.
+  `telegram.commands` owns the other half, and the writing half is
+  `execution.orders`'.
 - Over the length limit, sections are dropped in this order — exit-trigger
   distribution, cooldown counts, worst trade — and the omission is noted.
 
@@ -4507,7 +4657,13 @@ unreachable, while every test was green. Anything added to this system that must
 run continuously is added to this list in the same change, or it does not run.
 
 A failure in one task must never terminate another; each is supervised and
-restarted with backoff. A failure in one task must never terminate another.
+restarted with exponential backoff under rule 21. **The bound is one second,
+doubling, to a ceiling of 300 seconds, reset to one second whenever the task
+returns without raising (v1.82).** Rule 21 says "exponential backoff" and names
+no bound; an unbounded doubling would leave a crashed exit loop asleep for hours,
+so the bound is recorded here. It is the one the supervisor already applies —
+written down, not decided now. Until v1.82 this paragraph stated its first
+sentence twice, the second copy adding nothing.
 
 **Observability of the supervisor (v1.61):**
 - Each heartbeat job emits `heartbeat` (INFO) with `uptime_seconds`,
@@ -5147,8 +5303,19 @@ historical record is the purpose of the project. Backups are retained 30 days.
   constraint. It is a separate migration rather than an edit to `001` because
   `001` has been applied — in tests, and potentially on a developer machine — and
   the forward-only rule holds without exception.
-- `007_job_runs.sql` creates `job_runs`. Empty at first, which simply means
-  every job is due once after the migration — correct, not a gap.
+- `003_position_events.sql` creates `position_events`. Forward-only, as above:
+  `001` is already applied in tests and on the deployed database. The live
+  database holds zero rows, so adding the table and enabling foreign-key
+  enforcement cannot conflict with existing data — this is the cheapest moment in
+  the project's life to turn enforcement on.
+- `004_position_exit_commission.sql` adds `exit_commission` to `positions`. It
+  exists because an `EXTERNAL` close has no closing order row, so its commission
+  had nowhere to live and was simply lost (#11). Nullable with no default and no
+  backfill: the live database holds zero closed positions, and inventing a
+  historical value would be the same mistake in a new place.
+- `005_order_broker_id.sql` adds `broker_order_id` and `commission_alerted_at`
+  to `orders`. Both nullable, no default, no backfill: the live database holds
+  zero orders, and there is nothing historical to reconstruct.
 - `006_trading_days.sql` creates `trading_days`. It holds no history at first,
   and that is correct rather than a gap to backfill: there is nowhere to backfill
   *from*, since the broker will not serve a past schedule at all. The table fills
@@ -5158,19 +5325,16 @@ historical record is the purpose of the project. Backups are retained 30 days.
   writes rows the existing schema already accepts, and there is nothing to
   backfill — the closed days that went unrecorded before v1.81 cannot be
   re-fetched any more than any other past day can.
-- `005_order_broker_id.sql` adds `broker_order_id` and `commission_alerted_at`
-  to `orders`. Both nullable, no default, no backfill: the live database holds
-  zero orders, and there is nothing historical to reconstruct.
-- `004_position_exit_commission.sql` adds `exit_commission` to `positions`. It
-  exists because an `EXTERNAL` close has no closing order row, so its commission
-  had nowhere to live and was simply lost (#11). Nullable with no default and no
-  backfill: the live database holds zero closed positions, and inventing a
-  historical value would be the same mistake in a new place.
-- `003_position_events.sql` creates `position_events`. Forward-only, as above:
-  `001` is already applied in tests and on the deployed database. The live
-  database holds zero rows, so adding the table and enabling foreign-key
-  enforcement cannot conflict with existing data — this is the cheapest moment in
-  the project's life to turn enforcement on.
+- `007_job_runs.sql` creates `job_runs`. Empty at first, which simply means
+  every job is due once after the migration — correct, not a gap.
+- **The list above is in ascending numeric order, which is also the order the
+  driver applies them in (v1.82).** Until v1.82 it ran `001, 002, 007, 006, 005,
+  004, 003` — newest first for the four added last — against this section's own
+  first bullet. Nothing in the code reads this list, so nothing broke; what it
+  cost is that a reader reconstructing the schema by hand, or reviewing a new
+  migration for conflicts, would apply `007_job_runs.sql` before
+  `003_position_events.sql` and see a different database from the one that
+  exists. A new migration is appended here, at the end, with the next number.
 - Migrations are forward-only. There are no down-migrations: a bad migration is
   corrected by a new migration, because rolling a schema backwards under a
   database holding real trade history is more dangerous than the defect.
@@ -5239,7 +5403,8 @@ implementation gap.
 | `startup_ok` | `app.startup` | INFO | `version`, `mode`, `halted`, `adjustments_count` |
 | `startup_failed` | `app.startup` | CRITICAL | `stage`, `reason` |
 | `config_invalid` | `app.startup` | CRITICAL | `variable` |
-| `session_open` / `session_closed` | `market.session` | INFO | `trade_date`, `opens_at`, `closes_at` |
+| `session_open` | `market.session` | INFO | `trade_date`, `opens_at`, `closes_at` |
+| `session_closed` | `market.session` | INFO | `trade_date` |
 | `candles_failed` | `market.data` | WARNING | `ticker`, `error` |
 | `signal_generated` | `app.loops` | INFO | `ticker`, `strategy`, `reference_price` |
 | `signal_rejected` | `app.loops` | INFO | `ticker`, `strategy`, `rejection_reason` |
@@ -5277,6 +5442,20 @@ implementation gap.
 carries the difference between the actual exit price and the stop price. It is
 the field the gap-cost query aggregates, and omitting it makes the true cost of
 overnight holding unmeasurable.
+
+**`session_open` and `session_closed` are two rows, not one (v1.82).** Until
+v1.82 they shared a row requiring `trade_date`, `opens_at` and `closes_at` of
+both, which this section's opening paragraph calls a defect when one is missing —
+while `market.session`'s own contract says in bold that "`opens_at` and
+`closes_at` are null on `session_closed`, and that is the whole point of the
+event". One of the two had to be wrong and it was the table: a closed day has no
+open and no close, and what the record must still answer is *which day*.
+`session_closed` therefore requires `trade_date` alone. `market.session` emits
+`opens_at` and `closes_at` on it as explicit nulls, which this table neither
+requires nor forbids — a null-valued key is not a missing field, and a missing
+field is what §7.1 calls a defect. Two rows is also how the records are actually
+shaped: `export_health.py` groups on `event`, so the two names are counted
+separately, and their required fields differ.
 
 **Host export (v1.61).** `scripts/deploy/export_health.py` groups on `event`.
 A record with no `event` key is library noise and is omitted from domain

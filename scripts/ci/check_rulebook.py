@@ -2,10 +2,12 @@
 """Fail when AGENTS.md drifts from §8, the tree sketch, or coverage floors.
 
 Issue #118 S-28 item 7 (rulebook consistency). The issue asked to match
-``find zarabot sandbox -name '*.py'``. That check would red main on day one:
-the File structure block is a package sketch (``sandbox/`` lists data,
-backtest, train — not ``exchange.py``; ``zarabot/`` omits ``__main__.py``).
-This gate therefore:
+``find zarabot sandbox -name '*.py'``. That check would have redded main when
+this gate was written, because the File structure block was then a package
+sketch rather than an inventory — ``sandbox/`` listed data, backtest and train
+but not ``exchange.py``, and ``zarabot/`` omitted ``__main__.py``. #117 item 9
+wrote every module into the sketch and `check_file_tree.py` now enforces the
+match in both directions. This gate therefore:
 
   * parses the highest integer ordinal in technical-spec.md §8 and the
     ``rules (1–N)`` range in AGENTS.md; ``9b`` is an extra label, not a new
@@ -22,7 +24,8 @@ WHAT THIS DOES NOT COVER:
 
   * Every ``.py`` file appearing in the sketch. Nested names (``models``,
     ``client``, ``train``) are documentation, not a file inventory.
-  * ``find zarabot sandbox -name '*.py'`` completeness (#117 as written).
+  * ``find zarabot sandbox -name '*.py'`` completeness (#117 as written) —
+    that is `check_file_tree.py`'s job, not this one's.
   * §8 rule *text* vs the Must NEVER / Must ALWAYS bullets.
   * Lettered ordinals other than ``9b`` — a new ``Nb`` fails rather than
     being folded into the integer range.

@@ -14,22 +14,26 @@ Module **16** of 42 in `dependency-order.md`. Everything before it is complete a
 
 ## Module contract
 
-### `zarabot/strategies/base.py`
+### `zarabot/strategies/rsi_reversion.py`
 
-**`Strategy` protocol** — `name: str`, `lookback: int`, and:
+Implements the `Strategy` protocol under `zarabot/strategies/base.py`, unchanged
+and in full. `name` is `"rsi_reversion"` and `lookback` is **15**: the RSI period
+plus one close, since fourteen changes need fifteen closes.
 
 **`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
-- Pure. No I/O, no clock, no database, no broker.
-- Returns a `BUY` signal or `None`. **Must never return a `SELL` signal** —
-  strategies enter, the lifecycle exits.
-- Returns `None` when fewer than `lookback` candles are supplied.
-- Returns `None` rather than raising on degenerate input such as a flat series.
-- Deterministic: identical inputs produce identical outputs.
-
-`ma_crossover`, `rsi_reversion`, `momentum` each implement this protocol and
-declare their own parameters and lookback. `registry.enabled(config) → list[Strategy]`
-builds the active set from `ENABLED_STRATEGIES`, raising `ConfigError` on an
-unknown name.
+- Parameters: RSI period **14**, oversold threshold **30**. Module constants
+  rather than configuration: changing either changes what the strategy means, so
+  it travels with the code and a redeploy.
+- RSI is computed from the last 14 close-to-close changes as
+  `100 − 100 / (1 + mean gain / mean loss)`, both means taken over the period
+  rather than over the number of up or down bars.
+- Returns a `BUY` when that value is **strictly below 30**. At or above 30 is not
+  oversold and returns `None`.
+- Two windows have no RSI and therefore yield no signal: one with neither a gain
+  nor a loss, and one with no loss at all, which reads as 100 — the opposite end
+  of the scale from the entry this strategy takes.
+- Returns `None` when fewer than `lookback` candles are supplied, and `None` on a
+  flat series.
 
 ## Test cases
 

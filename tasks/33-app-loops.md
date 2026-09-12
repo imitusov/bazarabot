@@ -276,7 +276,13 @@ unreachable, while every test was green. Anything added to this system that must
 run continuously is added to this list in the same change, or it does not run.
 
 A failure in one task must never terminate another; each is supervised and
-restarted with backoff. A failure in one task must never terminate another.
+restarted with exponential backoff under rule 21. **The bound is one second,
+doubling, to a ceiling of 300 seconds, reset to one second whenever the task
+returns without raising (v1.82).** Rule 21 says "exponential backoff" and names
+no bound; an unbounded doubling would leave a crashed exit loop asleep for hours,
+so the bound is recorded here. It is the one the supervisor already applies —
+written down, not decided now. Until v1.82 this paragraph stated its first
+sentence twice, the second copy adding nothing.
 
 **Observability of the supervisor (v1.61):**
 - Each heartbeat job emits `heartbeat` (INFO) with `uptime_seconds`,

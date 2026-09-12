@@ -14,22 +14,28 @@ Module **15** of 42 in `dependency-order.md`. Everything before it is complete a
 
 ## Module contract
 
-### `zarabot/strategies/base.py`
+### `zarabot/strategies/ma_crossover.py`
 
-**`Strategy` protocol** — `name: str`, `lookback: int`, and:
+Implements the `Strategy` protocol specified under `zarabot/strategies/base.py`,
+which applies here unchanged — pure, no I/O and no clock beyond `now`, entry-only,
+`BUY` or `None`, never `SELL`, deterministic. `name` is `"ma_crossover"` and
+`lookback` is **31**: the slow window plus one bar, because a crossover is a
+comparison between two consecutive bars and not a state of one.
 
 **`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
-- Pure. No I/O, no clock, no database, no broker.
-- Returns a `BUY` signal or `None`. **Must never return a `SELL` signal** —
-  strategies enter, the lifecycle exits.
-- Returns `None` when fewer than `lookback` candles are supplied.
-- Returns `None` rather than raising on degenerate input such as a flat series.
-- Deterministic: identical inputs produce identical outputs.
-
-`ma_crossover`, `rsi_reversion`, `momentum` each implement this protocol and
-declare their own parameters and lookback. `registry.enabled(config) → list[Strategy]`
-builds the active set from `ENABLED_STRATEGIES`, raising `ConfigError` on an
-unknown name.
+- Parameters: a simple moving average of the last **10** closes (fast) against one
+  of the last **30** (slow). Both are module constants rather than configuration,
+  on the same reasoning as `ml_model`'s confidence threshold: changing one changes
+  what the strategy means, so it travels with the code and a redeploy.
+- Returns a `BUY` when the fast average was **at or below** the slow average one
+  bar ago and is **strictly above** it on the latest bar. The condition is the
+  crossing, not the ordering: a series that has been above for weeks crosses
+  nothing and returns `None`.
+- `reference_price` on the returned `Signal` is the latest close, and
+  `generated_at` is the `now` it was given.
+- Returns `None` when fewer than `lookback` candles are supplied, and `None` when
+  every supplied close is identical — a flat series is the degenerate input the
+  protocol requires be answered with `None` rather than an exception.
 
 ## Test cases
 
