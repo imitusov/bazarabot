@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta
 
 import aiosqlite
 
 from zarabot.db.connection import shared, transaction
-
-_LOG = logging.getLogger(__name__)
 
 
 def _reject_naive(moment: datetime) -> None:
@@ -34,29 +31,36 @@ async def _started_at(ticker: str) -> datetime | None:
 
 
 async def start(ticker: str, at: datetime) -> None:
-    """Record the cooldown start, keeping the newer instant if one exists."""
+    """Record the cooldown start, keeping the newer instant if one exists.
+
+    A write failure propagates (v1.63, #210). This module catches no
+    `aiosqlite.Error` and logs no failure of its own: cooldowns are rule 11,
+    and `db.connection.transaction()` already emits `db_write_failed` with
+    `critical` true before re-raising. A swallow here makes a lost cooldown
+    indistinguishable from a written one, so the bot re-enters a ticker it
+    just exited — and it leaves the rule-11 remedy in
+    `execution.orders._finish_close` unreachable, which is the whole point of
+    letting this escape.
+    """
     _reject_naive(at)
-    try:
-        async with transaction() as conn:
-            cursor = await conn.execute(
-                "SELECT started_at FROM cooldowns WHERE ticker = ?", (ticker,)
+    async with transaction(critical=True) as conn:
+        cursor = await conn.execute(
+            "SELECT started_at FROM cooldowns WHERE ticker = ?", (ticker,)
+        )
+        row = await cursor.fetchone()
+        if row is not None:
+            existing = datetime.fromisoformat(row["started_at"])
+            if existing >= at:
+                return
+            await conn.execute(
+                "UPDATE cooldowns SET started_at = ? WHERE ticker = ?",
+                (at.isoformat(), ticker),
             )
-            row = await cursor.fetchone()
-            if row is not None:
-                existing = datetime.fromisoformat(row["started_at"])
-                if existing >= at:
-                    return
-                await conn.execute(
-                    "UPDATE cooldowns SET started_at = ? WHERE ticker = ?",
-                    (at.isoformat(), ticker),
-                )
-            else:
-                await conn.execute(
-                    "INSERT INTO cooldowns (ticker, started_at) VALUES (?, ?)",
-                    (ticker, at.isoformat()),
-                )
-    except aiosqlite.Error:
-        _LOG.exception("cooldown write failed for %s", ticker)
+        else:
+            await conn.execute(
+                "INSERT INTO cooldowns (ticker, started_at) VALUES (?, ?)",
+                (ticker, at.isoformat()),
+            )
 
 
 async def is_active(ticker: str, now: datetime, minutes: int) -> bool:
