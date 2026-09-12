@@ -450,9 +450,13 @@ Never calls `aiosqlite.connect` and never closes the connection.
 
 **`async start(ticker: str, at: datetime) → None`**
 Inserts `started_at`, or overwrites only when `at` is strictly newer. Raises
-`ValueError` on a naive `at`. Write failures are logged at ERROR and not
-propagated (rule 12). Access before `connect` or after `disconnect` raises
-`DatabaseNotOpenError` (rule 30).
+`ValueError` on a naive `at`. **A write failure propagates (rule 11, v1.63,
+#210):** this module catches no `aiosqlite.Error` and logs no failure of its
+own, because `db.connection.transaction()` already emits `db_write_failed` with
+`critical` true before re-raising. Callers own the remedy —
+`execution.orders._finish_close` halts and still returns the exit,
+`broker.reconcile` lets it reach `app.startup`, which refuses to start. Access
+before `connect` or after `disconnect` raises `DatabaseNotOpenError` (rule 30).
 
 **`async is_active(ticker: str, now: datetime, minutes: int) → bool`**
 True while `now - started_at < minutes`. False when no row exists, and False
