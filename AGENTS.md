@@ -117,12 +117,23 @@ wall-clock reliance, no unseeded randomness, no `sleep` to advance time.
 `risk.gate`, `risk.sizing`, `lifecycle.exits` and `execution.orders`** — a
 missed branch in those four is a financial defect, not a coverage statistic.
 
+All three of those numbers are floors **per file**, applied module by module: a
+module in neither list above needs 80% of its own, so it cannot sit at 60%
+behind a green project average. 80% is *additionally* the project total.
+The two are enforced separately — the project total by coverage's own
+`fail_under`, the per-file floors by `scripts/ci/check_coverage.py` — and both
+read 80, so changing one without the other fails
+`scripts/ci/check_rulebook.py`. Two modules carry a floor *higher* than the
+default: `broker.client` at 86% and `pnl` at 85%, the coverage each had when
+per-file floors arrived (issue #30). That is a ratchet, not an exemption — they
+may improve and may not get worse.
+
 ## File structure
 
 ```
-zarabot/          models, clock, config, logging_setup, pnl
+zarabot/          models, clock, config, logging_setup, pnl, __main__
   db/             migrations, connection, positions, orders, stop_orders,
-                  cooldowns, signals, snapshots
+                  cooldowns, signals, snapshots, job_runs, trading_days
   broker/         client, reconcile
   market/         session, data
   strategies/     base, ma_crossover, rsi_reversion, momentum, ml_model, registry
@@ -132,9 +143,9 @@ zarabot/          models, clock, config, logging_setup, pnl
   state/          halt
   telegram/       notifier, commands
   reporter/       weekly
-  ops/            backup
+  ops/            backup, commissions
   app/            startup, loops, shutdown
-sandbox/          data, backtest, train   (never imported by zarabot/)
+sandbox/          data, backtest, train, exchange   (never imported by zarabot/)
 scripts/verify/   pre-development verification suite
 tests/            one file per module
 migrations/       NNN_description.sql, forward-only

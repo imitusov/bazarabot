@@ -26,10 +26,23 @@ Module **14** of 42 in `dependency-order.md`. Everything before it is complete a
 - Returns `None` rather than raising on degenerate input such as a flat series.
 - Deterministic: identical inputs produce identical outputs.
 
-`ma_crossover`, `rsi_reversion`, `momentum` each implement this protocol and
-declare their own parameters and lookback. `registry.enabled(config) → list[Strategy]`
-builds the active set from `ENABLED_STRATEGIES`, raising `ConfigError` on an
-unknown name.
+`ma_crossover`, `rsi_reversion`, `momentum` and `ml_model` each implement this
+protocol and each has its own contract below, naming its parameters, its lookback
+and its entry condition. `registry` builds the active set, also below, under its
+own heading.
+
+**Those four contracts are separate headings as of v1.82.** Until v1.82 this
+section was the only specification the three rule-based strategies had: no entry
+condition, no parameter and no lookback appeared anywhere, and
+`scripts/make_tasks.py` pointed tasks 15, 16, 17 and 19 at *this* heading, so four
+task files carried one identical contract that never named the strategy being
+built. That is failure class 2 in its plainest form — the generator cuts the spec
+by heading and nothing else, so a contract under the wrong heading reaches nobody.
+All four were implemented and tested before the contract existed, so what v1.82
+records is the behaviour that shipped, read back from the modules and from
+`interfaces.md`, which already carried each strategy's parameters and lookback.
+Every number below is a choice already made and running in the live path; none of
+them is decided here.
 
 ## Test cases
 

@@ -391,11 +391,17 @@ recorded is a different kind of thing from a wrong number that looks right.
   `ma_crossover` — a real strategy whose weekly figures decide whether it stays
   enabled — so every crash-recovered trade biased the evidence for one named
   strategy, systematically and always in the same direction (#11).
-  `UNATTRIBUTED` is a sentinel in the same family as `ADOPTED`: the `positions`
-  schema already accepts it, `telegram.commands` iterates the *enabled*
-  strategies and so never shows it under one, and `reporter.weekly` groups by the
-  stored name and so shows it under a heading of its own. It is reported, and it
-  is never credited.
+  `UNATTRIBUTED` is a sentinel in the same family as `ADOPTED`, and the
+  `positions` schema already accepts it. This module owns the **writing** half of
+  rule 35 and nothing more: that a recovered entry with no signal is stored under
+  the sentinel. The **reporting** half — that the sentinel is shown rather than
+  dropped, and never folded into a named strategy's figures — is owed by
+  `telegram.commands` and by `reporter.weekly`, and as of v1.82 it is written
+  under each of their §4 headings instead of only here. It was stated only here
+  until v1.82: `make_tasks.py` cuts by heading, so neither module's agent was ever
+  shown the obligation its half of rule 35 rests on (#117 item 11, failure class
+  2). Rule 35 holds when both halves hold — it is reported, and it is never
+  credited.
 - **The signal lookup spans the order's life, not one calendar date.** It reads
   `db.signals.list_for_period(moscow_date(order.created_at), moscow_date(now))`.
   Searching only today's Moscow date meant an order that filled at 23:58 MSK and

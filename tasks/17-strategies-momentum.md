@@ -14,22 +14,21 @@ Module **17** of 42 in `dependency-order.md`. Everything before it is complete a
 
 ## Module contract
 
-### `zarabot/strategies/base.py`
+### `zarabot/strategies/momentum.py`
 
-**`Strategy` protocol** — `name: str`, `lookback: int`, and:
+Implements the `Strategy` protocol under `zarabot/strategies/base.py`, unchanged
+and in full. `name` is `"momentum"` and `lookback` is **21**: the twenty prior
+bars the breakout is measured against, plus the bar that breaks out.
 
 **`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
-- Pure. No I/O, no clock, no database, no broker.
-- Returns a `BUY` signal or `None`. **Must never return a `SELL` signal** —
-  strategies enter, the lifecycle exits.
-- Returns `None` when fewer than `lookback` candles are supplied.
-- Returns `None` rather than raising on degenerate input such as a flat series.
-- Deterministic: identical inputs produce identical outputs.
-
-`ma_crossover`, `rsi_reversion`, `momentum` each implement this protocol and
-declare their own parameters and lookback. `registry.enabled(config) → list[Strategy]`
-builds the active set from `ENABLED_STRATEGIES`, raising `ConfigError` on an
-unknown name.
+- Parameter: a **20**-bar prior window. A module constant rather than
+  configuration, for the reason the other two give.
+- Returns a `BUY` when the latest **close** is strictly above the highest **high**
+  of the twenty bars before it. High, not close: the level a breakout has to clear
+  is the level the instrument actually reached, and comparing closes would signal
+  on a move that had already been rejected intraday.
+- Returns `None` when fewer than `lookback` candles are supplied, when the close
+  does not exceed that high, and on a flat series.
 
 ## Test cases
 

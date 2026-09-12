@@ -18,12 +18,14 @@ sketch against ``find zarabot sandbox -name '*.py'``, in BOTH directions.
   * a name in the sketch with no file behind it FAILS (a module deleted or
     renamed without the rulebook following).
 
-The sketch cannot be corrected here — AGENTS.md is being amended in another
-branch — so the five names missing today are in ``KNOWN_MISSING_FROM_SKETCH``,
-each citing its issue. That allowlist has a staleness arm: an entry whose file
-has since been added to the sketch, or whose file no longer exists, FAILS
-rather than being ignored. An allowlist without that arm only ever grows,
-which is how #124's and #180's stale waivers were caught elsewhere.
+The sketch names every module under both trees as of #117 item 9, so
+``KNOWN_MISSING_FROM_SKETCH`` is empty: the four names above and
+``zarabot/__main__.py`` were waived here while the rulebook was wrong, and the
+waivers were deleted by the commit that wrote them into the sketch. That
+allowlist has a staleness arm: an entry whose file has since been added to the
+sketch, or whose file no longer exists, FAILS rather than being ignored. An
+allowlist without that arm only ever grows, which is how #124's and #180's
+stale waivers were caught elsewhere.
 
 WHAT THIS DOES NOT COVER, stated because a guard described as proving the
 rulebook's tree correct must enumerate what it leaves out (failure class 6):
@@ -59,16 +61,15 @@ import sys
 # Files that exist and are absent from the AGENTS.md sketch today. Key is the
 # repository-relative path. Delete an entry when the sketch line is fixed —
 # leaving it in place once the name is present is itself a FAIL.
-KNOWN_MISSING_FROM_SKETCH: dict[str, str] = {
-    "zarabot/__main__.py": (
-        "#117 — the `zarabot/` sketch line omits the process entry point; "
-        "it has a §4 contract and task 35"
-    ),
-    "zarabot/db/job_runs.py": "#117 item 9 — added after the sketch was written",
-    "zarabot/db/trading_days.py": "#117 item 9 — added after the sketch was written",
-    "zarabot/ops/commissions.py": "#117 item 9 — added after the sketch was written",
-    "sandbox/exchange.py": "#117 item 9 — added after the sketch was written",
-}
+#
+# EMPTY as of #117 item 9. The five entries that stood here were the four
+# modules the sketch omitted (`db/job_runs.py`, `db/trading_days.py`,
+# `ops/commissions.py`, `sandbox/exchange.py`) plus `zarabot/__main__.py`; the
+# sketch names all five now, so the waivers went with the same commit that
+# fixed it. An allowlist that outlives its reason is a gate that has stopped
+# gating, and an empty one still fails on the next unnamed module rather than
+# letting it join a list.
+KNOWN_MISSING_FROM_SKETCH: dict[str, str] = {}
 
 # The two trees the sketch inventories by module name.
 ROOTS = ("zarabot", "sandbox")

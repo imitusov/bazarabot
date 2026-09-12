@@ -75,6 +75,17 @@ One handler per command in the brief's command table.
   "to `state.halt` and to nothing else" while calling `pnl` — and that line is
   correct as written; it is v1.69 that was wrong. `/status` already reports the
   day's position on demand, so the figure remains one command away.
+- **This module owns half of rule 35's reporting (v1.82).** `/strategies` lists
+  the strategies `registry.enabled` returns and reports each by that name, so a
+  position whose stored `strategy` is a sentinel — `UNATTRIBUTED` from
+  crash recovery, `ADOPTED` from reconciliation — is **never shown under a named
+  strategy and never counted into one's figures**. The positive action is that it
+  is still shown: `/positions` prints each open position's stored `strategy`
+  verbatim, sentinel included, so a trade the bot did not decide on is visible to
+  the owner on demand rather than absent from every reply. Do not add a sentinel
+  to the `/strategies` listing by iterating stored names instead of enabled ones:
+  that is the credit rule 35 forbids. `reporter.weekly` owns the other half, and
+  the writing half is `execution.orders`'.
 
 ## Relevant error handling rules
 
@@ -129,6 +140,14 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   trading against. Written as a caller-shaped test: drive `/halt`, do not stub
   `state.halt`. A test that stubbed the halt would pass with the broker call
   still in place).
+- **An open position whose `strategy` is `UNATTRIBUTED` appears in `/positions`
+  and under no strategy in `/strategies` (v1.82; proves this module's half of
+  rule 35 — the sentinel is reported and never credited).** Owed, and not written
+  when v1.82 was issued: nothing in `tests/test_telegram_commands.py` mentions
+  either sentinel today, so the `/strategies` half rests on `enabled` happening to
+  be the thing iterated. The `reporter.weekly` half is pinned —
+  `test_recovered_entry_without_a_signal_is_unattributed` asserts on
+  `_strategy_section` — and this is the same assertion for the other reader.
 
 ## Expected output
 

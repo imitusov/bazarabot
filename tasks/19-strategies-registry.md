@@ -14,22 +14,24 @@ Module **19** of 42 in `dependency-order.md`. Everything before it is complete a
 
 ## Module contract
 
-### `zarabot/strategies/base.py`
+### `zarabot/strategies/registry.py`
 
-**`Strategy` protocol** — `name: str`, `lookback: int`, and:
-
-**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
-- Pure. No I/O, no clock, no database, no broker.
-- Returns a `BUY` signal or `None`. **Must never return a `SELL` signal** —
-  strategies enter, the lifecycle exits.
-- Returns `None` when fewer than `lookback` candles are supplied.
-- Returns `None` rather than raising on degenerate input such as a flat series.
-- Deterministic: identical inputs produce identical outputs.
-
-`ma_crossover`, `rsi_reversion`, `momentum` each implement this protocol and
-declare their own parameters and lookback. `registry.enabled(config) → list[Strategy]`
-builds the active set from `ENABLED_STRATEGIES`, raising `ConfigError` on an
-unknown name.
+**`enabled(config: Config) → list[Strategy]`**
+- Builds the active strategy set from `ENABLED_STRATEGIES`, instantiating one
+  strategy per name **in the order the setting lists them**, and returning an
+  empty list rather than `None` when it enables nothing.
+- Raises `ConfigError` naming `ENABLED_STRATEGIES` on a name it does not know.
+  This is the whole of the module's validation, and it happens at startup rather
+  than mid-session: a typo in a strategy name must stop the bot, never silently
+  trade a smaller set than the owner configured.
+- `ml_model` is the one name with a condition attached: it is **omitted entirely**
+  when `ML_MODEL_PATH` is unset, and otherwise `ml_model.load` is called here, so
+  `ModelLoadError` and `ModelContractError` propagate out of this function to
+  `app.startup` step 4, which is rule 17's refusal to start. Omitting it is not a
+  silent disable — an unset path is the owner saying ML is off.
+- Pure apart from that one load: no clock, no database, no broker, no I/O of its
+  own. `load` is the exception, and it is the reason this function is called once
+  at startup and never on the trading path.
 
 ## Test cases
 

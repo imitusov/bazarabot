@@ -90,6 +90,18 @@ Module **30** of 42 in `dependency-order.md`. Everything before it is complete a
   intended-versus-actual exit price for gapped exits.
 - A week with no closed trades produces a valid report saying so.
 - Undefined metrics are reported as not applicable, never as zero.
+- **The per-strategy section groups by the `strategy` value stored on the
+  position, not by the enabled set (v1.82).** This module owns half of rule 35's
+  reporting: a sentinel — `UNATTRIBUTED` from crash recovery, `ADOPTED` from
+  reconciliation — therefore appears **under a heading of its own**, with its own
+  P&L and trade count, and is never added to a named strategy's figures. Both
+  directions matter. Crediting it to a real strategy is the systematic bias rule
+  35 exists to prevent, and filtering it out so the section only lists enabled
+  strategies is the other way to break the rule: the week's totals would then
+  disagree with the sum of its per-strategy lines, and a trade the bot did not
+  decide on would be invisible in the one document the owner reads weekly.
+  `telegram.commands` owns the other half, and the writing half is
+  `execution.orders`'.
 - Over the length limit, sections are dropped in this order — exit-trigger
   distribution, cooldown counts, worst trade — and the omission is noted.
 
