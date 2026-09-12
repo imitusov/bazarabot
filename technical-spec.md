@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.82
+**Version:** 1.83
 **Date:** 2026-09-12
 **Implements:** `business-brief.md` v1.13
 
@@ -226,6 +226,24 @@ a good-till-cancel stop-loss against it, confirms the exchange reports the stop
 as standing, cancels it cleanly, and flattens. PASS requires all five. FAIL
 otherwise. This verifies the mechanism the position-protection design depends on
 — that the exchange will hold a stop indefinitely without the bot present.
+
+**V12 — `verify_operations.py`.** On the live account, read-only, over a 90-day
+window: confirms the window is non-empty, that the executed-state name matches
+the parser's constant, that every fee-shaped operation type is one
+`broker.client` recognises, that every fee's parent operation resolves inside
+the same window, and that the window contains a SELL. It measures the feed
+`broker.reconcile._resolve_sale` books an external close from — the exit price,
+the exit timestamp and the per-sale commission all come from there, and rule 33
+means nothing downstream can tell an invented number from a real one.
+
+**V12 is deliberately not in `run_all.sh`, and it FAILS today (v1.82).** The
+account has never sold, so the SELL check cannot pass and `_resolve_sale`
+remains unmeasured (#44). A suite that stops at the first failure would be
+stopped by this one forever, so V12 is run on demand and expected to reach 6 of
+6 only once a real sale has settled. The check is **not** softened to a warning:
+the FAIL is the record that the path is unverified, and turning it into a
+warning would trade a loud unmeasured for a quiet one. The fee half did pass and
+is recorded in §2.1 — that half is evidence, not assumption.
 
 ### 2.1 Measured values
 
