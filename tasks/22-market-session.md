@@ -55,14 +55,28 @@ Module **22** of 42 in `dependency-order.md`. Everything before it is complete a
   `session_closed` when that day is not a trading session, with the same three
   fields. This is a log, not a Telegram alert — the brief deliberately does not
   alert session open/close.
-- **`trade_date` on `session_closed` comes from `clock`, not from the
-  `SessionInfo` (v1.67).** `broker.client.get_trading_schedule` returns
+- **`trade_date` on both events is `first.trade_date`, and nothing else
+  (v1.81; supersedes v1.67).** v1.67 read: "`trade_date` on `session_closed`
+  comes from `clock`, not from the `SessionInfo`. `get_trading_schedule` returns
   `SessionInfo(start=None, end=None, is_trading_day=False)` for every
-  non-trading day, so a closed day carries no instant to derive a date from.
-  v1.61 asked for the three fields "from that `SessionInfo`" and allowed nulls
-  for `opens_at` and `closes_at` only, which required a `trade_date` the
-  `SessionInfo` cannot supply. Emit **`clock.moscow_date(clock.now())`**
-  instead.
+  non-trading day, so a closed day carries no instant to derive a date from …
+  emit `clock.moscow_date(clock.now())` instead." That rule existed **because**
+  the type had no date, and said so in those words. It has one now (§4 `models`),
+  so the premise is spent and the workaround is withdrawn — for the closed branch
+  and for the open branch alike. `market.session` emits the field; it derives
+  neither `clock.moscow_date(clock.now())` nor `clock.moscow_date(first.start)`.
+
+  This is a single-ownership decision, not a tidy-up. Leaving both standing would
+  give one logged field two producers, and the two are not equivalent:
+  `first.trade_date` is the broker's own answer for the day the record is
+  *about*, read from `TradingDay.date` in the response, whereas
+  `clock.moscow_date(clock.now())` is the day the **fetch happened** and is only
+  the same day while the window is anchored at today and `fetched[0]` is
+  today — true, and an assumption about a response shape rather than a contract.
+  A refresh that straddles Moscow midnight, or a window that ever begins
+  elsewhere, separates them, and the version that would then be wrong is the
+  derived one. One field, one source, and the source is the entry being
+  described.
 - **`refresh` takes no `now` parameter, and calls `clock` itself (v1.68;
   corrected v1.76).**
   v1.67 said "where `now` is the refresh instant" while the signature above is
@@ -86,6 +100,14 @@ Module **22** of 42 in `dependency-order.md`. Everything before it is complete a
   is also null says only that some unspecified day was shut, which is no more
   useful than silence — and §7.1 calls a record missing a required field a
   defect.
+- **`refresh` needs no instant at all as of v1.81.** The v1.68 bullet settled
+  *where* the refresh instant came from, for the one consumer that wanted one:
+  `trade_date`. That consumer reads `first.trade_date` now, so nothing in this
+  module asks what time it is. The signature is unchanged and v1.68's ruling
+  stands unreversed — a later consumer needing "now" here calls `clock` rather
+  than taking a parameter. It is a strengthening: this module reads no clock, so
+  its event records cannot disagree with the calendar they describe, and a test
+  pinning a `trade_date` no longer has to patch `clock.now`.
 
 **`is_open(now: datetime) → bool`**
 - True when `now` falls within a main session, inclusive of the open instant and
@@ -143,11 +165,46 @@ is the failure this cadence exists to prevent.
   verified, and everything new is a local table whose behaviour is entirely
   testable. The assumption v1.41 rested on was the one thing not checked against
   the account, and it was false.
+- **The union is taken on `trade_date`, and the ordering is by `trade_date`
+  (v1.81).** One entry per recorded calendar date, closed days included, oldest
+  first. A date present in both the recorded history and the live window appears
+  **once**, and the live window's entry — the newer observation — is the one
+  kept, matching `db.trading_days`' rule that the broker's most recent answer
+  about a date wins.
+
+  Until v1.81 the union was taken on the session's **start instant**, with
+  `datetime.min` standing in wherever there was none. Every non-trading day
+  therefore shared one key and collapsed onto one entry: a fortnight containing
+  four weekend days came back with one, and `calendar()` returned something that
+  was not the calendar (#51). It was invisible because the only consumer,
+  `clock.trading_days_between`, filters to entries with `is_trading_day` true and
+  a non-null `start` before counting, so the collapsed entries contributed
+  nothing either way and the count was right for the wrong reason. `trade_date`
+  is a total, unique key over exactly the set of days the calendar is about,
+  which is what the dedupe needed and did not have.
+- **`clock.trading_days_between` is unchanged by this, and that is a
+  requirement, not a hope (v1.81).** It counts entries with `is_trading_day`
+  true and a non-null `start`; the entries this fix stops discarding satisfy
+  neither, so the same window must yield the same count before and after. §3.2
+  pins it. `clock` is not amended: for a trading day `moscow_date(start)` and
+  `trade_date` are equal by the producer obligation in §4 `models`, so switching
+  the count to read the field would be a no-op, and a no-op is not worth
+  re-running a module that touches `MAX_AGE`.
 
 **`covers(day: date) → bool`**
 - Whether the recorded calendar reaches back to `day`, so a caller can tell a
   count it can stand behind from one it cannot. `False` when the history is
   empty.
+- **It is coverage of the calendar, not of the trading calendar (v1.81).**
+  `db.trading_days.earliest()` now returns the oldest recorded **calendar** day
+  because closed days are recorded, so the boundary moves backwards, never
+  forwards: `covers` becomes true for days it was previously false for, and
+  false for none it was previously true for. The days it gains are days the bot
+  was told about and wrote down — a Saturday at the head of an observed window
+  was covered in fact and reported as uncovered, which understated the calendar
+  rather than overstating it. Nothing that was safe becomes unsafe; a count that
+  `covers` now vouches for is backed by a recorded observation of every day in
+  its range, which is a stronger claim than the one it made before.
 - This exists because the failure it guards is silent by nature: an uncovered
   day simply is not counted, `trading_days_open` comes back short, and `MAX_AGE`
   does not fire. Nothing raises. #45 lived for the project's whole life on
@@ -229,8 +286,9 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A successful refresh of a trading day emits `session_open` with `trade_date`,
   `opens_at`, `closes_at`; a successful refresh of a holiday emits
   `session_closed` (v1.61).
-- The holiday case is built from the shape the broker actually returns —
-  `SessionInfo(start=None, end=None, is_trading_day=False)` — and the emitted
+- The holiday case is built from the shape the broker actually returns — as of
+  v1.81 `SessionInfo(trade_date=<the closed day>, start=None, end=None,
+  is_trading_day=False)`; before it, the same without a date — and the emitted
   record still carries a non-null `trade_date`, with `opens_at` and `closes_at`
   null (v1.67; proves the event names the day it is talking about. A fixture
   that gives a closed day session times cannot come from
@@ -239,7 +297,38 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - `session_open` for a session starting late in the UTC day — 21:30 UTC, which
   is the following date in Moscow — reports the **Moscow** `trade_date` (v1.67;
   proves the conversion is real. A fixture whose UTC and Moscow dates coincide
-  is satisfied by `.date()` and pins nothing).
+  is satisfied by `.date()` and pins nothing). As of v1.81 the conversion under
+  test is `broker.client`'s: this module reports `first.trade_date`, and the
+  fixture supplies the Moscow date the broker would have sent.
+- Both events report `first.trade_date` **verbatim**, with `clock.now` patched to
+  a different Moscow date than the fetched window's first day (v1.81; proves the
+  record names the day it describes rather than the day the fetch happened —
+  the two producers v1.67 left standing, separated so that only one can pass.
+  A fixture where the two coincide is satisfied by either and pins neither).
+- A fourteen-day window containing four weekend days yields **fourteen** entries
+  from `calendar()`, four of them non-trading (v1.81; proves closed days are
+  distinct rather than collapsed onto one key — #51 returned one).
+- A date present in **both** the recorded history and the live window appears in
+  `calendar()` exactly once, and the live window's observation is the one kept
+  (v1.81; proves the dedupe the collapse was hiding inside still works, and that
+  the newer answer about a date wins, as `db.trading_days` requires).
+- `clock.trading_days_between` over a window returns the **same** count before
+  and after the closed days are carried (v1.81; proves the fix adds entries the
+  count ignores and does not quietly change what `MAX_AGE` measures).
+- **Every closed-day fixture in this module's tests has the shape
+  `get_trading_schedule` can actually return** — `trade_date` set, `start` and
+  `end` `None`, `is_trading_day` false — and no test in this file constructs a
+  non-trading `SessionInfo` carrying session times (v1.81). This is a contract on
+  the fixtures, not a behaviour, and it is here because the impossible shape is
+  the whole reason #51 survived: the Saturday and holiday fixtures gave closed
+  days a start and an end, so every closed entry had a distinct sort key in the
+  tests and collapsed only in production. The rule was already written in the
+  holiday bullet above — "a fixture that gives a closed day session times cannot
+  come from `get_trading_schedule`, and a test built on one passes while every
+  production record is unanswerable" — and was not applied to the rest of the
+  file. A defence against `is_trading_day` true with epoch
+  timestamps belongs to `broker.client`'s §3.2, which owns the normalisation and
+  already tests it — not here, where the producer has already run.
 
 ## Expected output
 

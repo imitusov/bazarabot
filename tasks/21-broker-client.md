@@ -218,6 +218,35 @@ consecutive-failure alert and is retried as though waiting would help.
   timestamps say. A closed day carries `1970-01-01` in both, and some MOEX-
   prefixed exchanges report `is_trading_day` true with those epoch values; either
   read as a session is another way to believe the market is open.
+- **Every returned `SessionInfo` carries `trade_date`, read from
+  `TradingDay.date` (v1.81).** It is the Moscow calendar date of that field —
+  `clock.moscow_date` of it where the SDK hands back an instant, the value itself
+  where it hands back a `date`. Never `.date()` on the UTC value, which is wrong
+  by one day whenever the broker expresses midnight Moscow rather than midnight
+  UTC; never derived from `start_time`, which is the sentinel on a closed day;
+  and never derived from the entry's position in the list, which would turn a
+  short response into a silently mis-dated calendar. `date` is populated and
+  correct on a **non-trading** day, measured against the live account (§2.1) —
+  the sentinel lives in fields 3 and 4 only. Mapping `start_time` and `end_time`
+  to `None` on a closed day is the correct normalisation and stays; discarding
+  the date with them was #51.
+- **The result is ordered ascending by `trade_date` (v1.81).** The broker
+  returns one entry per calendar day, contiguous, oldest first (§2.1); this
+  contract states it so that `market.session` may read `fetched[0]` as the
+  window's first day without depending on a response shape nothing pins. Sort if
+  the response ever arrives otherwise.
+- **A day whose `date` is absent or below the epoch guard is omitted from the
+  result, logged at WARNING (v1.81).** There is no honest fallback: an entry
+  with no date cannot be keyed, cannot be recorded, and cannot be deduped, and
+  the two available alternatives — fabricating a date from list position, or
+  admitting a `None` back into `SessionInfo` — are each the defect this
+  amendment removes. Omission is the same posture
+  `get_executed_stop_fills` already takes toward a stop whose
+  `exchange_order_id` does not resolve: leave it out rather than substitute a
+  guess. It shortens the window, which `market.session.covers` reports, instead
+  of mis-dating a day, which nothing would report. This has never been observed;
+  it is contracted because the sentinel in the neighbouring fields has bitten
+  twice.
 - The SDK marks `trading_schedules` deprecated as of its 1.0.0. It is the only
   calendar surface available today; when a replacement appears this is the
   contract to amend, and V10's recorded SDK version is what makes the change
@@ -488,6 +517,26 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A day returned with `is_trading_day` false yields no session even when its
   start and end are `1970-01-01` (proves the flag is honoured before the
   timestamps).
+- That same closed day comes back with `start` and `end` `None` **and a
+  `trade_date` equal to its `TradingDay.date`** (v1.81; proves the sentinel is
+  normalised away in fields 3 and 4 without taking field 1 with it, which is
+  #51. A fixture whose closed day has no `date`, or whose `date` matches the
+  neighbouring trading day, pins nothing).
+- A trading day's `trade_date` equals `clock.moscow_date(start)` (v1.81; proves
+  the producer obligation `models` cannot check — it cannot import `clock`
+  without a cycle — is checked at the producer that can).
+- A `TradingDay.date` expressed as **midnight Moscow** — 21:00 UTC on the
+  previous calendar day — yields the Moscow date, not the UTC one (v1.81; proves
+  the conversion is `clock.moscow_date` and not `.date()`. A fixture at midnight
+  UTC is satisfied by either and pins neither).
+- Days are returned ascending by `trade_date` given a response in any order
+  (v1.81; proves `market.session` may read `fetched[0]` as the window's first
+  day).
+- A day whose `date` is absent, or is the `1970-01-01` sentinel, is **omitted**
+  from the result and logged at WARNING, and the remaining days are returned
+  (v1.81; proves an undateable entry is dropped rather than given a fabricated
+  date from its list position — and that one bad entry does not take the window
+  down).
 - A `PARTIALLYFILL` report maps to `SUBMITTED` with `filled_lots` below `lots`,
   never to `FILLED` (proves a partial fill stays visible as partial, #10).
 - `get_executed_stop_fills` returns the broker's executed price, lots and
