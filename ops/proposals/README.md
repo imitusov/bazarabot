@@ -33,7 +33,7 @@ run **one module per session**, test-first, two commits, never edit the spec.
 | Issue | Next |
 |---|---|
 | #52 F-52 `_remember` swallows `Exception` | **amender** then implementer — see `52-market-session-remember.md` |
-| #51 F-51 closed days collapse | **amender**: `SessionInfo` needs a date — see `51-models-sessioninfo-trade-date.md` |
+| #51 F-51 closed days collapse | **amendment applied** — spec v1.81: `SessionInfo.trade_date: date` as the **first** field, no default, never null; §2.1 records the measured fact it rests on (`TradingDay.date` is real on a closed day, 2026-09-12, live account); `broker.client` populates it, `db.trading_days` records closed days, `market.session.calendar()` uniques on it, and `_emit_session_state` reads it instead of `clock` (supersedes v1.67). No migration. Proposal deleted. Implementers, lowest first: `01-models` → `21-broker-client` → `8c-db-trading_days` → `22-market-session`, then fixture-only updates in `02-clock`, `13-lifecycle-exits`, `24-state-halt`, `26-execution-orders`, `29-telegram-commands`, `33-app-loops` and `sandbox/exchange.py`. Do not close #51 until the code lands |
 
 ### Theme C — Execution / process identity
 

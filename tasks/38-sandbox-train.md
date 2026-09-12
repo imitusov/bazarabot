@@ -71,6 +71,12 @@ live path, with only the broker and the clock replaced.
   `covers` run on top. A backtest that stubbed those would not exercise the
   code that decides whether the market is open, which is where #39 and #43
   lived.
+- **The simulator's schedule obeys the same producer obligation as the live one
+  (v1.81).** Every `SessionInfo` it builds carries `trade_date`, equal to
+  `clock.moscow_date(start)` on a trading day (§4 `models`). It answers a
+  function whose contract now includes that field, and a simulator that omitted
+  it would fail construction rather than drift — but it must also not fabricate
+  one from list position, for the reason `broker.client` may not.
 
 **Fill model.** The four rules below are where a backtest is honest or is not:
 
