@@ -7,7 +7,6 @@ from datetime import date, datetime
 
 import aiosqlite
 
-from zarabot.clock import moscow_date
 from zarabot.clock import now as clock_now
 from zarabot.db.connection import shared, transaction
 from zarabot.models import SessionInfo
@@ -24,34 +23,35 @@ def _dt_opt(raw: object) -> datetime | None:
 
 
 def _row_to_session(row: aiosqlite.Row) -> SessionInfo:
+    """One recorded day. `trade_date` comes from the `trade_date` column.
+
+    Never reconstructed from `session_start`: for a trading day the two agree by
+    the producer obligation in §4 `models`, and for a closed day there is no
+    `session_start` to derive anything from — which is exactly the case this
+    table now holds (v1.81, #51).
+    """
     return SessionInfo(
+        trade_date=date.fromisoformat(str(row["trade_date"])),
         start=_dt_opt(row["session_start"]),
         end=_dt_opt(row["session_end"]),
         is_trading_day=bool(row["is_trading_day"]),
     )
 
 
-def _key(session: SessionInfo) -> date | None:
-    """The Moscow calendar date a session belongs to, or None when undated.
-
-    A non-trading day carries no timestamps by contract, so it cannot be keyed
-    and is skipped rather than stored under a null date. Nothing is lost:
-    `clock.trading_days_between` counts only trading days, and coverage is
-    defined by the oldest recorded *trading* day, which is exactly the boundary
-    below which a count would be short.
-    """
-    return moscow_date(session.start) if session.start is not None else None
-
-
 async def record_many(sessions: list[SessionInfo]) -> int:
-    """Upsert one row per day, newer observation winning. One transaction."""
+    """Upsert one row per day, newer observation winning. One transaction.
+
+    Every day of the window is recorded, closed days included: the row is keyed
+    on `SessionInfo.trade_date`, which is present on every entry, so a
+    non-trading day is written with `is_trading_day = 0` and both timestamp
+    columns null. §5 has declared them `TEXT NULL` since `006_trading_days.sql`,
+    so this is what the table was built for and no migration is required.
+    """
     observed = clock_now().isoformat()
     written = 0
     async with transaction() as conn:
         for session in sessions:
-            day = _key(session)
-            if day is None:
-                continue
+            day = session.trade_date
             await conn.execute(
                 """
                 INSERT INTO trading_days (

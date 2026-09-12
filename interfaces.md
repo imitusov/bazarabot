@@ -365,17 +365,26 @@ date rather than what happened. Exists because the broker serves no schedule
 before today (§2.1), so the past must be remembered rather than fetched (#45).
 
 **`async record_many(sessions: list[SessionInfo]) → int`**
-Upserts one row per day on the Moscow date, newer observation winning, in one
-transaction. Returns how many were written. A session with no `start` — a
-non-trading day, which carries no timestamps — is skipped, not stored under a
-null key.
+Upserts one row per day on `SessionInfo.trade_date`, newer observation winning,
+in one transaction. Returns how many were written. **Every day of the window is
+recorded, closed days included** (v1.81, #51): a non-trading day is written with
+`is_trading_day = 0` and `session_start`/`session_end` null, which
+`006_trading_days.sql` has declared `TEXT NULL` from the start, so no migration
+was needed. The old "a session with no `start` is skipped" clause is withdrawn —
+`trade_date` is a `date` and never `None`, so there is nothing left to skip.
 
 **`async list_since(start: date) → list[SessionInfo]`**
-Recorded days from `start` onwards, oldest first. `[]` when none, never `None`.
+Recorded days from `start` onwards, oldest first, **closed days included**, so
+the round trip through the table is lossless. `trade_date` is read from the
+`trade_date` column, never reconstructed from `session_start` (v1.81). `[]` when
+none, never `None`.
 
 **`async earliest() → date | None`**
 The oldest recorded date, or `None` when nothing has been recorded. Coverage is
-defined against this.
+defined against this. It is the oldest recorded **calendar** day, not the oldest
+recorded trading day (v1.81): recording closed days moves it backwards, never
+forwards, so `market.session.covers` becomes true for days it was false for and
+false for none it was true for.
 
 ## `zarabot.db.orders`
 
