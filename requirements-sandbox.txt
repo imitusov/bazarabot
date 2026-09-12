@@ -1,4 +1,19 @@
 # Laptop research only. Never installed on the server.
+#
+# The research path imports the live modules unchanged — that is the whole point
+# of it — so the laptop needs the server set too: `sandbox/train.py` imports
+# scikit-learn, joblib and numpy, and `sandbox/backtest.py` reaches
+# `app.loops.trading_cycle`, which brings aiosqlite, structlog and
+# python-telegram-bot with it. Installing only the four lines below left
+# `sandbox/train.py` un-importable on the one machine that trains (#212); it
+# went unnoticed because the trading VPS happens to carry the full ML stack.
+#
+# Pulled in rather than restated, so the constraints live in one file and cannot
+# drift. The broker SDK is not on PyPI — install it from the vendored wheel, as
+# requirements-server.txt says.
+-r requirements-server.txt
+
+# Research tooling, on top of that. None of this may reach the server.
 pandas>=3.0
 pyarrow>=25.0        # parquet engine for the candle cache; pandas 3.0 does not pull it in
 matplotlib>=3.11
