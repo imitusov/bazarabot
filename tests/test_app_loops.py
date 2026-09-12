@@ -45,6 +45,7 @@ from zarabot.models import (
 
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
 SESSION = SessionInfo(
+    trade_date=date(2026, 3, 16),  # the Moscow date of `start`
     start=datetime(2026, 3, 16, 6, 50, tzinfo=UTC),
     end=datetime(2026, 3, 16, 15, 50, tzinfo=UTC),
     is_trading_day=True,

@@ -16,9 +16,22 @@ NAIVE = datetime(2026, 3, 13, 10, 0)  # noqa: DTZ001
 
 
 def _session(day: datetime, trading: bool = True) -> SessionInfo:
+    """`trade_date` is the Moscow date of `start`, the producer obligation every
+    fixture owes (§4 `models`).
+
+    The non-trading days here keep their session times on purpose, and that is a
+    shape `get_trading_schedule` cannot return. It is deliberate in this file
+    only: `trading_days_between` filters on `is_trading_day` **and** a non-null
+    `start`, and a closed fixture with no timestamps would leave the
+    `is_trading_day` half of that filter untested here. The production shape is
+    contracted where it matters — `market.session`'s §3.2, whose closed-day
+    fixtures are what hid #51.
+    """
     start = day.replace(hour=6, minute=50, second=0, microsecond=0)
     end = day.replace(hour=15, minute=50, second=0, microsecond=0)
-    return SessionInfo(start=start, end=end, is_trading_day=trading)
+    return SessionInfo(
+        trade_date=moscow_date(start), start=start, end=end, is_trading_day=trading
+    )
 
 
 def _week_calendar() -> TradingCalendar:

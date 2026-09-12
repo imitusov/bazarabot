@@ -144,6 +144,7 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("zarabot.clock.now", lambda: NOW)
     monkeypatch.setattr("zarabot.telegram.commands.now", lambda: NOW)
     session = SessionInfo(
+        trade_date=date(2026, 3, 16),  # the Moscow date of the session start
         start=NOW - timedelta(hours=2),
         end=SESSION_END,
         is_trading_day=True,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -98,7 +98,12 @@ def _signal() -> Signal:
 
 
 def _session() -> SessionInfo:
-    return SessionInfo(start=NOW, end=NOW.replace(hour=20), is_trading_day=True)
+    return SessionInfo(
+        trade_date=date(2026, 3, 16),  # the Moscow date of NOW
+        start=NOW,
+        end=NOW.replace(hour=20),
+        is_trading_day=True,
+    )
 
 
 class _Broker:
