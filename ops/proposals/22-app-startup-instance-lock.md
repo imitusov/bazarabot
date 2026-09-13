@@ -1,5 +1,22 @@
 # Proposal: #22 single-instance lock at startup
 
+> **RESOLVED — amended into technical-spec.md v1.89.** `app.startup` steps 2b–2e
+> carry the contract, §3.2 `app.startup` carries six cases, §10 carries the
+> runtime artefacts. Re-run `32-app-startup` and nothing else.
+>
+> **D1 was decided against this document's recommendation.** The owner chose
+> alert-once-then-quiet, not option (a) "leave it". Because the restart is a new
+> process the latch is a file — `${DB_PATH}.instance-lock.refused` — reset by a
+> successful lock acquisition and aged out after 24 hours; see step 2c, which
+> also records that `check_latches.py` is blind to a file latch. Do not re-open
+> D1 from §5 below, which predates the decision.
+>
+> D2 settled in step 2d and §10; D3 in step 2e; D4 **declined** and recorded in
+> step 2e with the verification. The `LOTS_ADJUSTED` aftermath described in §1 is
+> issue **#233**, not fixed here. §1's `FOREIGN_HOLDING` claim is corrected in
+> the spec: `_adjust_lots` *does* alert, so the gap is a missing remedy — no stop
+> for the extra lots — not a missing alert.
+
 **Kind:** spec then `app.startup` (not `execution.orders`). In-process
 `asyncio.Lock` cannot coordinate two processes. A `flock` beside `DB_PATH` is a
 startup obligation: refuse to start if held.

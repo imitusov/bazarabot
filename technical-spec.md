@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.88
+**Version:** 1.89
 **Date:** 2026-09-13
 **Implements:** `business-brief.md` v1.14
 
@@ -1489,6 +1489,49 @@ Additionally, on exits booked from an exchange stop:
 - With `allow_foreign_holdings` true, startup completes, the ready alert names
   the holding, and no stop is placed and no exit submitted for it (proves the
   acknowledged path is observe-only).
+- **With the instance lock already held, `start()` raises `StartupError`, opens
+  no database connection and places no order (v1.89, #22).** The case takes the
+  real lock itself — `open` on `${DB_PATH}.instance-lock` plus
+  `fcntl.flock(fd, LOCK_EX | LOCK_NB)` — and then calls the real `start()`. It
+  asserts on `start()`'s outcome and on `db.connection.connect` never having
+  been reached, not on any stub having been called; the precondition is a kernel
+  lock the test holds, so nothing about it can be satisfied by wiring. Deleting
+  step 2b makes `start()` succeed and turns this case red. `flock` is what makes
+  it possible in one process at all: the locks belong to the open file
+  description, so a second acquisition inside the same process contends exactly
+  as a second process does — no subprocess, no `sleep`, no timing (proves the
+  guard refuses rather than letting a second bot trade the same account, which
+  the `asyncio.Lock`s in `execution.orders` cannot do because they coordinate
+  coroutines in one event loop and cannot see another process at all).
+- **Closing the descriptor that held the lock — the way the kernel releases it
+  on any process death — lets the next `start()` proceed past step 2b (v1.89,
+  #22)** (proves a crashed instance does not leave a bot that will not start;
+  restarts are routine, and refusing to start is strictly worse than the
+  duplicate it prevents when there is nothing left to duplicate).
+- **A refusal with no marker file present alerts exactly once, writes
+  `${DB_PATH}.instance-lock.refused` containing the `clock.now()` instant, emits
+  `startup_failed` with `stage` `instance` and `reason` `INSTANCE_LOCKED`, and
+  emits no `startup_ok` (v1.89, #22).** The assertions are the alert count, the
+  file's contents and the emitted record — all outcomes an operator or the
+  deploy health gate could observe (proves the owner is told the first time, and
+  that the refusal is visible to a reader who cannot read Telegram).
+- **A second refusal while the marker is fresh emits `startup_failed` again,
+  sends no alert, and leaves the marker's recorded instant byte-for-byte
+  unchanged (v1.89, #22).** The unchanged instant is the point of the case, not
+  a detail of it: rewriting it on every retry would push the age-out forward
+  every 30 seconds under the restart loop this rule exists for, so a test that
+  only counted alerts would pass an implementation whose latch can never expire
+  (proves the storm is suppressed and the window is measured from the first
+  refusal).
+- **A refusal whose marker records an instant more than 24 hours before
+  `clock.now()` alerts again and rewrites the marker (v1.89, #22).** The clock
+  is fixed by the test; no `sleep` and no wall-clock reliance (proves the file
+  latch ages out, which is the only bound on the accepted risk that a genuine
+  second incident weeks later is otherwise quiet).
+- **A successful `start()` with a marker file present deletes it (v1.89, #22)**
+  (proves the primary reset runs on the path that necessarily executes the
+  moment the refusal condition ends — an instance holding the lock is the proof
+  that there is only one).
 - `start` calls `db.connection.connect` **before** `db.migrations.apply`, and
   `apply` receives `db.connection.shared()` (proves the connection is opened by
   startup rather than at import or inside a repository).
@@ -4713,6 +4756,191 @@ Fixed ordering; each step completes before the next begins:
    token.
 2. `logging_setup.configure()`, passing every token and account identifier on
    the loaded `Config` as `secrets`.
+
+2b. **Take the single-instance lock, and hold it for the life of the process
+   (v1.89, #22).** Open `Path(str(config.db_path) + ".instance-lock")` for
+   writing, creating it if absent, and take an exclusive non-blocking `flock`
+   on it. If the lock is already held, refuse to start: raise `StartupError`
+   naming the lock path, having emitted `startup_failed` (CRITICAL) with
+   `stage` `instance` and `reason` `INSTANCE_LOCKED`, and having alerted or
+   not alerted per the once-per-condition rule below. **On the refusal path no
+   database connection is opened, no broker call is made, and no order is
+   placed.** No new §7.1 row is needed: `startup_failed` already exists and
+   this module already owns it.
+
+   **What the lock prevents, on the named path.** The submission locks in
+   `execution.orders` are `asyncio.Lock` objects rebuilt per event loop; they
+   serialise coroutines inside one loop and are invisible to a second process.
+   Two instances against one `DB_PATH` therefore both pass `_already_open`,
+   both `record_submitting` — with two *different* `uuid4()` keys, so both
+   inserts succeed — and both `post_market_order`. **Two real market buys reach
+   the exchange.** Only then does the second `open_row` violate
+   `idx_positions_one_open` and halt, after the money has moved. The
+   idempotency key cannot close this: it deduplicates a *retry of one intent*
+   against `resolve_unfinished`, and two instances form two independent
+   intents that the broker correctly fills as two unrelated orders.
+
+   The aftermath is worse than the halt and is the reason this is a startup
+   obligation rather than a nuisance. `broker.reconcile` does **not** class the
+   doubled holding as `FOREIGN_HOLDING` — that candidate list is built from
+   tickers *not present* in the local map, so a ticker that has a local row can
+   never reach it. It takes `_adjust_lots` instead, which alerts and grows the
+   row to 2× lots at the *original* entry price; `LOTS_ADJUSTED` is in this
+   module's observed-not-remedied set, so **no stop is placed for the extra
+   lots**. That missing remedy is **#233**, which has its own owner decision
+   and is deliberately not settled here; what is settled here is that the
+   condition stops being reachable.
+
+   **The descriptor is kept for the lifetime of the process and is never closed
+   by application code** — not by `app.shutdown`, not by an exception handler,
+   not by a context manager. The kernel releases the lock when the process
+   ends by any means, including `SIGKILL`, an OOM kill, `docker kill` and power
+   loss, so a crashed instance never leaves a lock a human has to clear. That is
+   the whole reason it is a `flock` and not a PID file, a `runtime_state` row or
+   a heartbeat: those record liveness, and a liveness record written by a
+   process that then dies is a latch with no reset — on a live account, holding
+   open positions, at 3am. Restarts are routine, not exceptional, so the release
+   must cost nobody anything.
+
+   **It is `flock` (`LOCK_EX | LOCK_NB`), deliberately, and not
+   `fcntl.lockf`.** `flock` locks belong to the *open file description*, so two
+   acquisitions within one process contend exactly as two processes do — which
+   is what makes this guard testable at all, in one process and one event loop,
+   with no subprocess and no `sleep`. A guard that cannot be made to fire is
+   worse than no guard, because it reads as protection. POSIX record locks
+   belong to the *process*: they would be granted twice inside one process, and
+   are dropped by *any* `close()` of *any* descriptor on the file.
+
+   **The lock is on a file beside `DB_PATH`, never on the database itself.**
+   `PRAGMA locking_mode = EXCLUSIVE` is incompatible with WAL and would lock out
+   `scripts/deploy/export_health.py` and `scripts/deploy/update.sh`'s read-only
+   in-flight-order query. The database offers no mutual exclusion that would
+   serve here: WAL plus `BEGIN IMMEDIATE` and `busy_timeout` make each
+   *individual* transaction atomic across processes and nothing more, and every
+   check-then-act in `execution.orders` spans two transactions with a broker
+   call between them.
+
+   It runs at step 2b — after `logging_setup.configure`, so the refusal is
+   redacted and structured and `startup_failed` is emittable, and before step 3,
+   so a refused instance never opens the database. **This is a held lock, not a
+   periodic check.** A check at startup would say nothing about an instance that
+   starts a minute later; a lock held for the process lifetime refuses a second
+   instance starting at any later moment, for one `flock` call per process and
+   no per-cycle cost.
+
+2c. **Alert once per refusal condition, then refuse quietly (v1.89, #22, owner
+   decision).** A refused instance alerts the owner on the **first** refusal,
+   and on every subsequent refusal logs and raises without alerting. The exit
+   code is unchanged — `__main__` still sleeps 30 seconds and exits 1 on
+   `StartupError`, and `startup_failed` is emitted on **every** refusal, first
+   or repeat, so `docker ps`, the container log and the deploy health gate all
+   still see a fault. Suppressing the *alert* is not suppressing the *failure*.
+   Without this rule, `restart: unless-stopped` plus that 30-second sleep is one
+   Telegram message every half minute forever, in a channel whose entire premise
+   is that silence means healthy.
+
+   **The restart is a new process, so the latch cannot live in the process.** A
+   module-level boolean is reset by the very restart it is meant to survive. The
+   marker is therefore a file beside the lock:
+   `Path(str(config.db_path) + ".instance-lock.refused")`, containing a single
+   ISO-8601 UTC timestamp taken from `clock.now()` — never `datetime.now()`,
+   which this module may not call. On refusal:
+
+   - **Marker absent, unreadable, malformed, or bearing an instant in the
+     future** — treat as absent. This is a first refusal: write `clock.now()`
+     into the marker (truncating), **alert**, emit `startup_failed`, raise.
+     Unreadable and malformed fail *loud*: a corrupt marker must never be able
+     to silence the channel, and a clock that moved backwards must not either.
+   - **Marker present and its instant is within the ageing window** — a repeat
+     refusal: **do not alert**, and **do not rewrite the marker**. Log at
+     WARNING that the alert was suppressed, naming the marker's recorded
+     instant, so an operator reading the log sees both the refusal and why it
+     was quiet. Emit `startup_failed`, raise.
+   - **Marker present and older than the ageing window** — treat as a first
+     refusal: alert and rewrite it with the new instant.
+   - **The marker cannot be written** (permissions, full disk) — alert anyway
+     and continue to the `StartupError`. The marker is an anti-spam device and
+     is never a precondition for the refusal.
+
+   **Not rewriting the marker on a repeat refusal is load-bearing, not an
+   omission.** The window is measured from the *first* refusal of a condition,
+   not the most recent one. Refreshing it on every retry would push the instant
+   forward every 30 seconds under exactly the restart loop this rule exists for,
+   making the age-out unreachable and turning "alert once per condition" into
+   "alert once, ever" — a latch whose reset is written down and cannot fire.
+
+   **The marker's reset, stated because a latch that does not name one is the
+   defect (failure class 8).** Two things clear it:
+
+   1. **A successful acquisition of the lock deletes the marker**, as part of
+      step 2b, before startup proceeds. This is the primary reset and it is
+      reachable by construction: the moment an instance holds the lock is the
+      moment there is exactly one instance, which is precisely when the refusal
+      condition has ended. Every normal recovery — the operator kills the stray
+      process, the container is replaced, the host reboots — passes through it.
+   2. **Age-out after 24 hours.** A marker whose recorded instant is more than
+      24 hours before `clock.now()` is treated as absent, so the next refusal
+      alerts again and rewrites it.
+
+   **Why 24 hours.** The floor is set by the retry period: the window must be far
+   longer than the ~30-second restart cycle or the storm simply re-forms, so
+   anything on the order of minutes is disqualified. The ceiling is set by how
+   long a genuine new incident may stay quiet. 24 hours matches the cadence the
+   owner already reads this channel on — the daily heartbeat is one message per
+   Moscow day, so a permanently duplicated instance costs at most one extra
+   message a day beside it, against 2,880 a day unlatched. It also means a
+   persistent duplicate is re-reported daily rather than once ever, which is the
+   difference between a latch and an amnesty.
+
+   **The accepted risk, recorded as a decision rather than an oversight.**
+   Reset (1) does not fire in the one case that matters most: the *holder* keeps
+   running and never restarts, so nothing deletes the marker, and a genuine
+   second incident weeks later is silent — until the age-out. The owner accepted
+   this explicitly. The 24-hour age-out is the entire bound on it: without the
+   age-out the exposure would be unbounded, and with it the worst case is that a
+   new duplicate-instance incident is refused quietly for up to 24 hours before
+   the owner is told. In that window the guard is still doing its job — no
+   second instance trades — so what is delayed is the notification, never the
+   protection.
+
+   **`scripts/ci/check_latches.py` does not cover this latch, and must not be
+   read as covering it (failure class 6).** That gate inspects module-level
+   booleans and requires an assignment back to `False` in the same module.
+   This latch is a file on disk, so the gate is structurally blind to it: a
+   green run says nothing whatever about the marker, and would stay green if
+   both resets above were deleted. The reset is enforced by this contract and by
+   the §3.2 cases that exercise it, and by nothing else.
+
+2d. **Who must never take this lock (v1.89, #22).**
+   `scripts/deploy/export_health.py`, `scripts/deploy/update.sh`, `ops.backup`
+   and everything under `sandbox/` are readers of the data directory and
+   **never acquire the instance lock**, neither shared nor exclusive. Stated
+   positively because the omission is the trap: a `flock` added to the health
+   export makes the nightly export fail precisely whenever the bot is up, which
+   is whenever it is healthy. The lock answers exactly one question — "is
+   another *bot* running against this `DB_PATH`" — and every one of those four
+   is something other than a bot.
+
+2e. **Nothing changes in `execution.orders` (v1.89, #22).** Its `asyncio.Lock`s
+   stay exactly as they are. They are intra-process serialisation between the
+   trading loop, the Telegram command handler and the shutdown drain; they
+   remain necessary and sufficient for that, they were never a cross-process
+   control, and this step does not make them one. In particular, the issue's
+   secondary finding — that `_ticker_locks` grows without bound — is
+   **declined**, and the reason is verified rather than assumed: the dict is
+   keyed by ticker and so bounded by watchlist size, and `_loop_locks` already
+   discards the whole dict whenever the running event loop changes. It has no
+   contract line because there is no behaviour to specify.
+
+   **What this step deliberately does not cover.** Two instances on *different*
+   hosts sharing a network filesystem: `flock` over NFS is unreliable, and the
+   deployment is one VPS with local disk. If that ever changes, this control
+   silently weakens and this paragraph is the notice. Nor does it see an
+   instance that was already running when the lock was first deployed — a
+   hand-started process from before the upgrade holds no lock. Nor does it close
+   the transactional gaps of #20; it makes them unreachable in practice, which
+   is not the same thing.
+
 3. `db.connection.connect(config.db_path)`, then
    `db.migrations.apply(db.connection.shared())`. The connection is opened here —
    not at import, and not inside a repository — and `apply` receives the shared
@@ -4875,10 +5103,17 @@ Fixed ordering; each step completes before the next begins:
   is the time of the last *trade* and lags arbitrarily in a quiet market, so a
   check built on it would halt trading because nobody traded.
 - **On any `StartupError` after logging is configured, emit `startup_failed`
-  (CRITICAL) with `stage` (the step name: `config`, `logging`, `database`,
-  `strategies`, `session`, `recovery`, `reconcile`, `halt`, `ready`) and
-  `reason` (v1.61).** No `startup_ok` on that path. `__main__` does not emit
-  either event; it only sleeps and exits.
+  (CRITICAL) with `stage` (the step name: `config`, `logging`, `instance`,
+  `database`, `strategies`, `session`, `recovery`, `reconcile`, `halt`,
+  `reachability`, `ready`) and `reason` (v1.61; `instance` added v1.89 for step
+  2b).** No `startup_ok` on that path. `__main__` does not emit either event; it
+  only sleeps and exits.
+
+  **`reachability` is a pre-existing drift, unrelated to #22 (v1.89).** The code
+  has set that stage since step 8a was written and the enumeration never listed
+  it, so a reader auditing the emitted values against this sentence would have
+  found a value the spec did not admit. It is corrected in the same sentence
+  step 2b had to edit anyway.
 
 ### `zarabot/app/loops.py`
 
@@ -6788,10 +7023,36 @@ container.
 - `TZ=Europe/Moscow`.
 - No published ports. The container listens on nothing.
 
+**Runtime artefacts beside the database (v1.89, #22).** `app.startup` step 2b
+creates two files next to `DB_PATH` in the bind-mounted data directory:
+
+- `${DB_PATH}.instance-lock` — the single-instance lock. Its *contents* are
+  irrelevant; the `flock` on it is the whole artefact, so it is empty and stays
+  empty. The kernel releases the lock on process death by any means, so it is
+  never stale and no operator ever deletes it by hand.
+- `${DB_PATH}.instance-lock.refused` — the once-per-condition alert marker,
+  holding one ISO-8601 UTC timestamp.
+
+Both must be writable by uid 1000, which the data directory already is. Neither
+is backed up: `ops.backup` globs `zarabot-*.db` in the backup directory and
+cannot match either name, and neither carries state worth restoring — a fresh
+start recreates the lock, and a missing marker only means the next refusal
+alerts, which is the safe direction.
+
+**Nothing but the bot takes the instance lock.** `scripts/deploy/update.sh`,
+`scripts/deploy/export_health.py`, `ops.backup` and everything under `sandbox/`
+read the data directory and never acquire it. A `flock` added to the health
+export would make it fail whenever the bot is running, which is whenever it is
+healthy.
+
 **Failure behaviour on start.** Any `StartupError` alerts if possible, sleeps 30
 seconds, and exits non-zero (rule 15). The restart policy retries; the sleep
 bounds the loop to two attempts a minute so a bad deploy cannot flood Telegram or
-the broker.
+the broker. **A single-instance refusal is the one `StartupError` whose alert is
+rate-limited rather than repeated** — it still exits non-zero every time, and it
+still emits `startup_failed` every time; only the Telegram message is limited to
+one per condition, or one per 24 hours if the condition persists. The reasoning
+and the marker's reset are in `app.startup` step 2c.
 
 **Graceful shutdown.** `SIGTERM` triggers `app.shutdown`: stop accepting signals,
 settle in-flight submissions or leave them `SUBMITTING` for the next startup,
