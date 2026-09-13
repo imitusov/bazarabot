@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -20,7 +21,15 @@ from zarabot.broker.client import (
 )
 from zarabot.clock import moscow_date
 from zarabot.config import Config
+from zarabot.config import get as config_get
+from zarabot.db.connection import connect, disconnect
+from zarabot.db.migrations import apply
+from zarabot.db.orders import count_for_day as real_count_for_day
+from zarabot.db.orders import record_submitting, settle
 from zarabot.db.snapshots import DailySnapshot
+from zarabot.db.snapshots import list_for_period as real_list_for_period
+from zarabot.db.snapshots import update_intraday as real_update_intraday
+from zarabot.db.snapshots import write_daily as real_write_daily
 from zarabot.execution.orders import ExitFailed
 from zarabot.models import (
     Candle,
@@ -182,6 +191,9 @@ def _patch_defaults(
     async def _empty(*_a: object, **_k: object) -> list[object]:
         return []
 
+    async def _zero(*_a: object, **_k: object) -> int:
+        return 0
+
     async def _price(figi: str) -> Decimal:
         calls.append(f"price:{figi}")
         return Decimal("100")
@@ -248,6 +260,14 @@ def _patch_defaults(
     monkeypatch.setattr(loops, "is_halted", _halted)
     monkeypatch.setattr(loops, "resolve_unfinished", _resolve)
     monkeypatch.setattr(loops, "list_open", _empty)
+    monkeypatch.setattr(loops, "list_closed", _empty)
+    # Step 4 reads and writes the day's row on every cycle now (v1.86), so the
+    # snapshot seam is stubbed for every case here; `_patch_pnl` and the
+    # real-database cases below replace these with something that records.
+    monkeypatch.setattr(loops, "list_for_period", _empty)
+    monkeypatch.setattr(loops, "write_daily", _none)
+    monkeypatch.setattr(loops, "update_intraday", _none)
+    monkeypatch.setattr(loops, "count_for_day", _zero)
     monkeypatch.setattr(loops, "is_active", _cooldown)
     monkeypatch.setattr(loops, "active_until", _until)
     monkeypatch.setattr(loops, "record", _none)
@@ -303,6 +323,7 @@ def _patch_pnl(
     equity: Decimal | Exception = Decimal("100000"),
     rows: list[DailySnapshot] | None = None,
     written: list[DailySnapshot] | None = None,
+    updated: list[tuple[object, ...]] | None = None,
 ) -> None:
     """Patch the P&L collaborators step 4 uses. `pnl` and `db.snapshots` are
     other modules' code; this module is under test, not theirs."""
@@ -320,9 +341,36 @@ def _patch_pnl(
         if written is not None:
             written.append(snapshot)
 
+    async def _update(
+        trade_date: date,
+        closing_equity: Decimal,
+        cash: Decimal,
+        realised_pnl: Decimal,
+        unrealised_pnl: Decimal,
+        open_positions: int,
+        orders_placed: int,
+    ) -> None:
+        if updated is not None:
+            updated.append(
+                (
+                    trade_date,
+                    closing_equity,
+                    cash,
+                    realised_pnl,
+                    unrealised_pnl,
+                    open_positions,
+                    orders_placed,
+                )
+            )
+
+    async def _count(day: date) -> int:
+        return 0
+
     monkeypatch.setattr(loops, "bot_equity", _equity)
     monkeypatch.setattr(loops, "list_for_period", _rows)
     monkeypatch.setattr(loops, "write_daily", _write)
+    monkeypatch.setattr(loops, "update_intraday", _update)
+    monkeypatch.setattr(loops, "count_for_day", _count)
 
 
 async def test_session_closed_makes_no_market_data_call(
@@ -2485,3 +2533,403 @@ async def test_naive_now_emits_clock_drift_and_does_not_trade(
     assert events[0].drift_seconds == 0
     assert "resolve" not in calls
     assert "candles" not in calls
+
+
+# ---------------------------------------------------------------------------
+# #17: the day's row is updated on every in-session cycle, and the last write
+# of the day IS the close. These run against a real temporary database: the
+# tables under test here are `daily_snapshots` and `orders`, and a stub that
+# merely records a call could not show that two cycles leave one row.
+# Positions stay stubbed at their repository boundary and the broker stays
+# mocked, as everywhere else in this file.
+# ---------------------------------------------------------------------------
+
+REQUIRED_ENV = {
+    "TINVEST_TOKEN": "token",
+    "TINVEST_ACCOUNT_ID": "acct",
+    "TELEGRAM_BOT_TOKEN": "tg",
+    "TELEGRAM_CHAT_ID": "1",
+    "ALLOCATED_CAPITAL": "100000",
+    "WATCHLIST": "SBER",
+}
+TODAY = moscow_date(NOW)
+
+
+@pytest.fixture
+async def snapshot_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[Path]:
+    """A temporary database with migrations applied, for step 4's own tables."""
+    path = tmp_path / "zarabot.db"
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DB_PATH", str(path))
+    config_get.cache_clear()
+    conn = await connect(str(path))
+    await apply(conn)
+    try:
+        yield path
+    finally:
+        await disconnect()
+        config_get.cache_clear()
+
+
+class _Book:
+    """The open book and its quotes, shared by the cycle and by `pnl`."""
+
+    def __init__(self) -> None:
+        self.open: list[Position] = []
+        self.closed: list[Position] = []
+        self.prices: dict[str, Decimal] = {}
+        self.reject: set[str] = set()
+        # FIGIs to reject exactly once, so step 2 misses a price that
+        # `pnl.bot_equity` then reads successfully.
+        self.reject_once: set[str] = set()
+        self.alerts: list[str] = []
+        self.price_calls: list[str] = []
+
+
+def _patch_live_snapshot_path(
+    monkeypatch: pytest.MonkeyPatch, calls: list[str]
+) -> _Book:
+    """Let step 4 run against the real `db.snapshots`, `db.orders` and `pnl`.
+
+    `_patch_defaults` replaces those with stubs; the whole point of these tests
+    is the row they leave behind, so they are put back and only the broker and
+    `db.positions` are mocked.
+    """
+    import zarabot.app.loops as loops
+    import zarabot.pnl as pnl
+
+    book = _Book()
+
+    async def _price(figi: str) -> Decimal:
+        book.price_calls.append(figi)
+        if figi in book.reject_once:
+            book.reject_once.discard(figi)
+            raise PriceRejected(f"{figi} unusable")
+        if figi in book.reject:
+            raise PriceRejected(f"{figi} unusable")
+        return book.prices[figi]
+
+    async def _list_open() -> list[Position]:
+        return list(book.open)
+
+    async def _list_closed() -> list[Position]:
+        return list(book.closed)
+
+    async def _alert(text: str, urgent: bool = False) -> None:
+        book.alerts.append(text)
+
+    monkeypatch.setattr(loops, "get_last_price", _price)
+    monkeypatch.setattr(pnl, "get_last_price", _price)
+    monkeypatch.setattr(loops, "list_open", _list_open)
+    monkeypatch.setattr(pnl, "list_open", _list_open)
+    monkeypatch.setattr(loops, "list_closed", _list_closed)
+    monkeypatch.setattr(pnl, "list_closed", _list_closed)
+    monkeypatch.setattr(loops, "alert", _alert)
+    monkeypatch.setattr(pnl, "alert", _alert)
+    monkeypatch.setattr(pnl, "_alerted_reconstruction", set())
+    # The real thing, in place of `_patch_defaults`' stubs.
+    monkeypatch.setattr(loops, "daily_loss_pct", pnl.daily_loss_pct)
+    monkeypatch.setattr(loops, "bot_equity", pnl.bot_equity)
+    monkeypatch.setattr(loops, "list_for_period", real_list_for_period)
+    monkeypatch.setattr(loops, "write_daily", real_write_daily)
+    monkeypatch.setattr(loops, "update_intraday", real_update_intraday)
+    monkeypatch.setattr(loops, "count_for_day", real_count_for_day)
+    return book
+
+
+async def _row() -> DailySnapshot | None:
+    rows = await real_list_for_period(TODAY, TODAY)
+    return rows[0] if rows else None
+
+
+async def test_two_cycles_on_one_day_leave_one_row_with_the_first_baseline(
+    snapshot_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The day's row is updated, not reseeded and not left as written.
+
+    Before v1.86 the row was written once at the open and never revisited:
+    `closing_equity` was permanently null, so there was no equity curve, and
+    `/status` reported a confident `0.00` (#17).
+    """
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    book = _patch_live_snapshot_path(monkeypatch, calls)
+    position = _position()  # 2 lots of 10 at 100
+    book.open = [position]
+    book.prices[position.figi] = Decimal("98")
+
+    clock = {"now": PRE_OPEN}
+    monkeypatch.setattr(loops, "now", lambda: clock["now"])
+    monkeypatch.setattr(
+        loops,
+        "is_open",
+        lambda moment: SESSION.start is not None and moment >= SESSION.start,
+    )
+
+    # Present before the open, so this process may write the day's baseline.
+    await trading_cycle(_ctx())
+
+    # First in-session cycle: equity is 100000 + 20 * (98 - 100).
+    clock["now"] = NOW
+    await trading_cycle(_ctx())
+
+    first = await _row()
+    assert first is not None
+    assert first.opening_equity == Decimal("99960")
+    assert first.closing_equity == Decimal("99960")
+
+    # Second cycle, the same Moscow day, at a higher price.
+    book.prices[position.figi] = Decimal("105")
+    clock["now"] = NOW + timedelta(minutes=5)
+    await trading_cycle(_ctx())
+
+    rows = await real_list_for_period(TODAY, TODAY)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.opening_equity == Decimal("99960")  # the FIRST cycle's
+    assert row.closing_equity == Decimal("100100")  # the SECOND cycle's
+    assert row.unrealised_pnl == Decimal("100")
+    assert row.realised_pnl == Decimal("0")
+    assert row.open_positions == 1
+    assert row.orders_placed == 0
+    assert row.benchmark_value is None
+    assert isinstance(row.closing_equity, Decimal)
+
+
+async def test_cash_is_uninvested_money_not_a_second_copy_of_equity(
+    snapshot_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cash` + market value == `closing_equity`, by construction (§5)."""
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    book = _patch_live_snapshot_path(monkeypatch, calls)
+    position = _position()
+    book.open = [position]
+    book.prices[position.figi] = Decimal("105")
+
+    clock = {"now": PRE_OPEN}
+    monkeypatch.setattr(loops, "now", lambda: clock["now"])
+    monkeypatch.setattr(
+        loops,
+        "is_open",
+        lambda moment: SESSION.start is not None and moment >= SESSION.start,
+    )
+    await trading_cycle(_ctx())
+    clock["now"] = NOW
+    await trading_cycle(_ctx())
+
+    row = await _row()
+    assert row is not None
+    market_value = Decimal("105") * position.lots * position.lot_size
+    assert row.closing_equity is not None
+    assert row.cash + market_value == row.closing_equity
+    assert row.cash != row.closing_equity
+
+
+async def test_a_cycle_that_cannot_measure_the_loss_leaves_the_row_stale(
+    snapshot_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unmarkable book leaves the previous cycle's point on the curve.
+
+    A stale point is a fact that has stopped moving; a partial mark is an
+    invention that looks complete.
+    """
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    book = _patch_live_snapshot_path(monkeypatch, calls)
+    position = _position()
+    book.open = [position]
+    book.prices[position.figi] = Decimal("105")
+
+    clock = {"now": PRE_OPEN}
+    monkeypatch.setattr(loops, "now", lambda: clock["now"])
+    monkeypatch.setattr(
+        loops,
+        "is_open",
+        lambda moment: SESSION.start is not None and moment >= SESSION.start,
+    )
+    await trading_cycle(_ctx())
+    clock["now"] = NOW
+    await trading_cycle(_ctx())
+    good = await _row()
+    assert good is not None
+    assert good.closing_equity == Decimal("100100")
+
+    # Now the price is unusable, so the day's loss is unknowable.
+    book.reject.add(position.figi)
+    clock["now"] = NOW + timedelta(minutes=5)
+    await trading_cycle(_ctx())
+
+    after = await _row()
+    assert after == good
+
+
+async def test_a_partial_mark_is_skipped_rather_than_written(
+    snapshot_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 2 missed a price, so the cycle marks nothing at all.
+
+    The loss was measurable — `pnl` re-read the quote and got one — but the
+    prices this cycle holds do not cover the book, and a mark taken over part
+    of it understates `unrealised_pnl` and overstates `cash`.
+    """
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    book = _patch_live_snapshot_path(monkeypatch, calls)
+    position = _position()
+    book.open = [position]
+    book.prices[position.figi] = Decimal("105")
+
+    clock = {"now": PRE_OPEN}
+    monkeypatch.setattr(loops, "now", lambda: clock["now"])
+    monkeypatch.setattr(
+        loops,
+        "is_open",
+        lambda moment: SESSION.start is not None and moment >= SESSION.start,
+    )
+    await trading_cycle(_ctx())
+    clock["now"] = NOW
+    await trading_cycle(_ctx())
+    good = await _row()
+    assert good is not None
+
+    book.reject_once.add(position.figi)  # rejected at step 2, fine afterwards
+    clock["now"] = NOW + timedelta(minutes=5)
+    await trading_cycle(_ctx())
+
+    after = await _row()
+    assert after == good
+
+
+async def test_a_process_that_missed_the_open_writes_no_row_at_all(
+    snapshot_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither the opening write nor the update may invent a 14:00 baseline.
+
+    An update that could create the row would seed the baseline mid-session and
+    hide the morning's drawdown from the limit that exists to catch it (#9).
+    """
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    book = _patch_live_snapshot_path(monkeypatch, calls)
+    position = _position()
+    book.open = [position]
+    book.prices[position.figi] = Decimal("105")
+    monkeypatch.setattr(loops, "now", lambda: LATE)
+
+    await trading_cycle(_ctx())
+
+    assert await real_list_for_period(TODAY, TODAY) == []
+    assert any("reconstructed" in text for text in book.alerts)
+
+
+class _OneShotStrategy:
+    """Signals once, then goes quiet — one entry attempt for the whole day."""
+
+    name = "oneshot"
+    lookback = 1
+
+    def __init__(self) -> None:
+        self.fired = False
+
+    def evaluate(self, ticker: str, candles: object, now: datetime) -> Signal | None:
+        if self.fired:
+            return None
+        self.fired = True
+        return Signal(
+            ticker=ticker,
+            strategy=self.name,
+            side=Side.BUY,
+            generated_at=now,
+            reference_price=Decimal("100"),
+        )
+
+
+async def test_orders_placed_comes_from_durable_state_across_a_restart(
+    snapshot_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected order still counts, and a restart cannot zero the count.
+
+    `orders_placed` asks how much the bot tried to do, so it is read from the
+    `orders` table rather than from a process counter a restart would clear.
+    """
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    _patch_defaults(monkeypatch, calls)
+    import zarabot.app.loops as loops
+
+    _patch_live_snapshot_path(monkeypatch, calls)
+
+    async def _fetch_instrument(ticker: str) -> Instrument:
+        return _make_instrument()
+
+    async def _open_position(
+        signal: Signal, lots: int, instrument: Instrument
+    ) -> Position:
+        # What `execution.orders` does: the intent is durable before the broker
+        # is called, and the broker's refusal is recorded on the same row.
+        await record_submitting("entry-1", signal.ticker, Side.BUY, lots, "ENTRY")
+        await settle("entry-1", OrderStatus.REJECTED, 0, None, None, "max lots")
+        raise OrderRejected("max lots")
+
+    monkeypatch.setattr(loops, "get_instrument", _fetch_instrument)
+    monkeypatch.setattr(loops, "open_position", _open_position)
+    monkeypatch.setattr(
+        loops,
+        "check",
+        lambda *a, **k: RiskDecision(approved=True, lots=1, reason=None),
+    )
+    clock = {"now": PRE_OPEN}
+    monkeypatch.setattr(loops, "now", lambda: clock["now"])
+    monkeypatch.setattr("zarabot.db.orders.now", lambda: clock["now"])
+    monkeypatch.setattr(
+        loops,
+        "is_open",
+        lambda moment: SESSION.start is not None and moment >= SESSION.start,
+    )
+    strategy = _OneShotStrategy()
+
+    await trading_cycle(_ctx(strategies=(strategy,)))
+    clock["now"] = NOW
+    # This cycle writes the day's row, then has its one entry rejected.
+    await trading_cycle(_ctx(strategies=(strategy,)))
+    assert await real_count_for_day(TODAY) == 1
+    opened_row = await _row()
+    assert opened_row is not None
+    assert opened_row.orders_placed == 0  # the order came after step 4
+
+    # A restart mid-session: the process globals are gone, the orders are not.
+    loops._first_cycle_at = None
+    loops._snapshot_on = None
+    clock["now"] = NOW + timedelta(minutes=5)
+    await trading_cycle(_ctx(strategies=(strategy,)))
+
+    row = await _row()
+    assert row is not None
+    assert row.orders_placed == await real_count_for_day(TODAY)
+    assert row.orders_placed == 1
+    assert row.opening_equity == opened_row.opening_equity
