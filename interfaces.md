@@ -1071,7 +1071,14 @@ Send failures retry then log and never raise.
 
 **`set_report_builder(builder: ReportBuilder | None) → None`**
 Installs or clears the `/report` callable. Wired by `app.startup` once
-`reporter.weekly` exists.
+`reporter.weekly` exists — the call is `set_report_builder(build_report)` in
+step 8a/9 of `start()`, and deleting it makes `/report` reply
+`report unavailable` for the life of the process. That wiring is required by no
+§4 contract (#36, spec amendment still open); until it is, the only thing
+holding it in place is
+`tests/test_app_startup.py::test_start_leaves_report_answering_rather_than_unavailable`,
+which drives the real `/report` handler after a real `start()`. Do not delete
+that test to make a regenerated `app.startup` pass.
 
 **`async status/positions/history/pnl/halt/resume/strategies/report/help(update, context) → None`**
 PTB command handlers.
