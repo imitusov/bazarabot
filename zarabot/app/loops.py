@@ -24,10 +24,15 @@ from zarabot.broker.client import (
 from zarabot.clock import moscow_date, now, to_moscow, trading_days_between
 from zarabot.db.cooldowns import active_until, is_active
 from zarabot.db.job_runs import has_run, mark_run
-from zarabot.db.orders import DuplicateOrderError
-from zarabot.db.positions import PositionStateError, list_open
+from zarabot.db.orders import DuplicateOrderError, count_for_day
+from zarabot.db.positions import PositionStateError, list_closed, list_open
 from zarabot.db.signals import record
-from zarabot.db.snapshots import DailySnapshot, list_for_period, write_daily
+from zarabot.db.snapshots import (
+    DailySnapshot,
+    list_for_period,
+    update_intraday,
+    write_daily,
+)
 from zarabot.db.stop_orders import active_for_position
 from zarabot.execution.orders import (
     ExitFailed,
@@ -58,7 +63,7 @@ from zarabot.models import (
 from zarabot.ops.backup import prune
 from zarabot.ops.backup import run as backup_run
 from zarabot.ops.commissions import backfill
-from zarabot.pnl import bot_equity, daily_loss_pct
+from zarabot.pnl import bot_equity, daily_loss_pct, realised, unrealised
 from zarabot.reporter.weekly import send as send_report
 from zarabot.risk.gate import check
 from zarabot.state.halt import halt, is_halted
@@ -72,6 +77,7 @@ _BACKFILL_LOOKBACK = timedelta(days=7)
 _MAX_BACKOFF = 3600
 _FAILURES_BEFORE_ALERT = 3
 _WEEKLY_HOUR_MSK = 12
+_HUNDRED = Decimal(100)
 
 _market_failures = 0
 _market_alerted = False
@@ -377,8 +383,89 @@ async def _write_opening_snapshot(moment: datetime, open_count: int) -> None:
     _LOG.info("opening_snapshot trade_date=%s opening_equity=%s", today, equity)
 
 
+async def _realised_today(today: date) -> Decimal:
+    """`Σ pnl.realised` over the positions closed on this Moscow date.
+
+    The same source and the same filter rule 20's alert uses at step 7: one
+    list, read once, filtered on `exit_at`.
+    """
+    total = Decimal(0)
+    for position in await list_closed():
+        if position.exit_at is not None and moscow_date(position.exit_at) == today:
+            total += realised(position)
+    return total
+
+
+async def _update_snapshot(
+    moment: datetime,
+    loss: Decimal,
+    positions: list[Position],
+    prices: dict[str, Decimal],
+    allocated: Decimal,
+) -> None:
+    """The end of step 4: this cycle's point on the day's equity curve (v1.86).
+
+    Called on every in-session cycle, a halting one included — the mark at
+    which the limit tripped is exactly the one an investigation wants — so the
+    last write of a trading day *is* that day's close, and no end-of-session or
+    next-morning job can miss it (#17). A rollover could not reconstruct
+    `unrealised_pnl` at all: it needs yesterday's closing prices, and the bot
+    keeps none.
+
+    Nothing new is fetched. `closing_equity` is the very equity
+    `pnl.daily_loss_pct` just marked, recovered from the loss it returned
+    against the baseline it measured against — `loss = (opening − equity) /
+    allocated × 100` — rather than by asking the broker for every price a
+    second time (failure class 13). Every other figure was already in hand:
+    the open positions and their step-2 prices, and the closed rows.
+
+    Two guards, both from the contract:
+
+    * **no row, no write.** A process that missed the session open is
+      forbidden to write `opening_equity`, so the day has no row and this must
+      not create one — `db.snapshots.update_intraday` cannot, and the early
+      return here says so at the call site too. The day then has a visible gap
+      rather than a baseline invented at 14:00 (#9).
+    * **no partial mark.** When step 2's prices do not cover every open
+      position, the cycle skips: an incomplete mark understates
+      `unrealised_pnl` and overstates `cash` while looking complete. The row
+      keeps the previous cycle's figures — a stale point, not an invented one —
+      and step 2 has already alerted on the rejection that caused it.
+    """
+    today = moscow_date(moment)
+    rows = await list_for_period(today, today)
+    if not rows:
+        return
+    if any(position.ticker not in prices for position in positions):
+        _LOG.info("snapshot update skipped: step 2 prices do not cover the open book")
+        return
+    closing_equity = rows[0].opening_equity - loss * allocated / _HUNDRED
+    market_value = Decimal(0)
+    unrealised_total = Decimal(0)
+    for position in positions:
+        price = prices[position.ticker]
+        market_value += price * Decimal(position.lots * position.lot_size)
+        unrealised_total += unrealised(position, price)
+    await update_intraday(
+        today,
+        closing_equity,
+        # The bot's uninvested money, never the broker's cash balance: `cash`
+        # plus the market value of the book is `closing_equity` by
+        # construction, so the row cannot hold a bot-scoped equity beside an
+        # account-scoped cash — the unit mismatch that produced #9.
+        closing_equity - market_value,
+        await _realised_today(today),
+        unrealised_total,
+        len(positions),
+        await count_for_day(today),
+    )
+
+
 async def _measure_daily_loss(
-    ctx: AppContext, moment: datetime, open_count: int
+    ctx: AppContext,
+    moment: datetime,
+    positions: list[Position],
+    prices: dict[str, Decimal],
 ) -> bool:
     """Step 4. `False` when the day's loss could not be measured.
 
@@ -387,10 +474,14 @@ async def _measure_daily_loss(
     imprecise. Entries stop for that cycle and the owner is alerted, latched —
     but the bot is not halted: the exits at step 3 have already run and must not
     be blocked, and a halt would outlive a condition that is usually momentary.
+
+    A cycle that could not measure the loss writes no curve point either: it
+    returns before the update, so the row keeps the last figures that were
+    actually observed.
     """
     global _loss_unmeasurable_alerted
     try:
-        await _write_opening_snapshot(moment, open_count)
+        await _write_opening_snapshot(moment, len(positions))
         loss = await daily_loss_pct(moment)
     except (PriceRejected, BrokerUnavailable) as exc:
         _LOG.warning("daily loss unmeasurable (%s); entries skipped", exc)
@@ -407,6 +498,9 @@ async def _measure_daily_loss(
         detail = f"daily loss {loss}% reached limit {ctx.config.daily_loss_limit_pct}%"
         await halt(HaltReason.DAILY_LOSS_LIMIT, detail, moment, daily_loss_pct=loss)
         await alert(detail)
+    await _update_snapshot(
+        moment, loss, positions, prices, ctx.config.allocated_capital
+    )
     return True
 
 
@@ -555,7 +649,7 @@ async def trading_cycle(ctx: AppContext) -> None:
             positions, ctx.config.reentry_cooldown_minutes
         )
         await _submit_exits(positions, prices, executed, moment, ctx)
-        if not await _measure_daily_loss(ctx, moment, len(positions)):
+        if not await _measure_daily_loss(ctx, moment, positions, prices):
             return
         if _entries_stopped:
             # Same shape as the halt check below: a process on its way down must
