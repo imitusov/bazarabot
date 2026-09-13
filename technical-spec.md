@@ -1514,6 +1514,21 @@ Additionally, on exits booked from an exchange stop:
   greps for exactly this event, and nothing emitted it).
 - A `FOREIGN_HOLDING` refusal emits `startup_failed` with `stage` `reconcile`
   and no `startup_ok` (v1.61).
+- **After `start()` returns, `/report` from the authorised chat produces a
+  report rather than `report unavailable` (v1.88, #36).** The case clears the
+  `telegram.commands` builder global to `None` first — it is process-wide, so a
+  builder another test installed would otherwise make the case pass with step
+  8b deleted — then runs the real `start()`, then drives the real
+  `telegram.commands.report` handler with an update shaped the way
+  python-telegram-bot shapes one, and asserts on the reply text the owner would
+  see: that it is not `report unavailable`, and that it carries the composed
+  report's own week header and section text. It asserts an outcome, never that
+  a stub was called, and it names no test double as the builder, so a call
+  wired to the wrong callable fails it too. The report's benchmark leg is
+  mocked at `broker.client`, which is the seam the rulebook names (proves
+  startup installs the builder, and not only the `telegram.commands` cases that
+  inject one of their own: deleting step 8b left every other `app.startup` case
+  green).
 
 **`app.loops` / `app.shutdown`**
 - With the session closed, no market data call is made (proves the session guard
@@ -4610,6 +4625,15 @@ One handler per command in the brief's command table.
   refusal, because a refusal confirms the bot exists to whoever sent the message.
 - Replies exceeding the platform limit are truncated with an explicit note of how
   many entries were omitted.
+- **`/report` is served through an injected builder, never through an import of
+  `reporter.weekly` (v1.88, #36).** This module exposes
+  `set_report_builder(builder: ReportBuilder | None) → None`, holds the builder
+  in module state, and replies `report unavailable` when none is installed.
+  Importing `reporter.weekly` here instead would pull the reporter and its
+  broker-facing benchmark leg into every test of every other command. The
+  matching obligation to install it belongs to `app.startup` step 8b, which is
+  where it is written; this module owes only the seam and the fallback reply,
+  and must not acquire a default builder to close the gap on its own.
 - No handler mutates a risk limit.
 - `/halt` and `/resume` delegate to `state.halt` and to nothing else.
 - **`/halt` passes no `daily_loss_pct` (v1.71, reversing v1.69).** It calls
@@ -4791,6 +4815,32 @@ Fixed ordering; each step completes before the next begins:
    before step 9 so the finding can be folded into the ready alert. A broker
    failure in this step is alerted and startup continues; this is a diagnostic,
    and it must never be the reason the bot is not running.
+
+8b. **Install the `/report` builder (v1.88, #36).** Call
+   `telegram.commands.set_report_builder(reporter.weekly.build)`. Until that
+   call is made `/report` replies `report unavailable` for the life of the
+   process, so this step is the only thing that makes a command in the brief's
+   command table work at runtime.
+
+   The injection exists so that `telegram.commands` needs no import of
+   `reporter.weekly`: the command module stays testable without the reporter,
+   and the dependency points one way. That leaves the two ends joined by
+   nobody, and `app.startup` is the composition point that joins them — which
+   is why the obligation is recorded here rather than under
+   `telegram.commands`, which owns the handler and not the wiring, or under
+   `reporter.weekly`, which owns the builder and not the wiring.
+
+   It runs after step 8a and before step 9 because step 9's alert says the bot
+   is running, and the Telegram command listener `app.loops.run` starts once
+   `start()` returns must find a builder already installed. Nothing later in
+   `start()` may leave the builder cleared.
+
+   **This is the `build_application` defect one module along, and that is why
+   it is written down.** The call lived in the code from the first build and in
+   no contract, so an agent regenerating this module from its task file had no
+   reason to keep it; deleting it left `/report` permanently broken with every
+   gate green. The contract is what makes the wiring an obligation rather than
+   an accident.
 
 9. Alert the owner that the bot is running, reporting version, mode, halt state
    and any reconciliation adjustments, **and emit the `startup_ok` log event of

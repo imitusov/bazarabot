@@ -66,6 +66,15 @@ One handler per command in the brief's command table.
   refusal, because a refusal confirms the bot exists to whoever sent the message.
 - Replies exceeding the platform limit are truncated with an explicit note of how
   many entries were omitted.
+- **`/report` is served through an injected builder, never through an import of
+  `reporter.weekly` (v1.88, #36).** This module exposes
+  `set_report_builder(builder: ReportBuilder | None) → None`, holds the builder
+  in module state, and replies `report unavailable` when none is installed.
+  Importing `reporter.weekly` here instead would pull the reporter and its
+  broker-facing benchmark leg into every test of every other command. The
+  matching obligation to install it belongs to `app.startup` step 8b, which is
+  where it is written; this module owes only the seam and the fallback reply,
+  and must not acquire a default builder to close the gap on its own.
 - No handler mutates a risk limit.
 - `/halt` and `/resume` delegate to `state.halt` and to nothing else.
 - **`/halt` passes no `daily_loss_pct` (v1.71, reversing v1.69).** It calls
