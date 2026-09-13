@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import logging
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -50,6 +53,7 @@ from zarabot.broker.client import (
     post_market_order,
     post_stop_loss,
 )
+from zarabot.db import connection as db_connection
 from zarabot.models import (
     Candle,
     Instrument,
@@ -61,6 +65,8 @@ from zarabot.models import (
     Side,
     StopOrderRecord,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # A Monday, mid-session. The weekend that follows is 21-22 March 2026.
 NOW = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
@@ -209,6 +215,13 @@ class _Capture:
         # is what a renamed SDK field would look like (#33).
         self.last_price_omit_time = False
         self.schedule_override: list[SimpleNamespace] | None = None
+        # `share_by` carries every field including the status; the market-data
+        # endpoint carries the status alone. They are separate knobs so a test
+        # can make them disagree, which is the only way the never-cache rule
+        # can be proved rather than asserted (§2.1, #46).
+        self.share_lot = 10
+        self.share_trading_status = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
+        self.live_trading_status = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
         self.portfolio_positions: list[SimpleNamespace] = _default_portfolio_positions()
         self.portfolio_total_currencies = PORTFOLIO_TOTAL_CURRENCIES
 
@@ -241,15 +254,21 @@ class _Services:
         return SimpleNamespace(
             instrument=SimpleNamespace(
                 figi="BBG000000001",
-                ticker="SBER",
-                lot=10,
+                ticker=kwargs.get("id", "SBER"),
+                lot=self._capture.share_lot,
                 min_price_increment=decimal_to_quotation(Decimal("0.01")),
                 currency="rub",
-                trading_status=SimpleNamespace(
-                    name="SECURITY_TRADING_STATUS_NORMAL_TRADING"
-                ),
+                trading_status=SimpleNamespace(name=self._capture.share_trading_status),
                 uid="uid-sber",
             )
+        )
+
+    async def get_trading_status(self, **kwargs: Any) -> SimpleNamespace:
+        """The market-data endpoint V13 measured: the status, on its own."""
+        self._record("get_trading_status", kwargs)
+        return SimpleNamespace(
+            figi=kwargs.get("figi"),
+            trading_status=SimpleNamespace(name=self._capture.live_trading_status),
         )
 
     async def get_candles(self, **kwargs: Any) -> SimpleNamespace:
@@ -1562,3 +1581,325 @@ async def test_executed_stop_fills_rejects_naive_datetimes(
         await get_executed_stop_fills(naive, NOW)
     with pytest.raises(ValueError):
         await get_executed_stop_fills(NOW - timedelta(hours=8), naive)
+
+
+# --------------------------------------------------------------------------
+# The instruments cache (spec v1.85, §3.2 "The instruments cache", #46).
+#
+# Every fixture below is built the way production builds it: a cached row is
+# whatever `get_instrument` itself wrote on a previous call, never a row a test
+# hand-crafted into the shape it hoped for (failure class 9).
+# --------------------------------------------------------------------------
+
+INSTRUMENT_WINDOW = timedelta(hours=24)
+
+# Table names as the schema actually declares them, so a SQL literal is only
+# read as touching a table when it names one that exists.
+_SCHEMA = (REPO_ROOT / "migrations" / "001_initial.sql").read_text(encoding="utf-8")
+SCHEMA_TABLES = frozenset(
+    name.lower() for name in re.findall(r"CREATE TABLE (\w+)", _SCHEMA)
+)
+_TABLE_REF = re.compile(
+    r"(?:insert\s+into|update|delete\s+from|from|join)\s+(\w+)", re.I
+)
+
+
+def _tables_touched(path: Path) -> set[str]:
+    """Schema tables named by any string constant in `path`.
+
+    String constants only, never the raw text: the comment "we update positions
+    only through db.positions" is English, and reading it as SQL is how the
+    same check in `scripts/ci/check_docs.py` once made `risk.gate` a writer of
+    `positions`.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    touched: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            for name in _TABLE_REF.findall(node.value):
+                if name.lower() in SCHEMA_TABLES:
+                    touched.add(name.lower())
+    return touched
+
+
+def _at(monkeypatch: pytest.MonkeyPatch, moment: datetime) -> None:
+    """Move the only clock this project has. `broker.client` reads no other."""
+    monkeypatch.setattr("zarabot.clock.now", lambda: moment)
+
+
+async def _row(ticker: str) -> dict[str, Any] | None:
+    """The stored row, read straight out of the temporary database."""
+    cursor = await db_connection.shared().execute(
+        "SELECT figi, ticker, lot, min_price_increment, currency, "
+        "trading_status, refreshed_at FROM instruments WHERE ticker = ?",
+        (ticker,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row is not None else None
+
+
+async def test_cache_miss_writes_through_the_row_it_returned(
+    capture: _Capture, db: Path
+) -> None:
+    """A ticker with no row is fetched, stored, and returned — one request.
+
+    The row must hold what the caller was handed, not a second reading of the
+    response that can drift from it.
+    """
+    instrument = await get_instrument("SBER")
+
+    assert len(capture.kwargs_for("share_by")) == 1
+    # Exactly one broker request, never two: `share_by`'s response carries the
+    # status already, so the miss branch makes no live status read.
+    assert capture.kwargs_for("get_trading_status") == []
+
+    stored = await _row("SBER")
+    assert stored is not None
+    assert stored["figi"] == instrument.figi
+    assert stored["lot"] == instrument.lot
+    assert Decimal(stored["min_price_increment"]) == instrument.min_price_increment
+    assert stored["currency"] == instrument.currency
+    assert datetime.fromisoformat(stored["refreshed_at"]) == instrument.refreshed_at
+
+
+async def test_a_fresh_row_serves_the_dimensions_and_never_the_status(
+    capture: _Capture, db: Path
+) -> None:
+    """The second call inside the window issues no `share_by` and one status read."""
+    first = await get_instrument("SBER")
+    capture.calls.clear()
+
+    second = await get_instrument("SBER")
+
+    assert capture.kwargs_for("share_by") == []
+    status_reads = capture.kwargs_for("get_trading_status")
+    assert len(status_reads) == 1
+    assert status_reads[0]["figi"] == first.figi
+    assert second.figi == first.figi
+    assert second.lot == first.lot
+    assert second.min_price_increment == first.min_price_increment
+    assert second.currency == first.currency
+
+
+async def test_a_fresh_row_reports_the_halt_the_broker_reports_now(
+    capture: _Capture, db: Path
+) -> None:
+    """The case #46 exists to close.
+
+    The row stores NORMAL_TRADING; the instrument then halts. `risk.gate` must
+    see the halt on the cycle it happens, not on the cycle a window expires.
+    """
+    capture.share_trading_status = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
+    capture.live_trading_status = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
+    seeded = await get_instrument("SBER")
+    assert seeded.trading_status == "NORMAL_TRADING"
+    stored = await _row("SBER")
+    assert stored is not None
+    assert stored["trading_status"] == "NORMAL_TRADING"
+
+    capture.live_trading_status = "SECURITY_TRADING_STATUS_BREAK_IN_TRADING"
+    halted = await get_instrument("SBER")
+
+    assert halted.trading_status == "BREAK_IN_TRADING"
+    # And the stored value is still the one that was read, unserved.
+    after = await _row("SBER")
+    assert after is not None
+    assert after["trading_status"] == "NORMAL_TRADING"
+
+
+async def test_a_row_exactly_at_the_window_is_fresh(
+    capture: _Capture, db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Boundary: 24 hours old is fresh."""
+    await get_instrument("SBER")
+    capture.calls.clear()
+    _at(monkeypatch, NOW + INSTRUMENT_WINDOW)
+
+    served = await get_instrument("SBER")
+
+    assert capture.kwargs_for("share_by") == []
+    assert served.refreshed_at == NOW
+
+
+async def test_a_row_one_second_past_the_window_is_refetched_and_rewritten(
+    capture: _Capture, db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Boundary: one second beyond 24 hours is stale.
+
+    This is the test that must be able to fail. A window that is coded but not
+    enforced passes the fresh case above and fails here.
+    """
+    await get_instrument("SBER")
+    capture.calls.clear()
+    stale_at = NOW + INSTRUMENT_WINDOW + timedelta(seconds=1)
+    _at(monkeypatch, stale_at)
+
+    refetched = await get_instrument("SBER")
+
+    assert len(capture.kwargs_for("share_by")) == 1
+    assert refetched.refreshed_at == stale_at
+    stored = await _row("SBER")
+    assert stored is not None
+    assert datetime.fromisoformat(stored["refreshed_at"]) == stale_at
+
+
+async def test_a_stale_row_picks_up_a_changed_lot_size(
+    capture: _Capture, db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.1's GAZP lot of 10 is the case that costs money when it is wrong.
+
+    The window is what lets a corporate action be picked up without a restart.
+    """
+    capture.share_lot = 10
+    assert (await get_instrument("SBER")).lot == 10
+
+    capture.share_lot = 1
+    _at(monkeypatch, NOW + INSTRUMENT_WINDOW + timedelta(seconds=1))
+    changed = await get_instrument("SBER")
+
+    assert changed.lot == 1
+    stored = await _row("SBER")
+    assert stored is not None
+    assert stored["lot"] == 1
+
+
+async def test_a_cache_hit_does_not_rewrite_the_row(
+    capture: _Capture, db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`refreshed_at` dates the dimensions, never the status read.
+
+    A fresh status is not evidence that the lot size was re-read, and a caller
+    reading `refreshed_at` is asking how old the lot size is.
+    """
+    await get_instrument("SBER")
+    _at(monkeypatch, NOW + timedelta(hours=1))
+
+    served = await get_instrument("SBER")
+
+    assert served.refreshed_at == NOW
+    stored = await _row("SBER")
+    assert stored is not None
+    assert datetime.fromisoformat(stored["refreshed_at"]) == NOW
+
+
+async def test_the_row_is_written_in_a_non_critical_transaction(
+    capture: _Capture, db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 31: the write runs inside `db.connection.transaction(critical=False)`.
+
+    The spy delegates to the real transaction, so the row landing afterwards is
+    what proves the write went through it rather than around it.
+    """
+    seen: list[bool] = []
+    real = db_connection.transaction
+
+    def spy(*, critical: bool = True) -> Any:
+        seen.append(critical)
+        return real(critical=critical)
+
+    monkeypatch.setattr("zarabot.db.connection.transaction", spy)
+
+    await get_instrument("SBER")
+
+    assert seen == [False]
+    assert await _row("SBER") is not None
+
+
+def test_the_module_owns_no_transaction_state() -> None:
+    """Rule 31 structurally: no BEGIN, no commit, no rollback of its own."""
+    source = (REPO_ROOT / "zarabot" / "broker" / "client.py").read_text(
+        encoding="utf-8"
+    )
+    lowered = source.lower()
+    assert "begin immediate" not in lowered
+    assert ".commit(" not in lowered
+    assert ".rollback(" not in lowered
+    assert "aiosqlite.connect" not in lowered
+
+
+async def test_a_write_failure_is_swallowed_and_the_instrument_returned(
+    capture: _Capture, db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 12: an `aiosqlite.Error` never fails the read.
+
+    The table is dropped, so the insert fails the way a database that will not
+    take the row fails — not through a stubbed writer.
+    """
+    async with db_connection.transaction() as conn:
+        await conn.execute("DROP TABLE instruments")
+
+    with caplog.at_level(logging.ERROR, logger="zarabot.broker.client"):
+        instrument = await get_instrument("SBER")
+
+    assert instrument.ticker == "SBER"
+    assert instrument.lot == 10
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_a_type_error_from_the_write_propagates(
+    capture: _Capture, db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 12 as narrowed in v1.75: only `aiosqlite.Error` is swallowed.
+
+    An analytics path is where a dropped programming error survives longest.
+    """
+
+    def boom(*, critical: bool = True) -> Any:
+        raise TypeError("min_price_increment is not a string")
+
+    monkeypatch.setattr("zarabot.db.connection.transaction", boom)
+
+    with pytest.raises(TypeError):
+        await get_instrument("SBER")
+
+
+async def test_with_no_database_open_the_cache_is_skipped(
+    capture: _Capture,
+) -> None:
+    """`sandbox/data.py` and `scripts/research/backtest.py` have no bot database.
+
+    No `DatabaseNotOpenError` reaches the caller, nothing is cached, and every
+    call is the single `share_by` it is today.
+    """
+    first = await get_instrument("SBER")
+    second = await get_instrument("SBER")
+
+    assert first.ticker == "SBER"
+    assert second.ticker == "SBER"
+    assert len(capture.kwargs_for("share_by")) == 2
+    assert capture.kwargs_for("get_trading_status") == []
+
+
+async def test_a_broker_failure_is_never_answered_from_the_table(
+    capture: _Capture, db: Path
+) -> None:
+    """The one use a durable cache is forbidden.
+
+    A caller that skips a ticker for a cycle is correct; a caller sizing an
+    entry on a status nobody confirmed is not.
+    """
+    await get_instrument("SBER")
+    capture.calls.clear()
+    capture.fail = AioRequestError(StatusCode.UNAVAILABLE, "no route", None)
+
+    with pytest.raises(BrokerUnavailable):
+        await get_instrument("SBER")
+
+    assert capture.kwargs_for("get_trading_status")
+    assert capture.kwargs_for("share_by") == []
+
+
+def test_instruments_is_owned_in_both_directions() -> None:
+    """Single ownership: nobody else touches it, and it touches nobody else."""
+    owner = REPO_ROOT / "zarabot" / "broker" / "client.py"
+    assert _tables_touched(owner) == {"instruments"}
+
+    trespassers = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in [
+            *(REPO_ROOT / "zarabot").rglob("*.py"),
+            *(REPO_ROOT / "sandbox").rglob("*.py"),
+        ]
+        if path != owner and "instruments" in _tables_touched(path)
+    )
+    assert trespassers == []
