@@ -85,10 +85,11 @@ inherit whichever file the previous importer happened to open.
 - **`critical` is passed by the caller (v1.64):
   `transaction(*, critical: bool = True)`.** The default is `true`, so a caller
   that says nothing is treated as trading-critical. Rule-12 callers —
-  `db.signals`, `db.snapshots`, and the instruments cache when it writes through
-  `transaction()` — pass `critical=False`. `db.cooldowns` passes `critical=True`
-  (rule 11, v1.63). The exception still propagates out of `transaction()`; the
-  repository's own catch is what stops it reaching the trading loop.
+  `db.signals`, `db.snapshots`, and `broker.client` when it writes the
+  `instruments` cache (v1.85) — pass `critical=False`. `db.cooldowns` passes
+  `critical=True` (rule 11, v1.63). The exception still propagates out of
+  `transaction()`; the repository's own catch is what stops it reaching the
+  trading loop.
 - **This replaces the table-derivation of v1.62, which did not work.** v1.61
   said `critical` true unconditionally; v1.62 tried to derive it by parsing the
   table out of the SQLite error text. Measured against real errors on a rule-12

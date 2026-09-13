@@ -135,6 +135,12 @@ From `technical-spec.md` §8. Handle each exactly as written.
     instruments cache) → ERROR to stdout only, never propagated. Losing an
     analytics row must not stop trading.
 
+    **All three paths have a writer as of v1.85.** Until then "instruments cache"
+    named nothing: the table had no writer anywhere in `zarabot/` (#102), so this
+    rule listed a path that could not fail. `broker.client` owns it now, and the
+    swallow there returns the `Instrument` the broker just supplied — the caller
+    asked for metadata, not for a cache (#46).
+
     **Non-propagation covers `aiosqlite.Error` and only `aiosqlite.Error`
     (v1.75)** The swallow exists for a database that will not take the row, not
     for every way the call site can be wrong. Any other exception propagates and
