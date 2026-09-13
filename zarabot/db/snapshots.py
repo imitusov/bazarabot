@@ -100,6 +100,54 @@ async def write_daily(snapshot: DailySnapshot) -> None:
         _LOG.exception("snapshot write failed for %s", snapshot.trade_date)
 
 
+async def update_intraday(
+    trade_date: date,
+    closing_equity: Decimal,
+    cash: Decimal,
+    realised_pnl: Decimal,
+    unrealised_pnl: Decimal,
+    open_positions: int,
+    orders_placed: int,
+) -> None:
+    """Refresh the day's six intraday columns. Does nothing without a row.
+
+    `app.loops.trading_cycle` step 4 calls this on every in-session cycle, so
+    the last call of a trading day is what makes `closing_equity` the day's
+    close — there is no close-keyed job to miss (v1.87, #17).
+
+    `opening_equity` and `benchmark_value` are not parameters and cannot be
+    reached from here. The baseline is written once by the opening
+    `write_daily` and is what `pnl.daily_loss_pct` measures against: a caller
+    able to reseed it at 14:00 could erase the morning's drawdown from the
+    limit that exists to catch it (#9). Creating a row is out of reach for the
+    same reason — a mid-session process must not invent an opening figure.
+
+    Write failures are rule 12: logged at ERROR and not propagated, because a
+    lost point on the curve must not stop trading.
+    """
+    try:
+        async with transaction(critical=False) as conn:
+            await conn.execute(
+                """
+                UPDATE daily_snapshots
+                SET closing_equity = ?, cash = ?, realised_pnl = ?,
+                    unrealised_pnl = ?, open_positions = ?, orders_placed = ?
+                WHERE trade_date = ?
+                """,
+                (
+                    str(closing_equity),
+                    str(cash),
+                    str(realised_pnl),
+                    str(unrealised_pnl),
+                    open_positions,
+                    orders_placed,
+                    trade_date.isoformat(),
+                ),
+            )
+    except aiosqlite.Error:
+        _LOG.exception("snapshot update failed for %s", trade_date)
+
+
 async def list_for_period(start: date, end: date) -> list[DailySnapshot]:
     """Snapshots with trade_date in [start, end], oldest first."""
     cursor = await _conn().execute(

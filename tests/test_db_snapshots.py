@@ -12,7 +12,12 @@ import pytest
 
 from zarabot.db.connection import DatabaseNotOpenError, connect, disconnect
 from zarabot.db.migrations import apply
-from zarabot.db.snapshots import DailySnapshot, list_for_period, write_daily
+from zarabot.db.snapshots import (
+    DailySnapshot,
+    list_for_period,
+    update_intraday,
+    write_daily,
+)
 
 DAY = date(2026, 3, 16)
 
@@ -86,6 +91,64 @@ async def test_second_write_for_same_date_updates_not_duplicates(db: Path) -> No
     assert empty == []
 
 
+async def test_update_intraday_leaves_the_baseline_and_benchmark_untouched(
+    db: Path,
+) -> None:
+    """The baseline the daily loss limit measures against survives every
+    intraday write, and `benchmark_value` is not a parameter of the update."""
+    await write_daily(
+        _snap(
+            opening_equity=Decimal("100000.00"),
+            closing_equity=None,
+            cash=Decimal("100000.00"),
+            realised_pnl=Decimal("0"),
+            unrealised_pnl=Decimal("0"),
+            open_positions=0,
+            orders_placed=0,
+            benchmark_value=Decimal("1.02"),
+        )
+    )
+
+    await update_intraday(
+        DAY,
+        Decimal("101500.00"),
+        Decimal("99400.00"),
+        Decimal("500.00"),
+        Decimal("1000.00"),
+        3,
+        7,
+    )
+
+    rows = await list_for_period(DAY, DAY)
+    assert len(rows) == 1
+    snap = rows[0]
+    assert snap.closing_equity == Decimal("101500.00")
+    assert snap.cash == Decimal("99400.00")
+    assert snap.realised_pnl == Decimal("500.00")
+    assert snap.unrealised_pnl == Decimal("1000.00")
+    assert snap.open_positions == 3
+    assert snap.orders_placed == 7
+    assert snap.opening_equity == Decimal("100000.00")
+    assert snap.benchmark_value == Decimal("1.02")
+    assert isinstance(snap.closing_equity, Decimal)
+    assert isinstance(snap.cash, Decimal)
+
+
+async def test_update_intraday_for_a_missing_date_creates_nothing(db: Path) -> None:
+    """A mid-session process cannot invent an opening figure through the
+    update path: no row, no write, and no exception either."""
+    await update_intraday(
+        DAY,
+        Decimal("101500.00"),
+        Decimal("99400.00"),
+        Decimal("500.00"),
+        Decimal("1000.00"),
+        3,
+        7,
+    )
+    assert await list_for_period(DAY, DAY) == []
+
+
 async def test_access_without_connect_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -97,6 +160,10 @@ async def test_access_without_connect_raises(
         await write_daily(_snap())
     with pytest.raises(DatabaseNotOpenError):
         await list_for_period(DAY, DAY)
+    with pytest.raises(DatabaseNotOpenError):
+        await update_intraday(
+            DAY, Decimal("1"), Decimal("1"), Decimal("0"), Decimal("0"), 0, 0
+        )
 
 
 async def test_module_never_calls_aiosqlite_connect(
@@ -116,6 +183,9 @@ async def test_module_never_calls_aiosqlite_connect(
 
     monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
     await write_daily(_snap())
+    await update_intraday(
+        DAY, Decimal("1"), Decimal("1"), Decimal("0"), Decimal("0"), 0, 0
+    )
     rows = await list_for_period(DAY, DAY)
     assert len(rows) == 1
     assert calls == []

@@ -109,6 +109,32 @@ its own (rule 31).
 - Returns orders left in `SUBMITTING` or `SUBMITTED`, oldest first.
 - Consumed by `app.startup` before trading begins.
 
+**`async count_for_day(day: date) → int`**
+- How many order rows have a `created_at` whose **Moscow** calendar date is
+  `day`. Moscow dates are derived with `clock.moscow_date`, the same way
+  `db.signals.list_for_period` derives them — timestamps are stored UTC, so the
+  comparison is not a string prefix.
+- **Counts every order the bot recorded, whatever its status and whichever its
+  intent** — `SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED` and
+  `UNKNOWN`, entries and exits alike. `daily_snapshots.orders_placed` is
+  observational and there is no daily cap, so the question it answers is how
+  much the bot **tried** to do. Counting only fills would make a day of
+  rejections read as a quiet day, which is the opposite of the truth.
+- Returns 0 when the date has no rows; never `None`.
+- **Added by v1.87 for `app.loops.trading_cycle` step 4 (#17).** The count
+  cannot live in a process global: a restart mid-session would zero it, and
+  restarts are routine (failure class 15). It cannot live in `app.loops`
+  either, because that module writes no SQL against a table it does not own.
+  This is the amendment scope #17 under-counted — adding a call in one module
+  and the function it needs in another is failure class 1, so both are
+  specified here and both tasks are re-run.
+- **`check_docs.py` correctly reds on this signature until
+  `tasks/07-db-orders.md` is re-run**, the same way it would for the
+  identity-only read `broker.client` records as an open decision. That red is
+  the gate naming the task to run next, not a defect in this amendment: it must
+  be cleared by implementing the function, never by an allowlist entry and never
+  by recording a function in `interfaces.md` that no code provides.
+
 ## Relevant error handling rules
 
 From `technical-spec.md` §8. Handle each exactly as written.
@@ -184,6 +210,16 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   reason captured).
 - A terminal order cannot transition back to a non-terminal state (proves the
   status machine is one-way).
+- `count_for_day` counts `SUBMITTING`, `FILLED`, `REJECTED` and `CANCELLED`
+  rows alike, entries and exits alike, for one Moscow date (proves the count is
+  what the bot *tried* to do — counting only fills would report a day of
+  rejections as a quiet day).
+- An order created just before Moscow midnight is counted on its own Moscow
+  date and not on the neighbouring one, with `created_at` stored in UTC (proves
+  the boundary is `clock.moscow_date`, not a string prefix on the stored
+  timestamp).
+- `count_for_day` for a date with no orders returns `0` (proves the empty answer
+  is a zero, not `None` and not an error).
 
 ## Expected output
 

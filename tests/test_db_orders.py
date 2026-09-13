@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,6 +15,7 @@ from zarabot.db.migrations import apply
 from zarabot.db.orders import (
     DuplicateOrderError,
     OrderStateError,
+    count_for_day,
     get,
     list_missing_commission,
     list_unresolved,
@@ -309,3 +310,64 @@ async def test_module_never_calls_aiosqlite_connect(
     await list_missing_commission(NOW - timedelta(days=1), NOW + timedelta(days=1))
     await record_commission(KEY, Decimal("1.00"))
     assert calls == []
+
+
+# --- count_for_day ---------------------------------------------------------
+
+
+async def test_count_for_day_counts_every_status_and_both_intents(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`orders_placed` is what the bot TRIED to do, not what filled.
+
+    Counting only fills would report a day of rejections as a quiet day, which
+    is the opposite of the truth (spec §4 `db.orders`).
+    """
+    submitting = "aaaaaaaa-0000-4000-8000-000000000001"
+    filled = "aaaaaaaa-0000-4000-8000-000000000002"
+    rejected = "aaaaaaaa-0000-4000-8000-000000000003"
+    cancelled = "aaaaaaaa-0000-4000-8000-000000000004"
+
+    await record_submitting(submitting, "SBER", Side.BUY, 1, "ENTRY")
+    await record_submitting(filled, "SBER", Side.BUY, 2, "ENTRY")
+    await settle(filled, OrderStatus.FILLED, 2, Decimal("100.00"), None, None)
+    await record_submitting(
+        rejected, "GAZP", Side.SELL, 1, "EXIT", ExitTrigger.STOP_LOSS
+    )
+    await settle(rejected, OrderStatus.REJECTED, 0, None, None, "no funds")
+    await record_submitting(
+        cancelled, "GAZP", Side.SELL, 1, "EXIT", ExitTrigger.TAKE_PROFIT
+    )
+    await settle(cancelled, OrderStatus.CANCELLED, 0, None, None, None)
+
+    assert await count_for_day(date(2026, 3, 16)) == 4
+
+
+async def test_count_for_day_uses_the_moscow_date_not_the_stored_utc_prefix(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """21:30 UTC is already the next Moscow day; the stored string still is not."""
+    late_moscow_evening = datetime(2026, 3, 16, 20, 30, tzinfo=UTC)  # 23:30 MSK
+    just_past_moscow_midnight = datetime(2026, 3, 16, 21, 30, tzinfo=UTC)  # 00:30 MSK
+
+    evening_key = "bbbbbbbb-0000-4000-8000-000000000001"
+    past_midnight_key = "bbbbbbbb-0000-4000-8000-000000000002"
+
+    monkeypatch.setattr("zarabot.db.orders.now", lambda: late_moscow_evening)
+    await record_submitting(evening_key, "SBER", Side.BUY, 1, "ENTRY")
+    monkeypatch.setattr("zarabot.db.orders.now", lambda: just_past_moscow_midnight)
+    await record_submitting(past_midnight_key, "SBER", Side.BUY, 1, "ENTRY")
+
+    stored = await get(past_midnight_key)
+    assert stored is not None
+    assert stored.created_at == just_past_moscow_midnight
+    assert stored.created_at.utcoffset() == timedelta(0)
+
+    assert await count_for_day(date(2026, 3, 16)) == 1
+    assert await count_for_day(date(2026, 3, 17)) == 1
+
+
+async def test_count_for_day_with_no_orders_is_zero(db: Path) -> None:
+    counted = await count_for_day(date(2026, 3, 16))
+    assert counted == 0
+    assert isinstance(counted, int)

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 import aiosqlite
 
-from zarabot.clock import now
+from zarabot.clock import moscow_date, now
 from zarabot.db.connection import shared, transaction
 from zarabot.models import ExitTrigger, OrderRecord, OrderStatus, Side
 
@@ -247,6 +247,23 @@ async def list_missing_commission(
     )
     rows = await cursor.fetchall()
     return [_row_to_order(row) for row in rows]
+
+
+async def count_for_day(day: date) -> int:
+    """How many order rows carry a `created_at` whose Moscow date is `day`.
+
+    Every status and both intents are counted: `daily_snapshots.orders_placed`
+    is observational and asks how much the bot *tried* to do, so counting only
+    fills would make a day of rejections read as a quiet day (v1.87, #17).
+
+    The Moscow date is derived with `clock.moscow_date`, exactly as
+    `db.signals.list_for_period` derives it. Timestamps are stored in UTC, so a
+    string prefix on the stored value would put every order placed after 21:00
+    UTC on the wrong day.
+    """
+    cursor = await _conn().execute("SELECT created_at FROM orders")
+    rows = await cursor.fetchall()
+    return sum(1 for row in rows if moscow_date(_dt(row["created_at"])) == day)
 
 
 async def list_unresolved() -> list[OrderRecord]:
