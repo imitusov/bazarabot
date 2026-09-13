@@ -1166,10 +1166,30 @@ SQLite backup API only, never a raw copy of a live file. Failure alerts and
 never raises; trading continues.
 
 **`async run(db_path: Path, backup_dir: Path) → Path`**
-Writes `zarabot-<UTC stamp>.db` into `backup_dir` via `sqlite3.Connection.backup`.
-On success, emits `backup_ok` (INFO) with `path` (file name) and `bytes`. On
-failure, emits `backup_failed` (ERROR) with `error`, alerts, and still returns
-the intended path. Never raises; trading continues.
+Writes `zarabot-<UTC stamp>.db` into `backup_dir` via `sqlite3.Connection.backup`,
+then **verifies** it before it counts as a success (v1.86): a separate read-only
+(`mode=ro`) connection on the destination must return exactly one
+`PRAGMA integrity_check` row equal to `ok`, a non-null `MAX(version)` from
+`schema_version` equal to the source's, and a completing
+`SELECT COUNT(*) FROM positions` (that count is compared against nothing — the
+source is live). On success, emits `backup_ok` (INFO) with `path` (file name) and
+`bytes`. On failure — copy or verification — **deletes the destination**, emits
+`backup_failed` (ERROR) with `error`, alerts, and still returns the intended
+path. `error` is the exception class name for a copy failure and the literal
+`verification` for a verification failure. If the delete itself raises `OSError`
+the file stays, and the record additionally carries `path` (file name) and the
+alert names it. Never raises, on any path; trading continues.
+
+The Telegram alert is latched on the module-level `_backup_alerted`: a failure
+alerts only while it is `False`, and the only reset is a destination written
+**and verified**. The `backup_failed` ERROR record is emitted on every failing
+run, latched or not. Process-local by contract — a restart re-arms it.
+
+Verification proves the file opens; it does not prove row-level completeness,
+logical correctness, durability after tonight, a working restore, or anything
+at all about losing the volume both the database and its backups sit on.
+Where backups live is an open owner decision (spec §4); one volume is binding
+until it is settled.
 
 **`async prune(backup_dir: Path, retention_days: int) → int`**
 Deletes `zarabot-*.db` files whose mtime is strictly older than `retention_days`.
