@@ -16,7 +16,7 @@ import pytest
 
 from zarabot.db.migrations import apply
 from zarabot.ops import backup as backup_module
-from zarabot.ops.backup import prune, run
+from zarabot.ops.backup import _PREFIX, _SUFFIX, prune, run
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
 REQUIRED_ENV = {
@@ -329,7 +329,12 @@ async def test_integrity_check_failure_deletes_destination_and_reports_verificat
     # surviving unreadable destination is the newest thing in `backup_dir` for
     # the whole retention window and a restore would prefer it.
     assert not dest.exists()
-    assert list(backup_dir.glob(f"{dest.name}*")) == []
+    # Nothing restorable is left either. `mode=ro` on a WAL destination does
+    # create `<dest>-shm` and `<dest>-wal` beside it, which this deliberately
+    # does not assert away: the contract specifies `mode=ro` and says nothing
+    # about sidecars, and neither `prune`'s `zarabot-*.db` glob nor a restore
+    # ever looks at them.
+    assert list(backup_dir.glob(f"{_PREFIX}*{_SUFFIX}")) == []
     events = _events(caplog, "backup_failed")
     assert len(events) == 1
     assert events[0].levelno == logging.ERROR
