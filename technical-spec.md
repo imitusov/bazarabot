@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.89
+**Version:** 1.90
 **Date:** 2026-09-13
 **Implements:** `business-brief.md` v1.14
 
@@ -886,6 +886,55 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
   not one alerted and one silent).
 - A lot-count mismatch adopts the broker's count and alerts (proves quantity
   reconciliation).
+- A broker holding of **4** lots against a local row of **2** whose one live stop
+  covers **2** reports `LOTS_ADJUSTED` **and** `STOP_MISSIZED` with
+  `position_lots` 4 and `stop_lots` 2 (v1.90, #233; proves the half-protected
+  state is a reported discrepancy rather than a reconciliation that resolved
+  itself — the row agreed with the broker, `stop_protection` read `EXCHANGE`, and
+  nothing was watching two of the four lots).
+- **Running reconcile a second time against the same unchanged broker — a row
+  already at 4 whose stop still covers 2 — reports `STOP_MISSIZED` again and no
+  `LOTS_ADJUSTED` (v1.90, #233).** This case is the reason the finding is derived
+  from live state rather than from the quantity write: on this pass the counts
+  agree, so an implementation that keyed the remedy to `LOTS_ADJUSTED` reports
+  nothing and the undersized stop stands with no further notice. It is reachable
+  without contrivance — a process death or a step-7 failure between the lot write
+  committing and the remedy running produces exactly this database (proves the
+  remedy cannot be lost by a crash between detection and remedy).
+- A broker holding of **2** against a local row of **4** whose stop covers **4**
+  reports `STOP_MISSIZED` with `position_lots` 2 and `stop_lots` 4 (proves both
+  directions are found: an oversized stop would try to sell shares the account
+  does not hold, which is rule 24's hazard arriving as a quantity).
+- A stop covering exactly the position's lot count reports **no** `STOP_MISSIZED`,
+  for a lot size greater than one (proves the comparison cannot become a
+  per-restart false positive the way the exact price comparison did in v1.55: the
+  count posted through `post_stop_loss` is the count read back from
+  `lots_requested`, whatever unit the broker keeps internally).
+- A stop that is **both** a full increment away in price **and** short by lots
+  reports `STOP_MISPRICED` and no `STOP_MISSIZED` for that position (proves one
+  cancel-and-re-post per fault: both findings take `replace_stop`, which corrects
+  price and size together, and two would unprotect the position twice).
+- A missized stop whose ticker's `get_instrument` fails still reports
+  `STOP_MISSIZED`, and reports no `STOP_MISPRICED` and no `STOP_ADOPTABLE`
+  (proves rule 38 withholds the price-based findings and no others — the size
+  comparison reads no price and is not entitled to the blind path).
+- A **`LOCAL`** position whose stop stands within the increment of its stop price
+  but covers fewer lots reports `STOP_MISSIZED` and **not** `STOP_ADOPTABLE`, and
+  the position's `stop_protection` is still `LOCAL` after reconciliation (proves
+  adoption cannot hand sole protection to a stop that covers part of the holding —
+  the v1.47 defect one field along, where the unverified quantity is the size
+  rather than the price, and adoption would have stopped `lifecycle.exits`
+  watching the position's own stop).
+- The alert for a lot-count **increase** names the previous and new counts and
+  says the added lots are carried at the recorded entry price, so realised P&L for
+  the position will be wrong by their true cost; the alert for a **decrease**
+  carries no such note (proves the cost-basis discrepancy reaches the only party
+  who can explain where the lots came from, and that a shrink is not reported as
+  a broken basis it does not have).
+- `entry_price` is byte-for-byte unchanged after a lot-count increase, and no
+  `get_operations` call is made on that path (proves the recorded price is not
+  re-derived — rule 33 forbids inventing it and the feed cannot say which buys
+  belong to this position).
 - Reconciliation applies each **corrective write** at most once: running it twice
   against an unchanged broker closes, adopts or re-lots nothing the second time
   (proves it does not thrash). Stop-order *findings* are re-reported until the
@@ -1478,6 +1527,37 @@ Additionally, on exits booked from an exchange stop:
   reported and dropped, and every test still passed).
 - A report containing **only** a `STOP_DUPLICATE` still applies it (proves the
   remedy gate does not skip a report that carries no other stop adjustment).
+- **A `STOP_MISSIZED` adjustment for an open position of 4 lots whose live stop
+  covers 2 leaves exactly one live stop, covering 4, and the stop that covered 2
+  cancelled (v1.90, #233).** The assertions are the live stop set and its lot
+  count, never that `replace_stop` was called: an implementation that cancelled
+  and placed nothing, or placed a second stop beside the first, fails on the
+  resulting set rather than on a call record (proves the remedy restores coverage
+  for the true quantity, and that it does not create the double-sell condition
+  while doing it).
+- A report containing **only** a `STOP_MISSIZED` still applies it (proves the
+  remedy gate does not skip a report that carries no other stop adjustment — the
+  gate that dropped `STOP_DUPLICATE` in #35).
+- A report carrying `LOTS_ADJUSTED` **and** `STOP_MISSIZED` for the same position
+  replaces that position's stop exactly **once**, leaving one live stop (proves
+  the two types are not both wired to a remedy: `LOTS_ADJUSTED` owns the row
+  correction and `STOP_MISSIZED` owns the protection, and a second replacement
+  would cancel the stop the first just placed).
+- A report carrying **only** `LOTS_ADJUSTED` raises no "adjustment types this
+  build cannot act on" alert and does not stop startup (proves it is still a
+  recognised type after leaving the self-resolving group — the group it was in is
+  what #233 was, and removing it from every group would turn the loud path into a
+  false alarm on every lot correction).
+- **A `STOP_MISSIZED` whose replacement placement is rejected three times leaves
+  the position open, `stop_protection = LOCAL`, `stop_order_key` null and its lot
+  count at the corrected 4; alerts; emits `stop_protection_degraded`; and
+  `start()` completes and returns an `AppContext` (v1.90, #233).** The case then
+  calls the real `lifecycle.exits.evaluate` on the returned position with a price
+  below its stop and asserts it yields `STOP_LOSS` — a pure call, no stub — so
+  the claim "`LOCAL` is real protection at the corrected size" is asserted rather
+  than described (proves the failed replacement takes rule 23's degrade and not a
+  halt, and that what the bot is now watching is the whole holding rather than
+  the part the cancelled stop covered).
 - An adjustment type the executor does not recognise alerts rather than being
   ignored (proves a report it cannot act on is loud).
 - An `EXIT_UNRESOLVED` adjustment does **not** raise that alert and does not stop
@@ -3490,7 +3570,64 @@ module's own task never carried it (#177). No other module writes
   row or has decided it does not. The rule is deliberately the narrowest one that
   covers crash recovery: every widening of it is a way for a holding the owner
   bought to be treated as the bot's.
-- Lot mismatch → the broker's count is written locally.
+- Lot mismatch → the broker's count is written locally, via
+  `db.positions.update_lots`, and the adjustment is `LOTS_ADJUSTED`.
+
+  **Correcting the count does not restore the protection it disturbs (v1.90,
+  #233).** A standing stop was posted for the lot count the row held when it was
+  placed. Growing the row to the broker's larger count leaves that stop covering
+  part of the holding while `stop_protection` still reads `EXCHANGE`, so
+  `lifecycle.exits` declines to fire `STOP_LOSS` for it and neither side is
+  watching the remainder — the position reads as reconciled and is
+  half-protected. Shrinking the row leaves the opposite: a stop sized to sell
+  more than the account holds, which is rule 24's hazard arriving through a
+  quantity rather than through a missing position.
+
+  This bullet does **not** carry the remedy, and `LOTS_ADJUSTED` does not name
+  one. Stop coverage is judged by the stop-reconciliation pass below, against
+  every open position on every run, and is reported as `STOP_MISSIZED`
+  independently of whether this run changed the count. That separation is
+  deliberate and is the whole correctness argument: a remedy hung off
+  `LOTS_ADJUSTED` fires only on the pass that *discovers* the mismatch, and if
+  the process dies — or `app.startup` step 7 raises on an earlier adjustment —
+  between this write committing and the remedy running, the next run finds
+  broker and database in agreement, emits no `LOTS_ADJUSTED`, and the undersized
+  stop stands forever with nothing looking at it. That is the original defect,
+  reachable again after its own fix. A finding re-derived from live state every
+  pass cannot be lost that way.
+
+  **The entry price is not re-derived, and the discrepancy is recorded instead
+  (v1.90, #233, owner question).** When the count grows, the added lots are
+  carried at the original `entry_price`, which understates or overstates the
+  position's cost basis by whatever those lots actually cost, and `pnl` books
+  realised P&L on that price when the position closes. It is left that way, and
+  `db.positions.update_lots`'s existing prohibition — "never changes entry
+  price, stop or target" — stands unamended. The reason is not that the
+  operations feed is unavailable; it is that **the feed cannot say which buys
+  belong to this position, and that is precisely what is unknown.** The window
+  would have to start before `entry_at` to catch lots bought before the bot
+  opened its row, and a buy inside any such window may be the owner's own — rule
+  32 exists because the bot cannot distinguish "someone bought this by hand"
+  from "local state is wrong", and blending a manual purchase into the bot's
+  cost basis is the same mistake as the adoption path rule 32 removed, which
+  derived a position's levels from a holding's average cost. Re-pricing would
+  also move a live position's stop and target inputs and its unrealised P&L
+  mid-flight, on a number chosen by this module. The measurement gap is real
+  but secondary: V12 (#44) verified the feed's fee attribution and executed
+  state, and `_resolve_sale` remains unmeasured because the account has never
+  sold, so the feed's price path is partly unproven — that would be a reason for
+  caution even if the attribution question were solved, and it is not.
+
+  What is owed instead is that the inaccuracy is on the record rather than
+  silent. Two durable records already carry it and neither needs a new column:
+  `db.positions.update_lots` writes a `position_events` row with
+  `event = 'LOTS_ADJUSTED'` naming the previous and new count, and this module's
+  `reconciliations` row carries `{"from", "to"}` against `ran_at`. **The alert
+  this bullet already sends must say it too**, and only when the count *grows*:
+  a shrink leaves the per-lot cost basis correct for the lots that remain. The
+  alert names the ticker, the previous and new counts, and that the added lots
+  are carried at the recorded entry price so realised P&L for this position will
+  be wrong by their true cost, which only the owner can supply.
 - **Stop orders are reconciled too, but this module does not act on them.**
   Every open position must have exactly one live stop order. This module
   *reports* each discrepancy — a position with no stop, a stop with no position,
@@ -3576,6 +3713,75 @@ module's own task never carried it (#177). No other module writes
   written and where `stop_order_key` and `created_at` are already in hand;
   emitting an undifferentiated list of identifiers forced the caller either to
   re-derive the rule or, as happened, to skip the adjustment entirely (#35).
+- **A live stop whose lot count differs from the position's is reported as
+  `STOP_MISSIZED` (v1.90, #233).** For every open position with a live stop, the
+  retained stop's `lots` is compared against the position's `lots`; unequal in
+  either direction is the finding. It names the position, the ticker, and both
+  counts as `position_lots` and `stop_lots`. The remedy is
+  `execution.orders.replace_stop`, applied by `app.startup` step 7 — this module
+  places and cancels nothing, and this finding changes nothing about that.
+
+  **Judged on every pass, for every open position, whatever caused the
+  difference.** This is not a consequence of `LOTS_ADJUSTED` and is not
+  conditioned on it. A stop can under-cover because this run corrected the count
+  upward, because a previous run corrected it and its remedy never ran, or
+  because the stop was posted for fewer lots than the position holds by some
+  route this module cannot see. All three are the same condition and all three
+  are found by comparing live state, which is the only form of the check that
+  survives a crash between detection and remedy.
+
+  **The comparison is exact, and legitimately so.** Both numbers travel the same
+  round trip: `broker.client.post_stop_loss` sends the bot's own lot count as
+  `quantity`, and `broker.client.list_stop_orders` reads it back from
+  `lots_requested`. Whatever unit the broker keeps internally, the number
+  returned is the number sent, so there is no analogue here of the untested
+  lots-versus-units assumption that the operations-feed `quantity` carries, and
+  no analogue of the tick-snapping that made an exact price comparison wrong
+  (v1.55). Integers that must be equal are compared for equality; no tolerance
+  is invented for a difference that cannot arise from rounding.
+
+  **Independent of the price increment (rule 38).** The size comparison does not
+  read a price, so it is made whether or not `get_instrument` could be read for
+  the ticker, exactly as `STOP_DUPLICATE` and `STOP_ORPHAN` are. Rule 38
+  withholds the two *price-based* findings and no others.
+
+  **A stop that is both mispriced and missized is reported once, as
+  `STOP_MISPRICED`.** Both take the same remedy — `replace_stop` cancels the
+  standing stop and posts one at the position's stored price for the position's
+  lot count, correcting both at once — and reporting both would have step 7
+  cancel and re-post twice for one position, unprotecting it twice for one
+  fault. `STOP_MISSIZED` is therefore reported only where `STOP_MISPRICED` is
+  not.
+
+  **A missized stop is never reported `STOP_ADOPTABLE`.** `STOP_ADOPTABLE` means
+  "this stop stands where the position wants it, bind it", and binding it sets
+  `stop_protection = EXCHANGE`, after which `lifecycle.exits` stops firing
+  `STOP_LOSS` for the position. Adopting a stop that covers part of the holding
+  would hand sole protection to something that protects part of it, which is the
+  v1.47 shape one field along: there the unverified quantity was the price, here
+  it is the size. The size check therefore precedes the adoption branch, and a
+  position whose stop is missized takes the replacement path.
+
+  **`STOP_DUPLICATE` and `STOP_MISSIZED` may both be reported for one position,
+  and that is correct.** The size is judged on the *retained* stop, so the two
+  findings answer different questions — how many stops, and whether the survivor
+  covers the holding — and their remedies compose in either order: cancelling the
+  non-keepers then replacing the keeper, or replacing the keeper then cancelling
+  the non-keepers, both end at exactly one live stop for the position's lot
+  count. Neither ever leaves two live stops behind.
+
+  **Cadence, and why nothing latches (v1.90, #233).** The finding is re-reported
+  on every pass while it stands, and reconciliation runs once per process start —
+  it is `app.startup` step 7 and appears in no `app.loops` task list, the same
+  cadence rule 33 records for `EXIT_UNRESOLVED`. It carries no alert of its own,
+  as none of the stop findings do: it is counted in the ready alert of step 9 and
+  named in the `types` field of the `reconciliation` event. What the owner is
+  told about is the *unremedied* condition — a replacement that fails three times
+  alerts and emits `stop_protection_degraded` under rule 23, on every start until
+  it is fixed. Nothing is latched and nothing needs a reset, because the
+  condition ends by being remedied rather than by being suppressed: once the stop
+  covers the position, the next pass does not report it. An alert that stops
+  because the fault stopped is the shape failure class 14 asks for.
 - Returns a report enumerating every adjustment; an empty report means agreement.
 - **After persist, emit `reconciliation` (INFO) with `adjustments_count` and
   `types` (the distinct adjustment type names) (v1.61).** Empty agreement still
@@ -3599,7 +3805,12 @@ that compares the two:
   broker wins, the local record is corrected, and the report names specifics so
   the owner's alert says which ticker moved from what to what. A quantity
   mismatch is `LOTS_ADJUSTED`; a position the broker does not hold is the
-  operations-feed path above.
+  operations-feed path above. **Rule 7's second half — the protection the
+  corrected quantity leaves wrong — is reported as `STOP_MISSIZED` and remedied
+  by `app.startup` step 7 (v1.90, #233).** The two findings are separate on
+  purpose: `LOTS_ADJUSTED` records a write this module performed and is true of
+  one pass only, while `STOP_MISSIZED` is re-derived from live state on every
+  pass and so cannot be lost if the remedy does not run.
 - **Rule 24** — a stop order with no matching open position is reported
   `STOP_ORPHAN` and alerted. A live stop against a position that no longer exists
   can sell stock the account does not hold, which is why it is remedied rather
@@ -4950,7 +5161,7 @@ Fixed ordering; each step completes before the next begins:
 6. `execution.orders.resolve_unfinished()`.
 7. `broker.reconcile.reconcile()`, then apply its remedies via
    `execution.orders`: re-protect unprotected positions, cancel orphaned stops,
-   replace mispriced ones, and **resolve duplicates — for a `STOP_DUPLICATE`
+   replace mispriced ones, **replace missized ones**, and **resolve duplicates — for a `STOP_DUPLICATE`
    adjustment, cancel every identifier in its `cancel` list and retain `keep`.**
    Reconciliation identifies; the executor acts. Duplicates are cancelled
    through `execution.orders.cancel_orphaned_stop`, which is the only cancel
@@ -4974,10 +5185,39 @@ Fixed ordering; each step completes before the next begins:
    (v1.37).** It is a position the broker no longer holds whose sale could not
    be found in the operations feed, so there is nothing for `execution.orders`
    to do about it — the shares are already gone. It belongs with
-   `CLOSED_EXTERNALLY`, `ADOPTED`, `LOTS_ADJUSTED` and `FOREIGN_HOLDING` in the
-   set of types this step recognises without acting on, precisely so it does not
+   `CLOSED_EXTERNALLY` and `ADOPTED` in the set of types this step recognises
+   without acting on, precisely so it does not
    trip the "adjustment types this build cannot act on" alert, which is reserved
    for a report the executor genuinely does not understand.
+
+   **`LOTS_ADJUSTED` left that set in v1.90 (#233), and `FOREIGN_HOLDING` was
+   never in it in the sense the set's own description claims.** The set was
+   described as "types reconciliation resolves itself, they need no remedy",
+   which is true of `CLOSED_EXTERNALLY` and `ADOPTED` — the reconciliation *is*
+   the fix — and was never true of `LOTS_ADJUSTED`: the row was corrected and
+   the protection was not, which is the whole of #233. `FOREIGN_HOLDING` is
+   acted on, by 7b's refusal. This step therefore recognises **three** groups,
+   and the distinction is what stops the next reader re-deriving the wrong
+   conclusion from the membership:
+
+   - **Remedied here, through `execution.orders`** — `STOP_MISSING`,
+     `STOP_MISPRICED`, `STOP_MISSIZED`, `STOP_ADOPTABLE`, `STOP_ORPHAN`,
+     `STOP_DUPLICATE`.
+   - **Acted on here, not through `execution.orders`** — `FOREIGN_HOLDING`,
+     which 7b turns into a refusal to start.
+   - **Recognised and correctly acted on by nobody** — `CLOSED_EXTERNALLY`,
+     `ADOPTED`, `EXIT_UNRESOLVED`, and `LOTS_ADJUSTED`. The first two are
+     complete when reconciliation writes them. `EXIT_UNRESOLVED` describes
+     shares that are already gone. `LOTS_ADJUSTED` is here for a different
+     reason and the reason must be written down: its row correction is
+     complete, and the protection it disturbs is **not** its own remedy to
+     carry — the same report carries `STOP_MISSIZED` for that position when the
+     standing stop no longer covers it, derived from live state rather than
+     from this adjustment. `LOTS_ADJUSTED` needs no branch because another type
+     owns the consequence, not because there is no consequence.
+
+   All three groups are "known" for the purposes of the unrecognised-type alert.
+   An adjustment type in none of them must alert.
 
    Its consequence is named here rather than left to be discovered: the position
    stays open, so if it was `EXCHANGE` the same report will carry `STOP_MISSING`
@@ -4996,6 +5236,71 @@ Fixed ordering; each step completes before the next begins:
    never traded: no stop is placed, no exit is evaluated, no sale is made.
    Refusing is the correct failure direction. The alternative failure is selling
    something the owner chose to hold, at a price they did not choose.
+
+7c. **`STOP_MISSIZED` → `execution.orders.replace_stop(position, instrument)`
+   (v1.90, #233, owner decision).** The branch is the one `STOP_MISPRICED`
+   already takes and takes the same call: read the position from the refreshed
+   open map, read the instrument, call `replace_stop`. `replace_stop` cancels the
+   standing stop, demotes the position to `LOCAL` and clears `stop_order_key`,
+   re-reads the position, and posts one stop for the position's current lot
+   count. That is the owner's decision — replace the stop for the new size —
+   expressed as a call that already exists rather than as a new primitive, and
+   it satisfies both ownership rules by construction: exactly one stop is live
+   at any moment, and the bot's own protection is armed for the interval in
+   which the exchange's is not.
+
+   **Cancel-then-place is the only shape available, and the order is binding.**
+   Posting the correctly-sized stop first would put two live stops on one
+   position, which is `STOP_DUPLICATE` — the double-sell condition — created
+   deliberately. Leaving the undersized stop standing and demoting the position
+   to `LOCAL` would put both owners on one position, which the rulebook forbids
+   outright and for the same reason. There is no third arrangement.
+
+   **The cancel succeeds and the placement fails → rule 23, unchanged. No new
+   rule, no halt, no retry beyond the three rule 23 already specifies (v1.90,
+   #233, settled).** `replace_stop` reaches `_place_stop`, which retries three
+   times, alerts, emits `stop_protection_degraded` (ERROR), and leaves the
+   position open and `LOCAL`. `LOCAL` is not "no stop": it is the ownership under
+   which `lifecycle.exits` returns `STOP_LOSS` and
+   `execution.orders.close_position` sells, and it sells `position.lots` — the
+   count reconciliation has just made agree with the broker.
+
+   **That outcome is better than the state the remedy found, not worse, and the
+   comparison is the reason this needs no rule of its own.** Before: the row and
+   the broker agree at the larger count, the exchange stop covers part of it,
+   `stop_protection` reads `EXCHANGE`, and `lifecycle.exits` fires nothing —
+   part of the holding is covered and *nothing is watching the rest*, with no
+   alert standing. After a failed replacement: no exchange stop, protection
+   `LOCAL`, the bot watching the whole holding at the corrected size, an alert
+   sent and `stop_protection_degraded` on the record. The ordering is what makes
+   this true and it is binding: the lot count is corrected by reconciliation in
+   step 7's own call, before any remedy runs, so both the placement and the
+   fallback act on the true size.
+
+   The degrade is not free and is not claimed to be. The bot's poller runs on the
+   trading loop's cadence and during market hours, where a resting exchange stop
+   does not; what is traded away is a partial, unwatched exchange stop for full
+   coverage that is slower and stops when the process does. Rule 23 already makes
+   that trade for every position whose stop cannot be placed, and rule 23's own
+   sentence settles the direction: "Never unwind a sound position because a
+   secondary order failed." Halting is the wrong remedy here for a further
+   reason — halting stops entries, and this position needs the trading loop
+   *running* for `lifecycle.exits` to protect it, which is the argument step 8a
+   already makes about refusing to start while holding open positions.
+
+   **Rule 38's trade comes out the other way here, and that is deliberate.**
+   Rule 38 withholds `STOP_MISPRICED` when the increment cannot be read, because
+   spending an unprotected gap on a difference the bot cannot measure is a worse
+   trade than leaving a possibly-stale stop standing. A missized stop is measured
+   exactly — two integers from one round trip — so the difference is certain, and
+   the coverage that a standing undersized stop provides is certainly partial.
+   Rule 38 is about an unmeasurable discrepancy and does not reach a measured
+   one.
+
+   **An adjustment whose position is absent from the refreshed open map is
+   skipped**, as `STOP_MISPRICED` and `STOP_MISSING` already are: the position
+   closed between reconciliation and the remedy, and there is nothing to
+   protect.
 8. Restore halt state.
 
 8a. **Report a position budget that cannot buy one lot.** For each ticker in
@@ -6215,9 +6520,10 @@ nothing else has to be kept consistent with it.
 | `ran_at` | TEXT NOT NULL | |
 | `adjustments` | TEXT NOT NULL | JSON array. Empty array means agreement |
 
-**Content structure** of `adjustments` — one object per adjustment. **These ten
-types are all of them (v1.77).** Until v1.77 this list held four, and the six it
-omitted are exactly the ones §4 defines under `broker.reconcile`; `reporter` and
+**Content structure** of `adjustments` — one object per adjustment. **These
+eleven types are all of them (v1.90).** Until v1.77 this list held four, and the
+six it omitted are exactly the ones §4 defines under `broker.reconcile`;
+`STOP_MISSIZED` is the eleventh and was added by v1.90 (#233). `reporter` and
 `app.startup` branch on `type`, and "an adjustment with no branch is silently
 dropped" is what already happened to `STOP_DUPLICATE` (#35, #101). Every value
 that is money or a price is a **decimal string**, never a number; `position_id`
@@ -6233,6 +6539,7 @@ it is known and our own key otherwise.
 - stop missing:      {"type": "STOP_MISSING", "ticker": "...", "position_id": 12}
 - stop orphaned:     {"type": "STOP_ORPHAN", "ticker": "...", "stop_order_id": "..." | null, "key": "..."}
 - stop mispriced:    {"type": "STOP_MISPRICED", "ticker": "...", "position_id": 12, "expected": "123.45", "actual": "123.40"}
+- stop missized:     {"type": "STOP_MISSIZED", "ticker": "...", "position_id": 12, "position_lots": 4, "stop_lots": 2}
 - stop adoptable:    {"type": "STOP_ADOPTABLE", "ticker": "...", "position_id": 12, "stop_order_id": "..." | null}
 - duplicate stops:   {"type": "STOP_DUPLICATE", "ticker": "...", "position_id": 12, "keep": "...", "cancel": ["...", "..."]}
 ```
@@ -6247,6 +6554,14 @@ it is known and our own key otherwise.
   position matches it. It carries both identifiers, because `stop_order_id` is
   null for a stop that never reached the broker and `key` is then the only name
   it has. `STOP_ADOPTABLE`'s `stop_order_id` is null on the same terms.
+- `STOP_MISSIZED` names two **integer** lot counts and no price, because its
+  condition is a quantity and its remedy does not read one (v1.90, #233).
+  `position_lots` is what the position holds after reconciliation corrected it;
+  `stop_lots` is what the retained live stop covers. They are named rather than
+  called `expected`/`actual` so no reader confuses them with `STOP_MISPRICED`'s
+  decimal-string prices. A position is never reported both `STOP_MISPRICED` and
+  `STOP_MISSIZED`: both take `replace_stop`, which corrects price and size in one
+  call, and two findings would have step 7 cancel and re-post twice.
 - `STOP_DUPLICATE` is the only type carrying a list. `keep` is the single
   identifier to retain — the one matching the position's `stop_order_key`, or
   the oldest by `created_at` — and `cancel` holds every other identifier for that
@@ -6511,6 +6826,31 @@ something else.
    submitted, rule 32 about inventory the bot has no record of asking for.
 7. **Broker and database disagree on positions or quantities** → the broker wins,
    the local record is corrected, and the owner is alerted with specifics.
+
+   **Correcting a quantity is not the whole correction (v1.90, #233).** A
+   standing stop was sized to the count the record held. Once the count moves,
+   that stop covers the wrong quantity, and while `stop_protection` reads
+   `EXCHANGE` the bot declines to fire `STOP_LOSS` — so a position can agree with
+   the broker, read as reconciled, and be protected on part of itself with
+   nothing watching the rest. The correction is complete only when the stop
+   covers the corrected count. `broker.reconcile` reports the coverage
+   discrepancy as `STOP_MISSIZED`, re-derived from live state on **every** pass
+   rather than as a consequence of the quantity write, and `app.startup` step 7c
+   remedies it through `execution.orders.replace_stop`. If that replacement
+   cannot be placed, rule 23 applies unchanged and nothing here overrides it: the
+   position degrades to `LOCAL` at the corrected count, which is more coverage
+   than the undersized stop it replaced, not less.
+
+   **The recorded entry price is not re-derived when a quantity grows, and the
+   discrepancy is recorded instead.** The added lots are carried at the original
+   `entry_price`, so realised P&L for that position is wrong by their true cost.
+   Rule 33 forbids inventing the number, and the operations feed cannot supply it
+   either: the feed cannot say which buys belong to this position, which is
+   exactly what is unknown, and rule 32 exists because the bot cannot tell a
+   manual purchase from wrong local state. The `position_events`
+   `LOTS_ADJUSTED` row and the `reconciliations` row are the durable record, and
+   the alert this rule already requires says so in the growth direction. A shrink
+   needs no such note: the per-lot cost basis of the remaining lots is unchanged.
 8. **Instrument metadata unavailable mid-session** → skip that ticker for the
    cycle, WARNING. `app.loops` owns this: step 6 reads the instrument before the
    gate, and an `InstrumentNotFound` logs and moves to the next ticker, so no
