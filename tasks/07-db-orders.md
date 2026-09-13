@@ -121,7 +121,7 @@ its own (rule 31).
   much the bot **tried** to do. Counting only fills would make a day of
   rejections read as a quiet day, which is the opposite of the truth.
 - Returns 0 when the date has no rows; never `None`.
-- **Added by v1.86 for `app.loops.trading_cycle` step 4 (#17).** The count
+- **Added by v1.87 for `app.loops.trading_cycle` step 4 (#17).** The count
   cannot live in a process global: a restart mid-session would zero it, and
   restarts are routine (failure class 15). It cannot live in `app.loops`
   either, because that module writes no SQL against a table it does not own.

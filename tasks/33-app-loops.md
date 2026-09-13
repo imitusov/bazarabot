@@ -92,7 +92,7 @@ Module **33** of 42 in `dependency-order.md`. Everything before it is complete a
    evaluation; here it costs the measurement that bounds the whole day.
 
    **Update the day's snapshot at the end of this step, on every in-session
-   cycle (v1.86).** After the loss has been measured and the limit check has
+   cycle (v1.87).** After the loss has been measured and the limit check has
    run — a halting cycle updates too, because the mark at which the limit
    tripped is exactly the one an investigation wants — the cycle calls
    `db.snapshots.update_intraday(today, closing_equity, cash, realised_pnl,
@@ -113,7 +113,7 @@ Module **33** of 42 in `dependency-order.md`. Everything before it is complete a
    - `orders_placed` — `db.orders.count_for_day(today)`.
 
    **Every figure but the last is already in hand and was discarded until
-   v1.86.** `pnl.bot_equity()` is evaluated inside `pnl.daily_loss_pct` and
+   v1.87.** `pnl.bot_equity()` is evaluated inside `pnl.daily_loss_pct` and
    thrown away; the open-position count is already this step's argument; every
    open position's price was read at step 2. So this step adds **no broker
    call** and **no new column**: the one new read is a local `SELECT` for the
