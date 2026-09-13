@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -1386,3 +1389,283 @@ async def test_start_leaves_report_answering_rather_than_unavailable(
     # NOW is Monday 2026-03-16 in Moscow, so the week runs to Sunday the 22nd.
     assert text.startswith("Weekly report 2026-03-16 to 2026-03-22")
     assert "Win rate:" in text
+
+
+# --- step 2b/2c: the single-instance lock (spec v1.89, #22) ------------------
+#
+# Every case below takes the real kernel lock and calls the real `start()`.
+# `flock` locks belong to the open file description, so a second acquisition
+# inside this one process contends exactly as a second process would: no
+# subprocess, no `sleep`, no timing window. That is why the contract chose
+# `flock` over `fcntl.lockf`, whose locks belong to the process and would be
+# granted twice here — a guard that cannot be made to fire reads as protection
+# while being none.
+
+_MARKER_AGE_OUT = timedelta(hours=24)
+
+
+def _instance_paths() -> tuple[Path, Path, Path]:
+    """The database and the two artefacts §10 says sit beside it."""
+    db_path = Path(os.environ["DB_PATH"])
+    return (
+        db_path,
+        Path(str(db_path) + ".instance-lock"),
+        Path(str(db_path) + ".instance-lock.refused"),
+    )
+
+
+@contextmanager
+def _lock_held_by_another_instance(lock_path: Path) -> Iterator[int]:
+    """Hold the real lock the way a first instance holds it."""
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield fd
+    finally:
+        with suppress(OSError):
+            os.close(fd)
+
+
+def _alerts_in(calls: list[str]) -> list[str]:
+    return [item for item in calls if item.startswith("alert:")]
+
+
+def _events_in(caplog: pytest.LogCaptureFixture, name: str) -> list[logging.LogRecord]:
+    return [
+        record for record in caplog.records if getattr(record, "event", None) == name
+    ]
+
+
+async def test_start_refuses_while_the_instance_lock_is_held(
+    env: list[str],
+) -> None:
+    """A second bot against one DB_PATH refuses: no database, no order.
+
+    The `asyncio.Lock`s in `execution.orders` serialise coroutines in one event
+    loop and cannot see another process at all, so without step 2b both
+    instances pass `_already_open`, both `record_submitting` with different
+    UUIDs and both `post_market_order`: two real market buys. The precondition
+    here is a kernel lock this test holds, so nothing about it can be satisfied
+    by wiring, and the assertions are on `start()`'s outcome and on the
+    database never having been opened.
+    """
+    from zarabot.app.startup import StartupError, start
+    from zarabot.db.connection import DatabaseNotOpenError
+
+    db_path, lock_path, _ = _instance_paths()
+    with (
+        _lock_held_by_another_instance(lock_path),
+        pytest.raises(StartupError) as excinfo,
+    ):
+        await start()
+    assert str(lock_path) in str(excinfo.value)
+    # Step 3 never ran: `connect` creates the file, and it is not there.
+    assert not db_path.exists()
+    with pytest.raises(DatabaseNotOpenError):
+        shared()
+    # Nothing past step 2b ran either, so no order could have been placed.
+    assert "refresh" not in env
+    assert "resolve" not in env
+    assert "reconcile" not in env
+
+
+async def test_closing_the_descriptor_lets_the_next_start_proceed(
+    env: list[str],
+) -> None:
+    """A crashed instance leaves no lock behind.
+
+    Closing the descriptor is what the kernel does when a process ends by any
+    means — `SIGKILL`, an OOM kill, `docker kill`, power loss — so this is the
+    crash-release path, not a convenience. Refusing to start is strictly worse
+    than the duplicate it prevents when there is nothing left to duplicate.
+    """
+    from zarabot.app.startup import StartupError, start
+
+    db_path, lock_path, _ = _instance_paths()
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with pytest.raises(StartupError):
+        await start()
+    os.close(fd)
+    ctx = await start()
+    assert ctx.config.trading_mode == "live"
+    assert db_path.exists()
+
+
+async def test_first_refusal_alerts_writes_the_marker_and_emits_startup_failed(
+    env: list[str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The owner is told the first time, and so is a reader without Telegram."""
+    from zarabot.app.startup import StartupError, start
+
+    # `configure` strips every root handler, caplog's included.
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+    _, lock_path, marker = _instance_paths()
+    assert not marker.exists()
+    with (
+        _lock_held_by_another_instance(lock_path),
+        caplog.at_level(logging.WARNING, logger="zarabot.app.startup"),
+        pytest.raises(StartupError),
+    ):
+        await start()
+    assert len(_alerts_in(env)) == 1
+    assert str(lock_path) in _alerts_in(env)[0]
+    assert datetime.fromisoformat(marker.read_text().strip()) == NOW
+    events = _events_in(caplog, "startup_failed")
+    assert len(events) == 1
+    assert events[0].levelno == logging.CRITICAL
+    assert events[0].stage == "instance"
+    assert events[0].reason == "INSTANCE_LOCKED"
+    assert not _events_in(caplog, "startup_ok")
+    # Rule 19: the refusal names a path, never a credential.
+    assert REQUIRED_ENV["TINVEST_TOKEN"] not in caplog.text
+    assert REQUIRED_ENV["TINVEST_TOKEN"] not in "".join(env)
+
+
+async def test_repeat_refusal_is_quiet_and_leaves_the_marker_unchanged(
+    env: list[str], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The second refusal must not rewrite the marker.
+
+    The unchanged instant is the point of this case, not a detail of it. The
+    ageing window is measured from the *first* refusal of a condition;
+    refreshing it on every retry would push it forward every 30 seconds under
+    exactly the `restart: unless-stopped` loop the rule exists for, making the
+    age-out unreachable and turning "alert once per condition" into "alert
+    once, ever". The clock advances between the two refusals, so an
+    implementation that rewrote the marker would write different bytes and
+    fail here — while a case that only counted alerts would pass it.
+    """
+    from zarabot.app.startup import StartupError, start
+
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
+    moment = [NOW]
+    monkeypatch.setattr("zarabot.app.startup.now", lambda: moment[0])
+    _, lock_path, marker = _instance_paths()
+    with (
+        _lock_held_by_another_instance(lock_path),
+        caplog.at_level(logging.WARNING, logger="zarabot.app.startup"),
+    ):
+        with pytest.raises(StartupError):
+            await start()
+        first = marker.read_bytes()
+        # The container is restarted 30 seconds later, and again after that.
+        moment[0] = NOW + timedelta(minutes=5)
+        with pytest.raises(StartupError):
+            await start()
+        second = marker.read_bytes()
+    assert second == first
+    assert datetime.fromisoformat(first.decode().strip()) == NOW
+    # One alert for the condition, two failures for the health gate.
+    assert len(_alerts_in(env)) == 1
+    assert len(_events_in(caplog, "startup_failed")) == 2
+    assert not _events_in(caplog, "startup_ok")
+    # The suppression is visible to an operator reading the log, and names the
+    # instant the window is measured from.
+    suppressed = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and NOW.isoformat() in record.getMessage()
+    ]
+    assert suppressed
+
+
+async def test_refusal_with_an_aged_out_marker_alerts_again_and_rewrites_it(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file latch ages out at 24 hours, which is the bound on the risk.
+
+    Reset (1) — a successful acquisition — does not fire while the holder keeps
+    running, so without this a genuine second incident weeks later would be
+    silent forever. The clock is fixed by the test: no `sleep`, no wall clock.
+    """
+    from zarabot.app.startup import StartupError, start
+
+    _, lock_path, marker = _instance_paths()
+    stale = NOW - _MARKER_AGE_OUT - timedelta(minutes=1)
+    marker.write_text(stale.isoformat(), encoding="utf-8")
+    with (
+        _lock_held_by_another_instance(lock_path),
+        pytest.raises(StartupError),
+    ):
+        await start()
+    assert len(_alerts_in(env)) == 1
+    assert datetime.fromisoformat(marker.read_text().strip()) == NOW
+
+
+async def test_successful_start_deletes_the_refusal_marker(
+    env: list[str],
+) -> None:
+    """The primary reset: holding the lock proves there is only one instance.
+
+    Every normal recovery passes through this path — the operator kills the
+    stray process, the container is replaced, the host reboots — so the latch
+    is cleared by the very event that ends the condition.
+    """
+    from zarabot.app.startup import start
+
+    _, _lock, marker = _instance_paths()
+    marker.write_text((NOW - timedelta(minutes=1)).isoformat(), encoding="utf-8")
+    await start()
+    assert not marker.exists()
+
+
+# The three cases below have no §3.2 bullet of their own. They pin sentences of
+# step 2c that would otherwise be satisfied vacuously — "unreadable and
+# malformed fail *loud*: a corrupt marker must never be able to silence the
+# channel, and a clock that moved backwards must not either", and "the marker
+# cannot be written … alert anyway". A marker that could silence the channel by
+# being corrupt is the one failure mode of an anti-spam device.
+
+
+async def test_a_malformed_marker_is_treated_as_absent_and_alerts(
+    env: list[str],
+) -> None:
+    from zarabot.app.startup import StartupError, start
+
+    _, lock_path, marker = _instance_paths()
+    marker.write_text("this is not an instant", encoding="utf-8")
+    with (
+        _lock_held_by_another_instance(lock_path),
+        pytest.raises(StartupError),
+    ):
+        await start()
+    assert len(_alerts_in(env)) == 1
+    assert datetime.fromisoformat(marker.read_text().strip()) == NOW
+
+
+async def test_a_marker_dated_in_the_future_is_treated_as_absent_and_alerts(
+    env: list[str],
+) -> None:
+    """A clock that moved backwards must not silence the channel either."""
+    from zarabot.app.startup import StartupError, start
+
+    _, lock_path, marker = _instance_paths()
+    marker.write_text((NOW + timedelta(hours=1)).isoformat(), encoding="utf-8")
+    with (
+        _lock_held_by_another_instance(lock_path),
+        pytest.raises(StartupError),
+    ):
+        await start()
+    assert len(_alerts_in(env)) == 1
+    assert datetime.fromisoformat(marker.read_text().strip()) == NOW
+
+
+async def test_an_unwritable_marker_still_alerts_and_still_refuses(
+    env: list[str],
+) -> None:
+    """The marker is an anti-spam device, never a precondition for the refusal."""
+    from zarabot.app.startup import StartupError, start
+
+    _, lock_path, marker = _instance_paths()
+    # A directory at the marker's path: every read and write of it raises
+    # `IsADirectoryError`, which is what a permission failure or a full disk
+    # looks like from here.
+    marker.mkdir()
+    with (
+        _lock_held_by_another_instance(lock_path),
+        pytest.raises(StartupError),
+    ):
+        await start()
+    assert len(_alerts_in(env)) == 1
+    assert marker.is_dir()
