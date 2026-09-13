@@ -2,7 +2,7 @@
 
 ## Product context
 
-The ONLY module that talks to the broker. Wraps t_tech.invest.AsyncClient and returns domain types. Run the verification suite before building this.
+The ONLY module that talks to the broker. Wraps t_tech.invest.AsyncClient and returns domain types, and from spec v1.85 it is also the sole writer and sole reader of the instruments cache. Run the verification suite before building this.
 
 ## Build order position
 
@@ -11,6 +11,43 @@ Module **21** of 42 in `dependency-order.md`. Everything before it is complete a
 ## Already-implemented interfaces
 
 **Read `interfaces.md` now.** It lists the exact, tested signatures of every completed module. Call those; never guess a signature and never reimplement something recorded there.
+
+## Database tables used
+
+### `instruments`
+
+Owner: `broker.client` — **sole writer and sole reader (v1.85)**. The v1.77 open
+decision is settled: the cache is built (#46, #102). §4's `broker.client` contract
+carries the freshness window, the field split, the miss policy and the rule-12
+write; no other module writes this table and no other module reads it.
+
+**No migration is required.** `001_initial.sql` creates the table with exactly the
+seven columns below and nothing else, and this contract needs no eighth: the
+window is measured on `refreshed_at`, which the table already has and which
+`Instrument` has carried, unread, since the first version (failure class 13).
+
+| Column | Type | Notes |
+|---|---|---|
+| `figi` | TEXT | Primary key |
+| `ticker` | TEXT NOT NULL | Unique. The lookup key — `get_instrument` takes a ticker |
+| `lot` | INTEGER NOT NULL | Served while the row is fresh |
+| `min_price_increment` | TEXT NOT NULL | Served while the row is fresh. Decimal string |
+| `currency` | TEXT NOT NULL | CHECK = `RUB`. Served while the row is fresh |
+| `trading_status` | TEXT NOT NULL | **Recorded, never served** |
+| `refreshed_at` | TEXT NOT NULL | When the four columns above it were read. Defines staleness |
+
+**`trading_status` is recorded and never served.** Every write stores the status
+the broker reported at that instant, because the column is `NOT NULL` and because
+the row is then a truthful record of one read an operator can query. No code path
+returns it to a caller: §4 requires a live status on every `get_instrument` call,
+whatever the row's age, because `risk.gate` rejects `INSTRUMENT_NOT_TRADING` on
+that field and a stored value would let the bot size an entry into a halt. Reading
+this column into a trading decision is a defect, not an optimisation.
+
+**A row is never deleted and never invalidated by hand.** Staleness is a
+comparison against `refreshed_at`, so the correction for a wrong lot size is the
+next read past the window, which rewrites the row. Nothing else writes it, so
+nothing else has to be kept consistent with it.
 
 ## Module contract
 
@@ -21,33 +58,228 @@ returns domain types, never SDK types. The SDK's own services — `OrdersService
 `MarketDataService`, `InstrumentsService`, `OperationsService`, `SandboxService`
 — are reachable only from inside this module.
 
-**Owner of the `instruments` table — specified, unimplemented (v1.77).** §5
-specifies `instruments`, `migrations/001_initial.sql` creates it, and rule 12
-and `db.connection`'s `critical=False` list both name "the instruments cache" as
-a writer. That writer does not exist: no file under `zarabot/` reads or writes
-the table, and this module holds instrument metadata in process memory only, for
-the lifetime of the process. The obligation is recorded here because this module
-is the only one that fetches instrument metadata at all — `share_by` and
-`get_instrument` are its calls, so a durable cache could have no other owner —
-and a table specified in §5 with no named module reaches no task at all (#102).
+**Sole owner of the `instruments` table (v1.85).** This module is the only writer
+and the only reader of that table. The owner settled the v1.77 decision on
+2026-09-12: the cache is built, not dropped (#46). Two claims v1.77 made are
+withdrawn as wrong rather than superseded — "nothing may be built from this
+paragraph", which no longer holds, and "this module holds instrument metadata in
+process memory only", which was never true: `get_instrument` issues one
+`share_by` per call and memoises nothing, so what v1.77 described as a harmless
+memory cache was an uncached read on the hot path (#46, #102).
 
-**Nothing may be built from this paragraph.** It states an owner so the
-obligation has an address, not a contract to implement. Nothing in the bot reads
-the table today, so writing it would change no behaviour, and the memory cache
-is not a defect: the metadata this module needs is re-read cheaply on each
-process start and rule 8 already covers metadata that is unavailable
-mid-session.
+**Why the owner is this module and not a `db.instruments` repository.** The cache
+is one decision, not two. "Serve the row while it is fresh, otherwise fetch it
+and store it" cannot be split, because the fetch is a broker call and this is the
+only module permitted to make one; a repository could hold the SQL, but the
+freshness window, the field rule below and the miss policy would still have to
+live here, and a contract whose halves sit under two `###` headings is a contract
+`make_tasks.py` hands to two agents in halves (failure class 2). Keeping it here
+also means **no caller changes**: `market.data`, `pnl.benchmark_return`,
+`app.startup` step 8a, `app.loops` step 6 and `broker.reconcile` all keep the
+`get_instrument` call they make today, so the amendment's blast radius is one
+module rather than six (failure class 1). The precedent is settled: `state.halt`
+owns `halt_state` and `broker.reconcile` owns `reconciliations` — a
+single-purpose table owned by the module it is about, which `instruments` is.
 
-**Open decision — not settled here.** Either (a) `instruments` is dead schema:
-drop the table in a forward migration and strike "instruments cache" from rule
-12 and from `db.connection`'s rule-12 caller list, leaving this module's memory
-cache as the whole design; or (b) the durable cache is genuinely wanted — to
-survive a broker outage at startup, which is the only thing it would buy — in
-which case this module gains the write, on `db.connection.transaction(critical=False)`
-per rule 12, and §5 gains its refresh cadence and its staleness rule. The
-project has never chosen, and the two references to a writer that does not exist
-are the residue of assuming (b). Until the owner chooses, the table stays,
-unwritten, and this paragraph is why. Neither branch is in scope for any task.
+**What that costs, stated rather than waved away.** This module has never touched
+the database, and from this version it owes every rule a repository owes:
+
+- It must never call `aiosqlite.connect` and must never close the connection it
+  uses. Every statement runs on `db.connection.shared()`.
+- It must never issue `BEGIN`, `commit` or `rollback`. Every write runs inside
+  `db.connection.transaction(critical=False)` (rule 12, rule 31).
+- It writes no table but `instruments`, and no other module writes that one. A
+  caller wanting instrument metadata calls `get_instrument`; there is nothing
+  else to call.
+- Its tests now need the temporary-database fixture `db.connection` owns in
+  `tests/conftest.py`, and its 86% per-file coverage floor applies to the new
+  branches like any other — it is a ratchet, so the cache may not be the reason
+  it drops.
+
+**Two classes of field, and the split is the whole design (v1.85).**
+
+- **Cacheable: `figi`, `ticker`, `lot`, `min_price_increment`, `currency`.** These
+  change on a corporate action — a lot-size change, a step change, a ticker
+  reassignment — which the exchange announces days ahead. They are not static and
+  are not cached forever: §2.1 records lot sizes SBER 1, **GAZP 10**, LKOH 1,
+  MGNT 1 and price steps SBER/GAZP 0.01, **LKOH/MGNT 0.50**, and a wrong lot is a
+  wrong position size while a wrong step is a stop the exchange refuses. Both are
+  wrong answers, not slow ones, which is why they carry a window.
+- **Never cacheable: `trading_status`.** It changes intraday — a volatility halt
+  moves an instrument into a break or a discrete auction inside one cycle — and
+  `risk.gate` rejects `INSTRUMENT_NOT_TRADING` on it. A stored `NORMAL_TRADING`
+  is the bot sizing and submitting an entry into a halt. **The positive action:
+  every call to `get_instrument` obtains the trading status from the broker,
+  whatever the age of the stored row**, so a halted instrument is rejected by
+  `risk.gate` on the cycle it halts and not on the cycle a window happens to
+  expire.
+
+**Fresh means `clock.now() - refreshed_at <= 24 hours`. Anything else is stale,
+and an absent row is stale.** That is the bound. It is a module constant here and
+not a `config` value: it is not an operator-tunable risk parameter, and the
+number is chosen against the thing that invalidates the row — a corporate action
+carries days of notice, so one day is inside it, while a shorter window would buy
+nothing and a longer one would let a lot-size change survive a night. A watchlist
+ticker is read many times a session, so the window is crossed once a day per
+ticker and never in the middle of a session.
+
+**What a stale row can cost, traced rather than asserted.** The window is only
+defensible if the worst a day-old row can do is named:
+
+- **A changed `lot`** is picked up up to one day late, and cannot become
+  over-exposure: `execution.orders.open_position` reads
+  `broker.client.get_max_lots(figi)` live before every submission and clamps
+  `lots` down to it, and the broker computes that ceiling from the true lot size
+  and the account's real cash. A stale lot that is too small under-sizes a
+  position for at most a day; a stale lot that is too large is clamped by a live
+  read on the money path. That control already exists and is not being added here
+  — it is the reason one day is an acceptable bound rather than a hopeful one.
+- **A changed `min_price_increment`** is picked up up to one day late, so
+  `post_stop_loss` can post an off-step price once and be refused. That is rule
+  23's degrade: the position settles `LOCAL`, the owner is alerted, and
+  `lifecycle.exits` evaluates the stop from quotes until the next read past the
+  window corrects the row. Noisy, visible, and never an unprotected position.
+- **A reassigned `ticker`, so a stale `figi`.** Where the row's figi no longer
+  resolves, the status read raises `InstrumentNotFound` — the same exception
+  `share_by` would raise for the ticker — and rule 8's mid-session skip handles it
+  unchanged. Where it still resolves, because it now names the *former* security,
+  nothing in this design detects it for up to one day: the row is keyed by ticker
+  and the returned `Instrument.ticker` is the row's. **That is a new exposure and
+  it is stated rather than buried.** It is bounded at the window; MOEX announces a
+  reassignment ahead of it; and the lever if one is announced is to shorten the
+  constant and deploy, which is why the number is a constant an operator can see
+  rather than a value derived at runtime. Detecting it properly would mean reading
+  the broker to find out whether the row is right, which is the call the cache
+  exists to avoid.
+
+The first two are corrected by the next read past the window, which is what the
+window is for. None of the three is corrected by hand: no code path deletes or
+edits a row, so there is no repair procedure to get wrong.
+
+**What one call costs, in each branch. Exactly one broker request, never two.**
+
+- **Stale or absent row** → `share_by`, as today. Its response carries every
+  field including the status, so no second request is made. The row is written
+  through before the `Instrument` is returned.
+- **Fresh row** → no `share_by`. The five cacheable fields come from the row and
+  the status comes from a live market-data read of the trading status for the
+  row's `figi`, through a private helper of this module — a new public function
+  would put a second instrument surface in front of five callers that asked for
+  one. The row is **not** rewritten on this branch: `refreshed_at` describes when
+  the dimensions were read, and a fresh status is not evidence that the
+  dimensions were.
+
+**`refreshed_at` on the returned `Instrument` is the instant the cacheable fields
+were read, on both branches, and never the instant of the status read.** A caller
+reading it is asking how old the lot size is, which is the only question the
+field can answer. It needs no new column and no new call: `Instrument` has
+carried `refreshed_at` since the first version and nothing has ever read it
+(failure class 13 — the value this design wants was already at the point of use).
+
+**What this changes, measured in requests.** On a 10-ticker watchlist at a
+60-second poll, one 8.5-hour session issues about 5,100 `share_by` requests
+today, one per ticker per cycle from `market.data` plus one per signalling
+ticker from `app.loops`. Under this contract it issues **ten** — one per ticker
+per day — and answers every other read from the row. **The number of broker
+requests per cycle does not fall**; what falls is how often rarely-changing data
+is re-read, and the remaining per-cycle request moves off `share_by`, which §2.1
+records as deprecated as of SDK 1.0.0 and which is on the hot path only because
+nothing else resolved a ticker. Removing the per-cycle request outright is the
+open decision below.
+
+**A cache miss is not an error (v1.85).** A ticker absent from `instruments`, or
+present and stale, is the ordinary first read of that ticker: fetch with
+`share_by`, store, return. There is no preload step and no background refresher
+— a periodic job is one more supervised loop and one more schedule a restart can
+step over (failure class 15), for a value only ever wanted at the moment it is
+used. Refresh is therefore **on use**, and the cadence is one `share_by` per
+ticker per 24 hours plus one for every ticker whose row is missing.
+
+**A miss at startup and a miss during a trading cycle behave identically, and
+that is deliberate.** Both go through this function, both cost one `share_by`,
+and neither refuses. `app.startup` step 8a already reads every watchlist
+instrument before the ready alert, so the first cycle of a fresh process runs on
+rows step 8a wrote seconds earlier; that is a consequence of the existing
+ordering, not a rule this contract adds, and step 8a is not amended. Whether
+startup should *refuse* on metadata it cannot read is rule 8's startup half,
+which remains the open decision recorded in §8 and is untouched here. This
+version changes where a value comes from, never whether its absence stops the
+bot.
+
+**A broker failure is never answered from the table.** When `share_by` fails on a
+miss, or the status read fails on a hit, the same typed exception is raised as
+today — `InstrumentNotFound`, `BrokerUnavailable`, `BrokerRateLimited` — and rule
+8's mid-session skip and rule 9's absorption in `market.data` handle it exactly
+as they do now. **Never serve a stored row in place of a broker that could not be
+reached**; the positive action is to raise, because a caller that skips a ticker
+for one cycle is correct and a caller sizing an entry on a status nobody
+confirmed is not. That also settles what this table is *not*: v1.77 recorded
+outage survival as the only thing a durable cache would buy, and it is the one
+use this contract forbids.
+
+**A write failure never fails a read (rule 12).** The write runs inside
+`db.connection.transaction(critical=False)`. On `aiosqlite.Error` it is logged at
+ERROR and swallowed, and the `Instrument` from the live read is still returned —
+the caller asked for metadata, not for a cache — and the next call for that
+ticker simply misses again. **Every other exception propagates**, `TypeError` and
+`AttributeError` foremost, exactly as rule 12 was narrowed in v1.75: an analytics
+path is where a dropped programming error survives longest. No alert is raised on
+any of this, and none is wanted: rule 12 is stdout-only, a cache that is not
+filling degrades nothing an operator can act on, and an alert per cycle in a
+channel whose premise is that silence means healthy is equivalent to no alert
+(failure class 14).
+
+**When no database is open, the cache is skipped and the live read is
+unaffected.** `db.connection.shared()` raises `DatabaseNotOpenError` (rule 30)
+before `app.startup` step 3 and in every process that never opens a database:
+`sandbox/data.py` and `scripts/research/backtest.py` both call this function on a
+laptop with no bot database, and `scripts/verify/` speaks to the SDK directly. On
+the read and on the write this module catches `DatabaseNotOpenError` **and nothing
+wider**, logs it at DEBUG, and behaves exactly as it does today — one `share_by`,
+no row. This is not a degraded state and raises no alert: there is nothing wrong
+with a cache that is not present, and narrowing the catch to that one class is
+what keeps a genuine database fault loud (failure class 5).
+
+**This catch cannot hide a missing `app.startup` step 3, which is the reason rule
+30 fails loudly.** Step 5 refreshes the calendar into `db.trading_days` and step 6
+reads `db.orders`, both before the first `get_instrument` any process makes — the
+earliest is in step 7's reconciliation remedies — so an unopened database has
+already raised out of a repository that does not catch it. The catch here changes
+what a *deliberately* database-free process does, never what a misordered startup
+reports.
+
+**The status read is unmeasured, and V13 measures it before that branch is built
+(v1.85).** This is the first thing in the project to depend on the market-data
+trading-status endpoint. §2.1 exists because the two most expensive defects here
+were assumptions inspection could not falsify, and tests written against a mocked
+endpoint would agree with the guess (failure class 11). **No session may
+implement the fresh-row branch before V13 is green.** The half that is buildable
+without it is the write-through: `get_instrument` keeps its single `share_by` on
+every call and records the row, which gives the table its writer and makes
+`refreshed_at` real, while every read is a miss. If V13 shows the endpoint absent
+on the pinned SDK, or without the headroom it asks for, the fresh-row branch is
+not built and the question returns to the owner with a measurement attached
+rather than an assumption.
+
+**Open decision — the identity-only read (v1.85). Not settled here.** Two of the
+five callers never touch `trading_status`, `lot`, `min_price_increment` or
+`currency`: `market.data.candles_for_watchlist` and `pnl.benchmark_return` each
+read `instrument.figi` and discard the rest. They are also the only callers on
+the per-cycle path, so they pay a live status read per ticker per cycle for a
+field they do not look at. Either (a) that stands — one market-data request per
+ticker per cycle, inside the 200-per-60-seconds §2.1 records, and a single
+instrument surface in front of every caller; or (b) this module gains a second
+entry point returning the identity alone, so a warm cycle issues **no** instrument
+request at all, `get_instrument` stays a live read forever and the field split
+above becomes a type distinction rather than a rule an agent must remember. (b)
+is the better answer on requests and the worse one on surface, and it is not
+free: it adds a §4 signature, which `check_docs.py` correctly reds until
+`tasks/21-broker-client.md` is re-run; and it needs a matching method on
+`sandbox.exchange.SimulatedExchange` plus rows in `sandbox.backtest`'s seam table
+for `zarabot.market.data` and `zarabot.pnl`, or the backtest reaches the real
+network through the one call the table does not patch. **Until it is decided, (a)
+is binding.** No agent adds the second entry point on its own reading of this
+paragraph.
 
 **Sandbox is selected by endpoint, never by a different method family.** The SDK
 exposes a `SandboxService` with a parallel set of methods — `post_sandbox_order`,
@@ -154,6 +386,15 @@ settles as a fill and so never starts a second slice.
 **`async get_instrument(ticker: str) → Instrument`**
 - Raises `InstrumentNotFound` when the ticker does not resolve, `BrokerUnavailable`
   on transport failure, `BrokerRateLimited` when throttled.
+- **Served from the `instruments` table for the five cacheable fields and never
+  for `trading_status` (v1.85).** The signature is unchanged and no caller
+  changes. A fresh row — `clock.now() - refreshed_at <= 24 hours` — supplies
+  `figi`, `ticker`, `lot`, `min_price_increment` and `currency`, and the trading
+  status is read live for that `figi`. A stale or absent row costs one `share_by`,
+  whose response supplies every field, and is written through before the
+  `Instrument` is returned. The full rules — the field split, the miss policy, the
+  rule-12 write, the `DatabaseNotOpenError` case and V13 — are in this module's
+  paragraphs above.
 
 **`async get_candles(figi: str, interval: CandleInterval, since: datetime, until: datetime) → list[Candle]`**
 - Returns candles ordered oldest-first with timezone-aware timestamps.
@@ -447,6 +688,24 @@ From `technical-spec.md` §8. Handle each exactly as written.
    `SUBMITTING`, resolve by querying with the idempotency key on the next cycle
    or at next startup. **Never resubmit.**
 
+12. **Database write failure on a non-critical path** (signals, snapshots,
+    instruments cache) → ERROR to stdout only, never propagated. Losing an
+    analytics row must not stop trading.
+
+    **All three paths have a writer as of v1.85.** Until then "instruments cache"
+    named nothing: the table had no writer anywhere in `zarabot/` (#102), so this
+    rule listed a path that could not fail. `broker.client` owns it now, and the
+    swallow there returns the `Instrument` the broker just supplied — the caller
+    asked for metadata, not for a cache (#46).
+
+    **Non-propagation covers `aiosqlite.Error` and only `aiosqlite.Error`
+    (v1.75)** The swallow exists for a database that will not take the row, not
+    for every way the call site can be wrong. Any other exception propagates and
+    reaches rule 21's supervisor with its traceback. Unqualified, this rule reads
+    as `except Exception: pass` on the analytics path, and an analytics path is
+    exactly where a silently dropped `TypeError` survives longest — nothing
+    downstream misses the row until a weekly report is composed from it.
+
 19. **Secret exposure** → no token **and no account identifier** is ever written
     to a log, an exception message, or a Telegram message. If the redaction
     filter detects a secret in an outgoing Telegram message, the message is
@@ -458,6 +717,27 @@ From `technical-spec.md` §8. Handle each exactly as written.
     correct; it is listed here because the failure mode it would produce —
     losses exceeding allocated capital — is the one failure the brief promises
     cannot happen.
+
+30. **Database accessed before `db.connection.connect`, or after
+    `disconnect`** → `DatabaseNotOpenError`. It must never open a fallback
+    connection. This is a programming defect in the same family as rule 22: it
+    fails loudly rather than reconnecting to a file nobody chose. A silent
+    reconnect would hide a missing `app.startup` step in production, and in tests
+    would let one test inherit a database another created.
+
+31. **A module begins, commits or rolls back the shared connection itself** →
+    programming defect, in the same family as rules 22 and 30. Every write runs
+    inside `db.connection.transaction()`; nothing else touches transaction state.
+    A `commit()` is connection-wide, so a module committing on its own behalf
+    commits whatever another module has in flight, and that module's `rollback()`
+    then undoes nothing. This is not a runtime condition to handle — it is a rule
+    the code must not violate, and §3.2 pins it per module.
+
+    **`db.migrations` is the single exemption**, and it is narrow: `apply`
+    receives a connection rather than taking one, applies each file in its own
+    transaction as §6 requires, and runs during `app.startup` step 3 — before any
+    other task exists, so there is nothing in flight for it to commit. Every
+    other module, without exception, uses `transaction()`.
 
 33. **A recorded price comes from the broker, or the record stays pending.**
     Realised P&L, exit prices and commissions are written from what the broker
@@ -583,6 +863,39 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - No exception raised by this module contains the token in its message (proves
   the secret boundary).
 - Prices returned are `Decimal` (proves no float leaks in from the SDK).
+- **The instruments cache (v1.85).** A ticker with no row is fetched with
+  `share_by`, and the row afterwards holds the same `figi`, `lot`,
+  `min_price_increment`, `currency` and `refreshed_at` the returned `Instrument`
+  holds (proves the write-through is the row that was returned, not a second
+  reading of the response that can drift from it).
+- A second call for the same ticker inside the window issues **no** `share_by`
+  and **does** issue a live trading-status read (proves the five cacheable fields
+  come from the row and the status never does).
+- A fresh row storing `NORMAL_TRADING` whose live status read returns
+  `BREAK_IN_TRADING` returns `BREAK_IN_TRADING` (proves `risk.gate` sees a halt on
+  the cycle it happens rather than on the cycle a window expires — the case #46
+  exists to close. A fixture whose stored and live statuses agree pins nothing).
+- A row whose `refreshed_at` is older than the window is refetched with `share_by`
+  and rewritten; a row exactly at the window is not (boundary: exactly 24 hours is
+  fresh, one second beyond is stale).
+- When the broker's `lot` has changed since the row was written, the stale-row
+  branch returns the broker's value and the row afterwards holds it (proves the
+  window is what lets a lot-size change be picked up without a restart — §2.1's
+  GAZP lot of 10 is the case that costs money when it is wrong).
+- The row is written inside `db.connection.transaction(critical=False)`, and this
+  module issues no `BEGIN`, `commit` or `rollback` of its own (rule 31).
+- An `aiosqlite.Error` raised by the write is logged and swallowed and the
+  `Instrument` from the live read is still returned; a `TypeError` raised by the
+  write **propagates** (rule 12 as narrowed in v1.75).
+- With no database open, `get_instrument` returns the `Instrument` the broker
+  reported, writes nothing, and no `DatabaseNotOpenError` reaches the caller
+  (proves `sandbox/data.py` and `scripts/research/backtest.py` still run with no
+  bot database).
+- A live status read that fails on a fresh row raises `BrokerUnavailable` and the
+  caller receives no `Instrument` (proves a stored status is never substituted for
+  a broker that could not be reached).
+- Nothing outside this module issues SQL against `instruments`, and this module
+  issues SQL against no other table (proves single ownership in both directions).
 - Every order submission is asserted to pass `confirm_margin_trade=False`
   (proves the no-leverage guarantee is enforced at the only place it can be
   broken — this test is the executable form of the brief's loss bound).

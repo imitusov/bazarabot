@@ -1,6 +1,6 @@
 # Dependency Order — Zarabot
 
-**Version:** 1.4
+**Version:** 1.5
 **Derived from:** `technical-spec.md` v1.23
 **Versioning:** new version when a module is added, removed, or its dependencies
 change.
@@ -70,10 +70,17 @@ them right early means the expensive layers above have solid ground.
 
 ## Layer 4 — Broker integration
 
-21. **broker.client** — depends on: config, logging_setup, models
+21. **broker.client** — depends on: config, logging_setup, models, db.connection
 
 The only module that touches the broker network. Everything above it is mocked
 at this boundary in tests.
+
+`db.connection` joined that list at `technical-spec.md` v1.85: `broker.client` is
+the sole writer and sole reader of the `instruments` cache, so it runs SQL on
+`db.connection.shared()` inside `transaction(critical=False)` like any
+repository. The build order already held — `db.connection` is 5b — and nothing
+above layer 4 moves. The module works with no database open, which is what keeps
+`sandbox.data` and the research scripts runnable on a laptop.
 
 ## Layer 5 — Market and state
 
