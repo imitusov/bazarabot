@@ -25,6 +25,12 @@ data/
 *.db-shm
 backups/
 
+# The single-instance lock and its alert marker (spec §10, #22). They sit
+# beside DB_PATH, so a developer whose DB_PATH is ./zarabot.db gets
+# ./zarabot.db.instance-lock — which none of the patterns above match.
+*.instance-lock
+*.instance-lock.refused
+
 # Research artefacts
 sandbox/cache/
 sandbox/models/
