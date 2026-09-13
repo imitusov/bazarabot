@@ -1,8 +1,8 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.85
+**Version:** 1.86
 **Date:** 2026-09-13
-**Implements:** `business-brief.md` v1.13
+**Implements:** `business-brief.md` v1.14
 
 **Companion document.** Read the brief first. When this spec and the brief
 conflict, **the brief takes precedence**.
@@ -611,6 +611,16 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
   reason captured).
 - A terminal order cannot transition back to a non-terminal state (proves the
   status machine is one-way).
+- `count_for_day` counts `SUBMITTING`, `FILLED`, `REJECTED` and `CANCELLED`
+  rows alike, entries and exits alike, for one Moscow date (proves the count is
+  what the bot *tried* to do — counting only fills would report a day of
+  rejections as a quiet day).
+- An order created just before Moscow midnight is counted on its own Moscow
+  date and not on the neighbouring one, with `created_at` stored in UTC (proves
+  the boundary is `clock.moscow_date`, not a string prefix on the stored
+  timestamp).
+- `count_for_day` for a date with no orders returns `0` (proves the empty answer
+  is a zero, not `None` and not an error).
 
 **`db.stop_orders`**
 - `record_placing` writes a `PLACING` row that `active_for_position` then returns
@@ -670,6 +680,15 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
   (proves rejections are analysable, as the brief requires).
 - A daily snapshot written twice for the same date updates rather than duplicates
   (proves the date is the key).
+- `update_intraday` on an existing row changes `closing_equity`, `cash`,
+  `realised_pnl`, `unrealised_pnl`, `open_positions` and `orders_placed`, and
+  leaves `opening_equity` and `benchmark_value` exactly as they were (proves the
+  baseline the daily loss limit measures against survives every intraday write —
+  the row was written once and never revisited, so the alternative was never
+  exercised).
+- `update_intraday` for a date with no row creates nothing: `list_for_period`
+  over that date is still empty afterwards, and no exception is raised (proves a
+  mid-session process cannot invent an opening figure through the update path).
 
 **`broker.client`**
 - Each method returns the documented domain type given a scripted broker
@@ -1543,6 +1562,30 @@ Additionally, on exits booked from an exchange stop:
 - A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
   `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
   is no longer re-fetched once a minute).
+- Two in-session cycles on one Moscow date leave **one** row, whose
+  `opening_equity` is the first cycle's and whose `closing_equity`,
+  `realised_pnl`, `unrealised_pnl`, `open_positions` and `orders_placed` are the
+  second cycle's (proves the day's row is updated rather than reseeded, and that
+  the baseline survives the update — the row was written once and never
+  revisited, so there was no equity curve and `/status` reported a confident
+  `0.00`).
+- On the row a cycle writes, `cash` plus `Σ price × lots × lot_size` over the
+  open positions equals `closing_equity`, and `cash` differs from
+  `closing_equity` whenever a position is open (proves `cash` is the bot's
+  uninvested money and not a second copy of equity, which is what the column
+  held).
+- A cycle whose loss could not be measured — one open position's price raising
+  `PriceRejected` — leaves the day's row exactly as the previous cycle left it
+  (proves an unpriceable book produces a stale point on the curve, never a
+  partial mark that looks complete).
+- A process whose **first** cycle is at 14:00 writes no row at all, neither
+  opening nor intraday, and `pnl.daily_loss_pct` still reconstructs the baseline
+  and alerts (proves the mid-session guard was not weakened by the update path —
+  an update that could create a row would seed a 14:00 baseline and hide the
+  morning's drawdown, #9).
+- `orders_placed` on the row equals `db.orders.count_for_day` for that Moscow
+  date after a cycle in which an order was rejected (proves the count comes from
+  durable state and counts attempts, so a restart mid-session cannot zero it).
 - A process restarted after the Sunday 12:00–12:59 MSK hour still sends that
   week's report, once (proves the skip is gone — the exact-hour condition lost
   the week with no report, no alert and no record, against acceptance criterion
@@ -2443,6 +2486,32 @@ its own (rule 31).
 - Returns orders left in `SUBMITTING` or `SUBMITTED`, oldest first.
 - Consumed by `app.startup` before trading begins.
 
+**`async count_for_day(day: date) → int`**
+- How many order rows have a `created_at` whose **Moscow** calendar date is
+  `day`. Moscow dates are derived with `clock.moscow_date`, the same way
+  `db.signals.list_for_period` derives them — timestamps are stored UTC, so the
+  comparison is not a string prefix.
+- **Counts every order the bot recorded, whatever its status and whichever its
+  intent** — `SUBMITTING`, `SUBMITTED`, `FILLED`, `REJECTED`, `CANCELLED` and
+  `UNKNOWN`, entries and exits alike. `daily_snapshots.orders_placed` is
+  observational and there is no daily cap, so the question it answers is how
+  much the bot **tried** to do. Counting only fills would make a day of
+  rejections read as a quiet day, which is the opposite of the truth.
+- Returns 0 when the date has no rows; never `None`.
+- **Added by v1.86 for `app.loops.trading_cycle` step 4 (#17).** The count
+  cannot live in a process global: a restart mid-session would zero it, and
+  restarts are routine (failure class 15). It cannot live in `app.loops`
+  either, because that module writes no SQL against a table it does not own.
+  This is the amendment scope #17 under-counted — adding a call in one module
+  and the function it needs in another is failure class 1, so both are
+  specified here and both tasks are re-run.
+- **`check_docs.py` correctly reds on this signature until
+  `tasks/07-db-orders.md` is re-run**, the same way it would for the
+  identity-only read `broker.client` records as an open decision. That red is
+  the gate naming the task to run next, not a defect in this amendment: it must
+  be cleared by implementing the function, never by an allowlist entry and never
+  by recording a function in `interfaces.md` that no code provides.
+
 ### `zarabot/db/stop_orders.py`
 
 **Sole owner of stop-order rows.** No other module writes them.
@@ -2538,6 +2607,32 @@ its own (rule 31).
 whose `trade_date` falls in `[start, end]`, oldest first. For the weekly report.
 Empty list when none.
 
+**`async update_intraday(trade_date: date, closing_equity: Decimal, cash: Decimal, realised_pnl: Decimal, unrealised_pnl: Decimal, open_positions: int, orders_placed: int) → None`**
+— updates exactly those six columns on the row for `trade_date`, and **does
+nothing when that date has no row**. Called by `app.loops.trading_cycle` step 4
+on every in-session cycle; the last call of a trading day is what makes
+`closing_equity` the day's close (v1.86, #17). Write failures are rule 12 like
+every other write here — `aiosqlite.Error` logged at ERROR and swallowed,
+everything else propagating — because a lost curve point must not stop trading.
+
+**`opening_equity`, `trade_date` and `benchmark_value` are not parameters, and
+that is the point.** The baseline is written once, by the opening `write_daily`,
+and a function that cannot express a change to it is the only thing that keeps
+that true across every future edit of the caller: `pnl.daily_loss_pct` measures
+the day against `opening_equity`, so a caller able to reseed it could erase the
+morning's drawdown from the limit that exists to catch it (#9). Creating a row
+is likewise out of reach here, because a mid-session process is forbidden to
+invent an opening figure (`app.loops` step 4). `benchmark_value` is excluded
+because nothing produces it — see the open decision below.
+
+**`check_docs.py` correctly reds on this signature until
+`tasks/11-db-snapshots.md` is re-run**, as it does on
+`db.orders.count_for_day`. The red names the task to run next. Clear it by
+implementing the function — never with an allowlist entry, and never by
+recording in `interfaces.md` a function no code provides, which would turn the
+one check that catches an under-counted amendment (failure class 1) into a
+check that cannot.
+
 **Owns rule 12 (v1.75, split v1.76).** Signals, snapshots and the instruments
 cache are the non-critical write paths: a failed write here is logged at ERROR
 and does not propagate, because losing an analytics row must not stop trading.
@@ -2546,6 +2641,39 @@ propagates and reaches rule 21's supervisor with its traceback. An analytics
 path is where a silently dropped `TypeError` survives longest, since nothing
 downstream misses the row until a weekly report is composed without it. Contrast
 `db.cooldowns` above, which is rule 11 and propagates everything.
+
+**Open decision — `benchmark_value` (v1.86). Not settled here.** The column is
+named for a value and no function in the system produces one:
+`pnl.benchmark_return(start, end)` returns a **return over a period**, and
+`reporter.weekly` recomputes it live from candles on every report, which is why
+a historical benchmark comparison cannot be reconstructed today (#17). Three
+answers, none of them free:
+
+- (a) **Define it as a level.** `allocated_capital × (1 + benchmark_return(first
+  trading day, this date))` is comparable with `closing_equity` on the same
+  axis, and is the answer that makes the equity curve mean something. It cannot
+  be computed on the trading cycle: `benchmark_return` fetches daily candles for
+  every watchlist ticker, so a per-cycle call is one request per ticker per
+  minute for a number that moves once a day. It therefore needs a once-a-day
+  producer — the rollover job is the natural home, it is already "due and not
+  yet done" against `db.job_runs`, and it would write **yesterday's** row, which
+  is legitimate for this column precisely because a benchmark level does not
+  need yesterday's prices from *our* store. That is a second writer of the row
+  and a seventh parameter here, and it is a design, not a detail.
+- (b) **Redefine it as a return** and rename the §5 note accordingly. Cheap in
+  documentation, but the column name then lies in the database forever, and a
+  return is what `reporter.weekly` already recomputes, so the column buys only
+  the history.
+- (c) **Drop the column** in a forward migration, and with it the
+  `DailySnapshot` field and the `_row_to_snapshot` branch.
+
+**Until it is decided, nothing writes it and it stays `NULL`.** That is what
+`write_daily` already records at the opening write and what `update_intraday`
+above is deliberately unable to change, and §5 already permits null. This is not
+a defect to be fixed by an agent reading this paragraph: no agent adds a
+benchmark producer on its own reading of it. The equity curve #17 is about does
+not depend on this column — `closing_equity`, `realised_pnl`, `unrealised_pnl`
+and `open_positions` are the curve, and they are settled above.
 
 **Why this heading was split (v1.76).** Until v1.76 these two modules shared one
 `###` heading, and `list_for_period` was written once as
@@ -4754,6 +4882,72 @@ Fixed ordering; each step completes before the next begins:
    deliberately stricter than step 2, where one rejected quote omits its ticker
    and the cycle continues — there, a missing price costs one position's exit
    evaluation; here it costs the measurement that bounds the whole day.
+
+   **Update the day's snapshot at the end of this step, on every in-session
+   cycle (v1.86).** After the loss has been measured and the limit check has
+   run — a halting cycle updates too, because the mark at which the limit
+   tripped is exactly the one an investigation wants — the cycle calls
+   `db.snapshots.update_intraday(today, closing_equity, cash, realised_pnl,
+   unrealised_pnl, open_positions, orders_placed)` with:
+
+   - `closing_equity` — bot equity as of this cycle;
+   - `cash` — that equity **minus** the market value of the open positions,
+     `Σ price × lots × lot_size` at the same prices `unrealised_pnl` uses, so
+     the row is internally consistent by construction. This is the bot's own
+     uninvested money and never the broker's cash balance (§5);
+   - `realised_pnl` — `Σ pnl.realised(p)` over `db.positions.list_closed()`
+     for positions whose `exit_at` is not null and whose
+     `clock.moscow_date(exit_at)` is today. Same source and same filter as
+     rule 20's alert at step 7;
+   - `unrealised_pnl` — `Σ pnl.unrealised(p, price)` over the open positions at
+     the prices step 2 read;
+   - `open_positions` — the count already passed to this step;
+   - `orders_placed` — `db.orders.count_for_day(today)`.
+
+   **Every figure but the last is already in hand and was discarded until
+   v1.86.** `pnl.bot_equity()` is evaluated inside `pnl.daily_loss_pct` and
+   thrown away; the open-position count is already this step's argument; every
+   open position's price was read at step 2. So this step adds **no broker
+   call** and **no new column**: the one new read is a local `SELECT` for the
+   order count, which cannot be held in a process global because a restart
+   mid-session would zero it and restarts are routine (failure class 15).
+   Proposing a new column or a second equity call for a value the cycle already
+   carries is failure class 13, which this project has now proposed three times.
+
+   **`opening_equity` is never rewritten, and the update cannot express a
+   change to it.** That is why this is `update_intraday` and not a second
+   `write_daily`: `write_daily` takes the whole row, so a caller that must not
+   touch the baseline would be holding it. The baseline is what
+   `pnl.daily_loss_pct` measures against, and reseeding it at 14:00 would erase
+   the morning's drawdown from the limit that exists to catch it — #9, restated
+   one module along.
+
+   **The last write of the trading day is the day's close, so `closing_equity`
+   needs no end-of-session job.** A job keyed to the close is failure class 15:
+   a process down, restarting or backing off through that minute loses the day
+   permanently, and this module's own scheduling rule is "due and not yet done"
+   against durable state, which a single instant cannot express. A rollover job
+   the next morning is worse still and was the shape #17 proposed: the day's
+   `unrealised_pnl` needs **yesterday's closing prices**, and the bot keeps
+   none — equity measured at the next open has already absorbed the overnight
+   gap. `realised_pnl` could be reconstructed from `positions.exit_at`;
+   `unrealised_pnl` could not be reconstructed at all. Updating every cycle also
+   means the row is correct at every moment it is read, rather than only after a
+   job that may not have run.
+
+   **When today has no row, the cycle writes nothing.** A process whose first
+   cycle is mid-session is forbidden above to write `opening_equity`, and an
+   update that created the row would have to invent one. `update_intraday` is
+   specified to do nothing for a date with no row, so this holds without a
+   second guard here. The day then has no curve point, `pnl` reconstructs the
+   baseline and alerts, and the gap is visible rather than fabricated.
+
+   **When step 2's prices do not cover every open position, skip the update for
+   that cycle.** A partial mark would understate `unrealised_pnl` and overstate
+   `cash` while looking like a complete one. The row keeps the previous cycle's
+   figures, which is a stale point on the curve rather than an invented one, and
+   the next complete cycle replaces it. No new alert: step 2 has already
+   alerted, latched, on the rejection that caused it.
 4b. If shutdown has been requested, return; entries stop here and exits do not
    (v1.45). The same shape as the halt check below, for the same reason: a
    process on its way down must not open what nobody will be watching, and must
@@ -5480,14 +5674,25 @@ becomes merely detectable afterwards.
 | Column | Type | Notes |
 |---|---|---|
 | `trade_date` | TEXT | Primary key. **Moscow** calendar date |
-| `opening_equity` | TEXT NOT NULL | Baseline for the daily loss limit |
-| `closing_equity` | TEXT NULL | Null until the session closes |
-| `cash` | TEXT NOT NULL | |
-| `realised_pnl` | TEXT NOT NULL | For the day |
-| `unrealised_pnl` | TEXT NOT NULL | At snapshot time |
-| `open_positions` | INTEGER NOT NULL | |
-| `orders_placed` | INTEGER NOT NULL | Observational only — there is no daily cap |
-| `benchmark_value` | TEXT NULL | Null when unavailable, never 0 |
+| `opening_equity` | TEXT NOT NULL | Baseline for the daily loss limit. Written once, by the day's opening write, and never rewritten |
+| `closing_equity` | TEXT NULL | Bot equity at the most recent in-session cycle; the last write of a trading day **is** that day's close. Null only for a date whose row no in-session cycle updated |
+| `cash` | TEXT NOT NULL | The bot's **uninvested** money: `closing_equity` minus the market value of open positions at the same prices `unrealised_pnl` uses, so `cash` plus that market value is always exactly `closing_equity`. In words: allocated capital plus realised results, less what the open positions cost. **Never the broker's cash balance** — a deposit or a withdrawal is not a trading result, and a row whose equity is bot-scoped and whose cash is account-scoped is the unit mismatch that produced #9. Until v1.86 this column held a second copy of bot equity |
+| `realised_pnl` | TEXT NOT NULL | For the day: `Σ pnl.realised` over positions whose `exit_at` is on this Moscow date |
+| `unrealised_pnl` | TEXT NOT NULL | Open positions marked to market at the prices of the cycle that last wrote the row |
+| `open_positions` | INTEGER NOT NULL | Open positions at that same cycle |
+| `orders_placed` | INTEGER NOT NULL | Observational only — there is no daily cap. Every order recorded on this Moscow date, whatever its status: how much the bot tried to do, not how much filled |
+| `benchmark_value` | TEXT NULL | Null when unavailable, never 0. **Nothing writes it today** — see the open decision under §4 `zarabot/db/snapshots.py` |
+
+Every column but `opening_equity` and `benchmark_value` is refreshed on every
+in-session cycle by `app.loops.trading_cycle` step 4, through
+`db.snapshots.update_intraday` (v1.86, #17). Until v1.86 the whole row was
+written once at the session open with `closing_equity` null and four figures
+hardcoded to zero, and nothing ever revisited it: there was no equity curve,
+so no drawdown, volatility or risk-adjusted return could be computed after the
+fact, and `/status` answered `Today's P&L: 0.00` and `Orders placed today: 0`
+with confidence. **No migration is required** — `001_initial.sql` already
+creates all nine columns, and v1.86 changes who writes them and when, not what
+they are.
 
 ### `halt_state`
 

@@ -93,6 +93,15 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (proves rejections are analysable, as the brief requires).
 - A daily snapshot written twice for the same date updates rather than duplicates
   (proves the date is the key).
+- `update_intraday` on an existing row changes `closing_equity`, `cash`,
+  `realised_pnl`, `unrealised_pnl`, `open_positions` and `orders_placed`, and
+  leaves `opening_equity` and `benchmark_value` exactly as they were (proves the
+  baseline the daily loss limit measures against survives every intraday write —
+  the row was written once and never revisited, so the alternative was never
+  exercised).
+- `update_intraday` for a date with no row creates nothing: `list_for_period`
+  over that date is still empty afterwards, and no exception is raised (proves a
+  mid-session process cannot invent an opening figure through the update path).
 
 ## Expected output
 

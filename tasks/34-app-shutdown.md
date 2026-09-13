@@ -108,6 +108,30 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A cycle issues **zero** `get_trading_schedule` calls, and the calendar used for
   `MAX_AGE` is the one `market.session` holds (proves the fourteen-day schedule
   is no longer re-fetched once a minute).
+- Two in-session cycles on one Moscow date leave **one** row, whose
+  `opening_equity` is the first cycle's and whose `closing_equity`,
+  `realised_pnl`, `unrealised_pnl`, `open_positions` and `orders_placed` are the
+  second cycle's (proves the day's row is updated rather than reseeded, and that
+  the baseline survives the update — the row was written once and never
+  revisited, so there was no equity curve and `/status` reported a confident
+  `0.00`).
+- On the row a cycle writes, `cash` plus `Σ price × lots × lot_size` over the
+  open positions equals `closing_equity`, and `cash` differs from
+  `closing_equity` whenever a position is open (proves `cash` is the bot's
+  uninvested money and not a second copy of equity, which is what the column
+  held).
+- A cycle whose loss could not be measured — one open position's price raising
+  `PriceRejected` — leaves the day's row exactly as the previous cycle left it
+  (proves an unpriceable book produces a stale point on the curve, never a
+  partial mark that looks complete).
+- A process whose **first** cycle is at 14:00 writes no row at all, neither
+  opening nor intraday, and `pnl.daily_loss_pct` still reconstructs the baseline
+  and alerts (proves the mid-session guard was not weakened by the update path —
+  an update that could create a row would seed a 14:00 baseline and hide the
+  morning's drawdown, #9).
+- `orders_placed` on the row equals `db.orders.count_for_day` for that Moscow
+  date after a cycle in which an order was rejected (proves the count comes from
+  durable state and counts attempts, so a restart mid-session cannot zero it).
 - A process restarted after the Sunday 12:00–12:59 MSK hour still sends that
   week's report, once (proves the skip is gone — the exact-hour condition lost
   the week with no report, no alert and no record, against acceptance criterion
