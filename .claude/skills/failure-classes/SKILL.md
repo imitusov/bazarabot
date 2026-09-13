@@ -60,14 +60,23 @@ degraded state with no traceback.
 **Check.** The critic checks that each `except` is exactly as broad as its
 rule, and error rules must name which exception classes are retryable.
 
-Ruff `BLE001` would make that mechanical and is **not enabled** —
-`pyproject.toml` selects `["E","F","W","I","UP","B","ASYNC","DTZ","S","RET",
-"SIM"]`, no `BLE`. Turning it on would red the tree today:
-`telegram/notifier.py`, `ops/backup.py` and `app/startup.py` all catch bare
-`Exception`. So this class has no automated gate at all, and the reading is
-the only thing standing between a rename and a plausible-looking degraded
-state. Enabling `BLE001` belongs with the amendment that narrows error rules
-13 and 18.
+Ruff `BLE001` **is enabled** (`pyproject.toml:24`, since #198), so a new
+blind catch fails lint. Nine were narrowed to the classes their contracts
+name in the same change; three blind catches remain, each carrying a
+`# noqa: BLE001` naming the contract that licenses it — `app.loops._supervise`
+is rule 21, the supervisor everything propagates *to*, and `app.startup`'s
+outermost abort is rule 15. A boundary that catches everything is what a
+boundary is for.
+
+**`BLE001` does not close this class, and the gap is the interesting part.**
+It sees only *blind* catches. A **narrow** catch that contradicts its own
+contract is invisible to it — `db.cooldowns.start` caught `aiosqlite.Error`
+and logged, while three lines of §4 said that module propagates everything,
+for months after v1.63 named that swallow as the thing it was removing
+(#210). No lint covers that, so the contract-vs-code reading is still the
+only thing standing between a rename and a plausible-looking degraded state.
+A structural test asserting a module catches nothing is the cheapest
+substitute where it matters.
 
 ## 6. Guard covers one class and reads as covering all
 **Shape.** The seam table lists broker, clock and config; the test that
