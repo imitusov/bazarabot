@@ -1293,3 +1293,96 @@ async def test_observed_time_comes_from_clock_not_datetime_now(
     # 21:30 UTC on the 31st is 00:30 on 1 January in Moscow — the date rolls,
     # which is the case a single-zone log line cannot show at all.
     assert records[0].msk == "2027-01-01T00:30:00+03:00"
+
+
+class _FakeChat:
+    def __init__(self, chat_id: int) -> None:
+        self.id = chat_id
+
+
+class _FakeMessage:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.replies: list[str] = []
+
+    async def reply_text(self, text: str, **kwargs: object) -> None:
+        self.replies.append(text)
+
+
+class _FakeUpdate:
+    """The shape `telegram.commands` reads off a PTB update: chat id and text."""
+
+    def __init__(self, chat_id: int, command: str) -> None:
+        self.effective_chat = _FakeChat(chat_id)
+        self.message = _FakeMessage(f"/{command}")
+
+
+async def test_start_leaves_report_answering_rather_than_unavailable(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After `start()`, `/report` produces a report, not `report unavailable`.
+
+    `telegram.commands` holds the `/report` builder in a module global that
+    only `app.startup` fills, and nothing pinned that call: delete it and
+    `/report` answers "report unavailable" for the life of the process while
+    every other case here stays green (#36). This asserts the outcome the
+    owner sees, through the real command handler and the real
+    `reporter.weekly.build`, so it fails on a deleted call, on a builder wired
+    to the wrong callable, and on a builder installed after the ready alert
+    the loops start behind.
+    """
+    from zarabot.app.startup import start
+    from zarabot.config import get
+    from zarabot.models import Candle
+    from zarabot.telegram.commands import report, set_report_builder
+
+    # The builder is process-global, so a builder another test installed would
+    # make this pass with the wiring deleted. Start from unavailable.
+    get.cache_clear()
+    set_report_builder(None)
+    monkeypatch.setattr("zarabot.telegram.commands.now", lambda: NOW)
+
+    async def _pnl_instrument(ticker: str) -> Instrument:
+        return _instrument_of(ticker)
+
+    async def _pnl_candles(
+        figi: str, interval: object, since: datetime, until: datetime
+    ) -> list[Candle]:
+        return [
+            Candle(
+                timestamp=since,
+                open=Decimal("279.83"),
+                high=Decimal("280.00"),
+                low=Decimal("279.00"),
+                close=Decimal("279.83"),
+                volume=1000,
+            ),
+            Candle(
+                timestamp=until,
+                open=Decimal("280.00"),
+                high=Decimal("286.00"),
+                low=Decimal("279.50"),
+                close=Decimal("285.00"),
+                volume=1200,
+            ),
+        ]
+
+    # The benchmark leg of the report reaches the broker through `pnl`; mock at
+    # `broker.client`, which is where these names come from.
+    monkeypatch.setattr("zarabot.pnl.get_instrument", _pnl_instrument)
+    monkeypatch.setattr("zarabot.pnl.get_candles", _pnl_candles)
+
+    update = _FakeUpdate(int(REQUIRED_ENV["TELEGRAM_CHAT_ID"]), "report")
+    try:
+        await start()
+        await report(update, None)
+    finally:
+        set_report_builder(None)
+        get.cache_clear()
+
+    assert update.message.replies, "the /report handler replied nothing"
+    text = update.message.replies[-1]
+    assert text != "report unavailable"
+    # NOW is Monday 2026-03-16 in Moscow, so the week runs to Sunday the 22nd.
+    assert text.startswith("Weekly report 2026-03-16 to 2026-03-22")
+    assert "Win rate:" in text
