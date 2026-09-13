@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.87
+**Version:** 1.88
 **Date:** 2026-09-13
 **Implements:** `business-brief.md` v1.14
 
@@ -279,6 +279,10 @@ that inspection could not have falsified.
 | Price steps | SBER/GAZP 0.01, **LKOH/MGNT 0.50** | A stop price off-step is rejected by the exchange |
 | Candle depth | 456 daily candles available | Floor is 250; the longest lookback plus a margin |
 | `LastPrice` fields | Exactly `figi`, `price`, `time`, `instrument_uid`, `last_price_type`. **No `timestamp`** | Measured 2026-08-28. `_quote_time` probed for a `timestamp` that has never existed; the probe could only ever mask a rename of `time` as a rejected quote (#33) |
+| Trading status, live read | `market_data.get_trading_status` exists on 1.49.1, resolves every watchlist FIGI, and derives the **same string** as `share_by` for the same instrument in the same minute | Measured 2026-09-13 by V13, 10 of 10 tickers. The instruments cache serves every field from the table except this one; the carve-out is only sound if the two sources agree, since the row's other fields come from `share_by` (#46) |
+| Trading status **varies by session** | `DEALER_NORMAL_TRADING` at 20:00 MSK, after the main session closed; `NORMAL_TRADING` during it | Measured 2026-09-13 by V13 across all ten tickers, cross-checked against the live `signals` table: **0 of 4,626 signals** were ever rejected `INSTRUMENT_NOT_TRADING`, so the value the gate sees in session is the bare form. `risk.gate:19` compares against `NORMAL_TRADING` exactly, and that is correct for the session the bot trades in — but it means the field is **session-dependent, not instrument-dependent**, which is the strongest argument for never caching it (#46): a row refreshed in the evening would serve `DEALER_NORMAL_TRADING` into the next morning's gate and reject every ticker silently |
+| Trading status, headroom | 1204 req/min observed against 10 req/min required — **120×** | Measured 2026-09-13 by V13 the way V7 measures candles. One status read per ticker per poll is affordable, which is what makes the never-cache rule cheap to obey |
+| `get_trading_status` deprecation | Emits `DeprecatedWarning` — "deprecated as of 1.0.0" | Observed 2026-09-13. Same posture as `share_by` and `get_last_prices`: works at 1.49.1, noted, not acted on |
 | SDK deprecations | `share_by` and `get_last_prices` are **deprecated as of SDK 1.0.0** | Both are on the hot path. Noted, not acted on: they work at 1.49.1, and a migration is its own change with its own verification |
 | Operations feed, fee attribution | **Every fee row carries a parent id that resolves inside the same window.** 7 fee rows of 16, 0 without a parent | Measured 2026-09-10 by V12 against the live account over 90 days. This is the assumption `get_operations` rests on: a fee whose parent is outside the window is attributed to nothing and the position's commission stays `Decimal(0)` while looking settled |
 | Operations feed, executed state | `OPERATION_STATE_EXECUTED` is the only state seen; the name matches the parser's constant | Measured 2026-09-10 by V12. The parser drops every other state, so a renamed constant would silently drop all 16 rows rather than fail |
