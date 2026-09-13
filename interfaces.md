@@ -682,6 +682,13 @@ The only module that calls the broker. Sandbox is selected by
 `INVEST_GRPC_API_SANDBOX` endpoint, never `post_sandbox_*`. Never passes
 `confirm_margin_trade=True`. Never logs or raises the token. Prices are `Decimal`.
 
+**Sole owner of the `instruments` table (v1.85).** A non-`db.*` owner owes every
+rule a repository owes: it never calls `aiosqlite.connect`, never closes the
+connection it uses, never issues `BEGIN` / `commit` / `rollback`, and every
+write runs inside `db.connection.transaction(critical=False)` on
+`db.connection.shared()`. It writes no other table, and no other module writes
+this one — a caller wanting instrument metadata calls `get_instrument`.
+
 **One `AsyncClient` and one `Config` per process.** The client is created lazily
 on first call — never at import — and reused for every later call; configuration
 is read through `config.get()`, once, and held alongside it (#18).
@@ -715,6 +722,39 @@ Closes the process client and forgets it. Idempotent; a no-op when none is
 open. A later call creates a new one, so closing is not a one-way door. Called
 only by `app.shutdown`.
 **`async get_instrument(ticker: str) → Instrument`**
+**Sole writer and sole reader of the `instruments` table (v1.85, #46).** The
+signature is unchanged and no caller changes. **Exactly one broker request per
+call, never two.** A fresh row — `clock.now() - refreshed_at <= 24 hours`, a
+module constant and not a `config` value — supplies `figi`, `ticker`, `lot`,
+`min_price_increment` and `currency`, and the trading status is read live from
+the market-data endpoint for that `figi`. A stale or absent row costs one
+`share_by`, whose response supplies every field, and the row is written through
+before the `Instrument` is returned. An absent row is stale; there is no
+preload and no background refresher, so refresh is on use and a miss at startup
+and a miss mid-cycle behave identically.
+
+**`trading_status` is recorded and never served.** Every call reads it live,
+whatever the row's age: the field changes intraday, `risk.gate` rejects
+`INSTRUMENT_NOT_TRADING` on it, and §2.1 measured it **session-dependent, not
+instrument-dependent** — every watchlist ticker reads `DEALER_NORMAL_TRADING`
+after the main session closes, so an evening row would serve that into the next
+morning's gate and reject every ticker silently. Reading the stored column into
+a trading decision is a defect, not an optimisation.
+
+`refreshed_at` on the returned `Instrument` is the instant the **cacheable
+fields** were read, on both branches, never the instant of the status read; a
+cache hit does not rewrite the row, because a fresh status is not evidence that
+the dimensions were re-read. **A broker failure is never answered from the
+table** — a failed `share_by` on a miss, or a failed status read on a hit,
+raises the same typed exception as before, and outage survival is the one use
+this durable cache forbids. A write failing with `aiosqlite.Error` is logged at
+ERROR and swallowed, and the live `Instrument` is still returned (rule 12); every
+other exception from the write propagates. With no database open,
+`DatabaseNotOpenError` — **and nothing wider** — is caught on the read and on
+the write, logged at DEBUG, and the call behaves exactly as it did before the
+cache existed, so `sandbox/data.py` and `scripts/research/backtest.py` keep
+working with no bot database. No migration was needed: `001_initial.sql` already
+creates all seven columns.
 **`async get_candles(figi: str, interval: CandleInterval, since: datetime, until: datetime) → list[Candle]`**
 Oldest-first. Empty list when none. `ValueError` on naive datetimes.
 **`async get_last_price(figi: str) → Decimal`**
