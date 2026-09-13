@@ -254,7 +254,7 @@ async def count_for_day(day: date) -> int:
 
     Every status and both intents are counted: `daily_snapshots.orders_placed`
     is observational and asks how much the bot *tried* to do, so counting only
-    fills would make a day of rejections read as a quiet day (v1.86, #17).
+    fills would make a day of rejections read as a quiet day (v1.87, #17).
 
     The Moscow date is derived with `clock.moscow_date`, exactly as
     `db.signals.list_for_period` derives it. Timestamps are stored in UTC, so a

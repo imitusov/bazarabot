@@ -261,7 +261,7 @@ def _patch_defaults(
     monkeypatch.setattr(loops, "resolve_unfinished", _resolve)
     monkeypatch.setattr(loops, "list_open", _empty)
     monkeypatch.setattr(loops, "list_closed", _empty)
-    # Step 4 reads and writes the day's row on every cycle now (v1.86), so the
+    # Step 4 reads and writes the day's row on every cycle now (v1.87), so the
     # snapshot seam is stubbed for every case here; `_patch_pnl` and the
     # real-database cases below replace these with something that records.
     monkeypatch.setattr(loops, "list_for_period", _empty)
@@ -2650,7 +2650,7 @@ async def test_two_cycles_on_one_day_leave_one_row_with_the_first_baseline(
 ) -> None:
     """The day's row is updated, not reseeded and not left as written.
 
-    Before v1.86 the row was written once at the open and never revisited:
+    Before v1.87 the row was written once at the open and never revisited:
     `closing_equity` was permanently null, so there was no equity curve, and
     `/status` reported a confident `0.00` (#17).
     """

@@ -113,7 +113,7 @@ async def update_intraday(
 
     `app.loops.trading_cycle` step 4 calls this on every in-session cycle, so
     the last call of a trading day is what makes `closing_equity` the day's
-    close — there is no close-keyed job to miss (v1.86, #17).
+    close — there is no close-keyed job to miss (v1.87, #17).
 
     `opening_equity` and `benchmark_value` are not parameters and cannot be
     reached from here. The baseline is written once by the opening

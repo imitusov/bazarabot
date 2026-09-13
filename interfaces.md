@@ -439,7 +439,7 @@ Order rows whose `created_at` has `clock.moscow_date(created_at) == day`, every
 status and both intents — what the bot *tried* to do, which is what
 `daily_snapshots.orders_placed` records. `0` for a day with no rows, never
 `None`. Timestamps are stored UTC, so the Moscow date is derived, never a
-string prefix (v1.86, #17).
+string prefix (v1.87, #17).
 
 ## `zarabot.db.stop_orders`
 
@@ -532,7 +532,7 @@ Access before `connect` or after `disconnect` raises `DatabaseNotOpenError`
 **`async update_intraday(trade_date: date, closing_equity: Decimal, cash: Decimal, realised_pnl: Decimal, unrealised_pnl: Decimal, open_positions: int, orders_placed: int) → None`**
 Updates exactly those six columns on the row for `trade_date`, and does nothing
 when that date has no row. `app.loops` step 4 calls it every in-session cycle,
-so the last call of a trading day is that day's close (v1.86, #17).
+so the last call of a trading day is that day's close (v1.87, #17).
 `opening_equity` and `benchmark_value` are deliberately unreachable from here:
 the baseline is written once by `write_daily` and `benchmark_value` has no
 producer. Write failures are logged at ERROR and not propagated (rule 12).

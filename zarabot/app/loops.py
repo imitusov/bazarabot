@@ -403,7 +403,7 @@ async def _update_snapshot(
     prices: dict[str, Decimal],
     allocated: Decimal,
 ) -> None:
-    """The end of step 4: this cycle's point on the day's equity curve (v1.86).
+    """The end of step 4: this cycle's point on the day's equity curve (v1.87).
 
     Called on every in-session cycle, a halting one included — the mark at
     which the limit tripped is exactly the one an investigation wants — so the
