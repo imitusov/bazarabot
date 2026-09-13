@@ -1,7 +1,7 @@
 # Zarabot — Business Brief
 
-**Version:** 1.13
-**Date:** 2026-09-10
+**Version:** 1.14
+**Date:** 2026-09-13
 **Status:** Ready for technical spec
 
 **Companion document.** Implementation contracts are in `technical-spec.md`.
@@ -668,7 +668,7 @@ trading logic, and never causes the bot to exit.
 | Strategy evaluation | After each data poll | Produces signals from current data. |
 | Position monitor | Every minute during the session | Checks every open position against all three exit triggers — stop, target, age — and recomputes P&L. |
 | Session guard | Continuous | Determines whether the exchange is open, including weekends and holidays, so nothing is attempted against a closed market. |
-| Daily rollover | At session open, Moscow time | Resets the daily loss baseline and writes the previous day's snapshot. |
+| Daily rollover | At session open, Moscow time | Establishes the day's loss baseline and opens the day's snapshot. The snapshot is then kept current on every cycle of the session, so the last write of a day **is** that day's close. It is not written the following morning: reconstructing a day's unrealised profit and loss after the fact would need that day's closing prices, and the bot does not keep them. |
 | Commission backfill | At daily rollover, and before the weekly report | Records commissions the broker reported after the fill, and corrects the profit figures that depended on them. Without it a trade's cost can be permanently understated. |
 | Nightly backup | Daily, outside session hours | Copies the database file and prunes backups older than thirty days. |
 | Weekly reporter | Sunday 12:00 Moscow time | Composes and sends the weekly report. |
