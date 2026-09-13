@@ -1215,7 +1215,8 @@ Frozen: `config`, `strategies`, `halt`, `reconciliation`. Lives here, not in
 `config.load` → write `SSL_TBANK_VERIFY` from `config.ssl_tbank_verify` into
 `os.environ` (`"true"` / `"false"`) → urgent `alert` when verification is
 disabled, before any broker call and carrying no token → `logging_setup.configure`
-(secrets include both tokens and `tinvest_account_id`) →
+(secrets include both tokens and `tinvest_account_id`) → take the single-instance
+lock →
 `db.connection.connect(config.db_path)` then
 `db.migrations.apply(db.connection.shared())` → `strategies.registry.enabled` →
 `market.session.refresh` → `execution.orders.resolve_unfinished` →
@@ -1236,6 +1237,27 @@ handled set alerts urgently. A `FOREIGN_HOLDING` adjustment raises
 `config.allow_foreign_holdings` is true (rule 32); when it is, the ready alert
 names the holdings and they are never traded — reconciliation writes no position
 row, so no stop is placed, no exit evaluated and no sale made.
+
+Steps 2b/2c own the single-instance lock (spec v1.89, #22): an exclusive
+non-blocking `flock` on `${DB_PATH}.instance-lock`, taken after
+`logging_setup.configure` and before the database is opened. The descriptor is
+held for the life of the process and is **never closed by application code** —
+not by `app.shutdown`, not by a context manager — because the kernel's release
+on process death by any means is the whole reason it is a `flock` rather than a
+PID file or a heartbeat. A lock already held is a refusal: `StartupError` naming
+the lock path, `startup_failed` with `stage` `instance` and `reason`
+`INSTANCE_LOCKED`, no database connection, no broker call and no order. The
+owner is alerted on the **first** refusal only; the marker
+`${DB_PATH}.instance-lock.refused` holds that first refusal's `clock.now()`
+instant and a repeat refusal deliberately does **not** rewrite it, so the
+ageing window is measured from the first refusal. The marker's two resets: a
+successful acquisition deletes it, and an instant more than 24 hours old reads
+as absent. An absent, unreadable, malformed or future-dated marker alerts, and
+so does one that cannot be written. `scripts/ci/check_latches.py` sees
+module-level booleans only and is blind to this file latch. Nothing else takes
+this lock — not `scripts/deploy/export_health.py`, `scripts/deploy/update.sh`,
+`ops.backup` or anything under `sandbox/` — and the `asyncio.Lock`s in
+`execution.orders` are unchanged intra-process serialisation.
 
 Step 8a compares `instrument.lot × get_last_price(figi)` against
 `risk.sizing.position_budget(allocated_capital, position_size_pct)` for every

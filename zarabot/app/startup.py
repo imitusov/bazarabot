@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import NoReturn
 
 from zarabot.broker.client import (
@@ -48,6 +51,26 @@ _SSL_DISABLED_TEXT = (
     "is disabled on the connection that carries the trading token"
 )
 _SCHEDULE_DAYS = 14
+# Step 2b/2c (spec v1.89, #22). The lock and its alert marker sit beside
+# DB_PATH in the bind-mounted data directory (§10); neither is backed up.
+_LOCK_SUFFIX = ".instance-lock"
+_MARKER_SUFFIX = ".instance-lock.refused"
+_MARKER_AGE_OUT = timedelta(hours=24)
+_INSTANCE_LOCKED = "INSTANCE_LOCKED"
+# The descriptor holding the single-instance lock. It is kept for the lifetime
+# of the process and is **never closed by application code** — not by
+# `app.shutdown`, not by an exception handler, not by a context manager. The
+# kernel releases the lock when the process ends by any means, including
+# `SIGKILL`, an OOM kill, `docker kill` and power loss, so a crashed instance
+# never leaves a lock a human has to clear. That is the whole reason this is a
+# `flock` and not a PID file, a `runtime_state` row or a heartbeat: those record
+# liveness, and a liveness record written by a process that then dies is a latch
+# with no reset — on a live account, holding open positions, at 3am.
+#
+# It is bound to a module global rather than to a local for exactly that
+# reason: a local would be garbage-collected when `start()` returns, closing
+# the descriptor and releasing the lock while the bot traded on.
+_lock_fd: int | None = None
 # Types the executor acts on. `STOP_DUPLICATE` belongs here: two live stops
 # against one position is the double-sell condition, and an executor with no
 # branch for it detected, reported and then dropped it (#35).
@@ -113,7 +136,15 @@ async def _abort(
     *,
     stage: str | None = None,
     reason: str | None = None,
+    notify: bool = True,
 ) -> NoReturn:
+    """Emit `startup_failed`, alert, and raise. The failure is always emitted.
+
+    `notify=False` is step 2c's once-per-condition rule and nothing else: a
+    repeat single-instance refusal is logged and exits non-zero exactly as the
+    first one does, and only the Telegram message is withheld. Suppressing the
+    alert is not suppressing the failure.
+    """
     if stage is not None:
         _LOG.critical(
             "startup_failed",
@@ -123,11 +154,159 @@ async def _abort(
                 "reason": reason if reason is not None else message,
             },
         )
-    if _telegram_usable():
+    if notify and _telegram_usable():
         await alert(message)
     if cause is None:
         raise StartupError(message)
     raise StartupError(message) from cause
+
+
+def _instance_lock_paths(cfg: Config) -> tuple[Path, Path]:
+    """The lock and its refusal marker, both beside `DB_PATH` (§10)."""
+    base = str(cfg.db_path)
+    return Path(base + _LOCK_SUFFIX), Path(base + _MARKER_SUFFIX)
+
+
+def _try_lock(lock_path: Path) -> int | None:
+    """Take an exclusive non-blocking `flock`, or return `None` if it is held.
+
+    `flock` (`LOCK_EX | LOCK_NB`), deliberately, and not `fcntl.lockf`: `flock`
+    locks belong to the *open file description*, so two acquisitions within one
+    process contend exactly as two processes do, which is what makes this guard
+    testable at all — in one process, with no subprocess and no timing window.
+    POSIX record locks belong to the process, would be granted twice inside one
+    process, and are dropped by *any* `close()` of *any* descriptor on the file.
+
+    Closing our own descriptor on the contended path releases nothing of the
+    holder's, for the same reason.
+
+    The lock is on a file beside `DB_PATH` and never on the database itself:
+    `PRAGMA locking_mode = EXCLUSIVE` is incompatible with WAL and would lock
+    out `scripts/deploy/export_health.py` and `update.sh`'s read-only
+    in-flight-order query.
+
+    Synchronous on purpose, and called from an `async` function: these are two
+    local filesystem calls made once, before the loops exist, and the contract
+    describes them in exactly these terms. Only `BlockingIOError` — the
+    contended case — is handled; any other `OSError` is a real filesystem fault
+    and belongs to the rule 15 boundary, which alerts and names it.
+    """
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _read_marker(marker_path: Path) -> datetime | None:
+    """The instant of the first refusal of this condition, or `None`.
+
+    Absent, unreadable, malformed and naive all read as `None`, which is the
+    loud direction (step 2c): a corrupt marker must never be able to silence
+    the channel, and neither must a clock that moved backwards — an instant in
+    the future is rejected by the window check in `_claim_refusal_alert`.
+    """
+    try:
+        raw = marker_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        recorded = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return recorded if recorded.tzinfo is not None else None
+
+
+def _claim_refusal_alert(marker_path: Path, moment: datetime) -> bool:
+    """Decide whether this refusal alerts, and record the first one if it does.
+
+    **The marker is deliberately not rewritten on a repeat refusal.** The
+    ageing window is measured from the *first* refusal of a condition, not the
+    most recent one. Refreshing it on every retry would push the instant
+    forward every 30 seconds under exactly the `restart: unless-stopped` loop
+    this rule exists for, making the age-out unreachable and turning "alert
+    once per condition" into "alert once, ever" — a latch whose reset is
+    written down and cannot fire.
+
+    A marker that cannot be written alerts anyway: it is an anti-spam device
+    and is never a precondition for the refusal.
+    """
+    recorded = _read_marker(marker_path)
+    if recorded is not None and timedelta() <= moment - recorded <= _MARKER_AGE_OUT:
+        _LOG.warning(
+            "instance lock refused again; owner alert suppressed, first refusal "
+            "of this condition recorded at %s",
+            recorded.isoformat(),
+            extra={"first_refusal_at": recorded.isoformat()},
+        )
+        return False
+    try:
+        marker_path.write_text(moment.isoformat(), encoding="utf-8")
+    except OSError as exc:
+        _LOG.warning(
+            "could not write the instance lock refusal marker at %s: %s",
+            marker_path,
+            exc,
+        )
+    return True
+
+
+def _clear_marker(marker_path: Path) -> None:
+    """Reset (1): holding the lock is the proof that there is only one instance.
+
+    The primary reset, and reachable by construction — every normal recovery
+    passes through it: the operator kills the stray process, the container is
+    replaced, the host reboots. `scripts/ci/check_latches.py` inspects
+    module-level booleans and is structurally blind to a file latch, so a green
+    run there says nothing whatever about this; the reset is enforced by the
+    contract and by the §3.2 cases that exercise it, and by nothing else.
+
+    No `except` here: the directory has just accepted an `os.open` with
+    `O_CREAT`, so a failure to unlink is a real filesystem fault and belongs to
+    the rule 15 boundary rather than to a swallow.
+    """
+    marker_path.unlink(missing_ok=True)
+
+
+async def _take_instance_lock(cfg: Config) -> None:
+    """Steps 2b and 2c: refuse to be the second bot on this `DB_PATH`.
+
+    The submission locks in `execution.orders` are `asyncio.Lock` objects
+    rebuilt per event loop; they serialise coroutines inside one loop and are
+    invisible to a second process. Two instances against one `DB_PATH`
+    therefore both pass `_already_open`, both `record_submitting` with two
+    different `uuid4()` keys, and both `post_market_order`: **two real market
+    buys reach the exchange**, and only then does the second `open_row` violate
+    `idx_positions_one_open` and halt, after the money has moved. The
+    idempotency key cannot close this — it deduplicates a retry of one intent,
+    and two instances form two independent intents.
+
+    Runs after `logging_setup.configure`, so the refusal is redacted and
+    structured and `startup_failed` is emittable, and before step 3, so a
+    refused instance opens no database, makes no broker call and places no
+    order. This is a held lock and not a periodic check: a check at startup
+    would say nothing about an instance that starts a minute later.
+    """
+    lock_path, marker_path = _instance_lock_paths(cfg)
+    fd = _try_lock(lock_path)
+    if fd is None:
+        # The marker is claimed before the alert, so the instant recorded is
+        # the one the ageing window is measured from.
+        notify = _claim_refusal_alert(marker_path, now())
+        await _abort(
+            "Startup aborted: another zarabot instance is already running "
+            f"against this data directory and holds {lock_path}. This instance "
+            "has opened no database, made no broker call and placed no order. "
+            "Stop the other instance before starting this one.",
+            stage="instance",
+            reason=_INSTANCE_LOCKED,
+            notify=notify,
+        )
+    global _lock_fd
+    _lock_fd = fd
+    _clear_marker(marker_path)
 
 
 def _position_id(item: dict[str, object]) -> int | None:
@@ -494,8 +673,11 @@ async def start() -> AppContext:
         [cfg.tinvest_token, cfg.telegram_bot_token, cfg.tinvest_account_id],
     )
     _log_observed_time()
-    stage = "database"
+    # 2b/2c. Before the database, so a refused instance never opens it.
+    stage = "instance"
     try:
+        await _take_instance_lock(cfg)
+        stage = "database"
         await connect(str(cfg.db_path))
         await apply(shared())
         stage = "strategies"
