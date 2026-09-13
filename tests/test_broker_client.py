@@ -220,6 +220,7 @@ class _Capture:
         # can make them disagree, which is the only way the never-cache rule
         # can be proved rather than asserted (§2.1, #46).
         self.share_lot = 10
+        self.share_currency = "rub"
         self.share_trading_status = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
         self.live_trading_status = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
         self.portfolio_positions: list[SimpleNamespace] = _default_portfolio_positions()
@@ -257,7 +258,7 @@ class _Services:
                 ticker=kwargs.get("id", "SBER"),
                 lot=self._capture.share_lot,
                 min_price_increment=decimal_to_quotation(Decimal("0.01")),
-                currency="rub",
+                currency=self._capture.share_currency,
                 trading_status=SimpleNamespace(name=self._capture.share_trading_status),
                 uid="uid-sber",
             )
@@ -1822,18 +1823,25 @@ async def test_a_write_failure_is_swallowed_and_the_instrument_returned(
 ) -> None:
     """Rule 12: an `aiosqlite.Error` never fails the read.
 
-    The table is dropped, so the insert fails the way a database that will not
-    take the row fails — not through a stubbed writer.
+    The broker reports a currency the schema's `CHECK (currency = 'RUB')`
+    refuses, so the row is rejected by the real database rather than by a
+    stubbed writer. The caller asked for metadata, not for a cache: it gets the
+    live `Instrument`, and the next call for that ticker simply misses again.
     """
-    async with db_connection.transaction() as conn:
-        await conn.execute("DROP TABLE instruments")
+    capture.share_currency = "usd"
 
     with caplog.at_level(logging.ERROR, logger="zarabot.broker.client"):
         instrument = await get_instrument("SBER")
 
     assert instrument.ticker == "SBER"
+    assert instrument.currency == "USD"
     assert instrument.lot == 10
+    assert await _row("SBER") is None
     assert [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    capture.calls.clear()
+    assert (await get_instrument("SBER")).ticker == "SBER"
+    assert len(capture.kwargs_for("share_by")) == 1
 
 
 async def test_a_type_error_from_the_write_propagates(

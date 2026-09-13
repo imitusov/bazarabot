@@ -389,31 +389,18 @@ def main() -> None:
     tables = re.findall(r"^### `(\w+)`", s5, re.M)
 
     # Tables whose ownership the spec does not state, or that nothing writes (#102).
-    KNOWN_UNOWNED_TABLES = {
-        # `halt_state`, `reconciliations` and `schema_version` left this list in
-        # spec v1.77 (#177, #102): §4 now names each table under the contract of
-        # the module that writes it, and the rulebook says in writing that a
-        # module may own its own table. `instruments` is the one left, and it is
-        # here for the opposite reason — nothing in `zarabot/` writes it, so no
-        # owner can be inferred from the code.
-        #
-        # This arm reads the CODE, not the spec. Spec v1.85 (#46) closed the
-        # documentation half: §5 names `broker.client` sole writer and sole
-        # reader, §4 carries the freshness window, the field split, the miss
-        # policy and the rule-12 write, and the v1.77 open decision about
-        # dropping the table is gone. None of that puts an `INSERT INTO
-        # instruments` in `zarabot/`, which is the only thing this check can
-        # see, so the entry stands for one more commit and deleting it here
-        # would assert a writer that does not exist yet — in a gate whose whole
-        # value is that its inventory is true.
-        #
-        # **Delete this entry in the commit that implements the writer**, which
-        # is `tasks/21-broker-client.md` re-run against spec v1.85. At that
-        # point `writers["instruments"]` resolves to `zarabot/broker/client.py`
-        # and the stale-entry arm below fails until the entry goes, so the
-        # deletion is enforced rather than remembered.
-        "instruments",  # spec v1.85 names the owner; no writer in zarabot/ yet (#46)
-    }
+    #
+    # EMPTY as of #46. `halt_state`, `reconciliations` and `schema_version` left
+    # this list in spec v1.77 (#177, #102): §4 names each table under the
+    # contract of the module that writes it, and the rulebook says in writing
+    # that a module may own its own table. `instruments` was the last entry, and
+    # it stood for a different reason — nothing in `zarabot/` wrote it, so no
+    # owner could be inferred from the code, which is all this arm reads.
+    # `broker.client` now carries the `INSERT INTO instruments`, so
+    # `writers["instruments"]` resolves and the entry became stale on that
+    # commit. It is deleted in the same one, which is what the stale-entry arm
+    # below would have forced anyway.
+    KNOWN_UNOWNED_TABLES: set[str] = set()
 
     writers: dict[str, set[str]] = {t: set() for t in tables}
     for src in pathlib.Path("zarabot").rglob("*.py"):

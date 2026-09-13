@@ -10,6 +10,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, NoReturn
 
+import aiosqlite
 from t_tech.invest import AsyncClient
 from t_tech.invest.async_services import AsyncServices
 from t_tech.invest.constants import INVEST_GRPC_API_SANDBOX
@@ -35,6 +36,7 @@ from t_tech.invest.utils import decimal_to_quotation
 
 from zarabot import clock, config
 from zarabot.config import Config
+from zarabot.db import connection as db_connection
 from zarabot.models import (
     Candle,
     Instrument,
@@ -102,6 +104,39 @@ _FEE_TYPES = frozenset(
 # and roubles are the only buying power: the schema constrains instruments to
 # RUB (migrations/001_initial.sql).
 _RUB_PREFIX = "RUB"
+
+# Fresh means the five cacheable columns were read within this window; anything
+# else is stale, and an absent row is stale. A module constant rather than a
+# `config` value: it is not an operator-tunable risk parameter, and the number
+# is chosen against the thing that invalidates the row. A corporate action — a
+# lot-size change, a step change, a ticker reassignment — carries days of
+# notice, so one day sits inside it, while a shorter window would buy nothing
+# and a longer one would let a lot-size change survive a night. A watchlist
+# ticker is read many times a session, so the window is crossed once a day per
+# ticker and never mid-session (spec v1.85, #46).
+_INSTRUMENT_MAX_AGE = timedelta(hours=24)
+
+# The lookup is by ticker, which is what `get_instrument` is given. The upsert
+# conflicts on that same column rather than on the `figi` primary key: a ticker
+# reassignment is the corporate action that changes one without the other, and
+# resolving it on the lookup key means the row that is SERVED is always the row
+# that was just rewritten.
+_INSTRUMENT_SELECT = (
+    "SELECT figi, ticker, lot, min_price_increment, currency, refreshed_at "
+    "FROM instruments WHERE ticker = ?"
+)
+_INSTRUMENT_UPSERT = (
+    "INSERT INTO instruments "
+    "(figi, ticker, lot, min_price_increment, currency, trading_status, "
+    "refreshed_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT(ticker) DO UPDATE SET "
+    "figi = excluded.figi, "
+    "lot = excluded.lot, "
+    "min_price_increment = excluded.min_price_increment, "
+    "currency = excluded.currency, "
+    "trading_status = excluded.trading_status, "
+    "refreshed_at = excluded.refreshed_at"
+)
 
 # The only state this module holds: the last accepted price per instrument,
 # which is what makes the implausible-move check possible.
@@ -374,7 +409,130 @@ def _lots_from_quote(raw: object | None) -> int:
     return int(_decimal_quote(raw))
 
 
-async def get_instrument(ticker: str) -> Instrument:
+@dataclass(frozen=True)
+class _CachedInstrument:
+    """The five cacheable columns, plus the instant they were read.
+
+    `trading_status` is deliberately absent. The column exists and is written,
+    so the row is a truthful record of one read; nothing reads it back.
+    """
+
+    figi: str
+    ticker: str
+    lot: int
+    min_price_increment: Decimal
+    currency: str
+    refreshed_at: datetime
+
+
+async def _cached_instrument(ticker: str, now: datetime) -> _CachedInstrument | None:
+    """The stored dimensions for `ticker`, or `None` when absent or stale.
+
+    Catches `DatabaseNotOpenError` and nothing wider. `db.connection.shared()`
+    raises it before `app.startup` step 3 and in every process that never opens
+    a database — `sandbox/data.py` and `scripts/research/backtest.py` both call
+    `get_instrument` on a laptop with no bot database — so the cache is skipped
+    and the live read is unaffected. That is not a degraded state and raises no
+    alert; narrowing the catch to that one class is what keeps a genuine
+    database fault loud (failure class 5).
+
+    It cannot hide a missing startup step 3 either: step 5 writes
+    `db.trading_days` and step 6 reads `db.orders`, both before the first
+    `get_instrument` any process makes, and neither catches rule 30.
+    """
+    try:
+        conn = db_connection.shared()
+    except db_connection.DatabaseNotOpenError:
+        _log.debug("no database open, so the instruments cache is skipped")
+        return None
+    cursor = await conn.execute(_INSTRUMENT_SELECT, (ticker,))
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    refreshed_at = datetime.fromisoformat(str(row["refreshed_at"]))
+    if now - refreshed_at > _INSTRUMENT_MAX_AGE:
+        return None
+    return _CachedInstrument(
+        figi=str(row["figi"]),
+        ticker=str(row["ticker"]),
+        lot=int(row["lot"]),
+        min_price_increment=Decimal(str(row["min_price_increment"])),
+        currency=str(row["currency"]),
+        refreshed_at=refreshed_at,
+    )
+
+
+async def _store_instrument(instrument: Instrument) -> None:
+    """Write the row through, and never fail the read for it (rule 12).
+
+    On `aiosqlite.Error` the failure is logged at ERROR and swallowed: the
+    caller asked for metadata, not for a cache, and the next call for that
+    ticker simply misses again. No alert is raised and none is wanted — a cache
+    that is not filling degrades nothing an operator can act on, and an alert
+    per cycle in a channel whose premise is that silence means healthy is
+    equivalent to no alert (failure class 14).
+
+    Every other exception propagates, `TypeError` and `AttributeError`
+    foremost, exactly as rule 12 was narrowed in v1.75: an analytics path is
+    where a dropped programming error survives longest.
+    """
+    try:
+        async with db_connection.transaction(critical=False) as conn:
+            await conn.execute(
+                _INSTRUMENT_UPSERT,
+                (
+                    instrument.figi,
+                    instrument.ticker,
+                    instrument.lot,
+                    str(instrument.min_price_increment),
+                    instrument.currency,
+                    instrument.trading_status,
+                    instrument.refreshed_at.isoformat(),
+                ),
+            )
+    except db_connection.DatabaseNotOpenError:
+        _log.debug("no database open, so the instruments cache is skipped")
+    except aiosqlite.Error:
+        _log.exception("could not record the instrument in the cache")
+
+
+async def _live_trading_status(figi: str) -> str:
+    """The instrument's trading status, read from the broker, on every call.
+
+    Never served from the table, whatever the row's age. The field changes
+    intraday — a volatility halt moves an instrument into a break or a discrete
+    auction inside one cycle — and `risk.gate` rejects `INSTRUMENT_NOT_TRADING`
+    on it, so a stored `NORMAL_TRADING` is the bot sizing and submitting an
+    entry into a halt. §2.1 measured it session-dependent rather than
+    instrument-dependent: every watchlist ticker reads `DEALER_NORMAL_TRADING`
+    after the main session closes, so a row refreshed in the evening would
+    serve that into the next morning's gate and reject every ticker silently
+    until it aged out (#46).
+
+    V13 measured this endpoint against the live account on SDK 1.49.1: it
+    resolves every watchlist FIGI, derives the same string `share_by` derives
+    for the same instrument in the same minute, and has 120x headroom over one
+    read per ticker per poll.
+
+    A figi that no longer resolves raises `InstrumentNotFound`, the same
+    exception `share_by` would raise for the ticker, so rule 8's mid-session
+    skip handles it unchanged.
+    """
+    conn = await _connect(method="get_instrument")
+    try:
+        response = await conn.services.market_data.get_trading_status(figi=figi)
+    except AioRequestError as exc:
+        _translate(
+            exc,
+            conn.config.tinvest_token,
+            method="get_instrument",
+            not_found=InstrumentNotFound,
+        )
+    return _trading_status(response.trading_status)
+
+
+async def _fetch_instrument(ticker: str, now: datetime) -> Instrument:
+    """One `share_by`, whose response carries every field including the status."""
     conn = await _connect(method="get_instrument")
     try:
         response = await conn.services.instruments.share_by(
@@ -398,8 +556,56 @@ async def get_instrument(ticker: str) -> Instrument:
         min_price_increment=_decimal_quote(share.min_price_increment),
         currency=str(share.currency).upper(),
         trading_status=_trading_status(share.trading_status),
-        refreshed_at=clock.now(),
+        refreshed_at=now,
     )
+
+
+async def get_instrument(ticker: str) -> Instrument:
+    """Instrument metadata: the dimensions from the cache, the status never.
+
+    Exactly one broker request, never two. A fresh row supplies `figi`,
+    `ticker`, `lot`, `min_price_increment` and `currency`, and the status is
+    read live for that figi; a stale or absent row costs one `share_by`, whose
+    response supplies every field, and is written through before the
+    `Instrument` is returned.
+
+    A cache miss is not an error. A ticker absent from `instruments`, or
+    present and stale, is the ordinary first read of that ticker: fetch, store,
+    return. There is no preload step and no background refresher — a periodic
+    job is one more supervised loop and one more schedule a restart can step
+    over (failure class 15), for a value only ever wanted at the moment it is
+    used. A miss at startup and a miss mid-cycle go through this one function
+    and neither refuses.
+
+    A broker failure is never answered from the table. When `share_by` fails on
+    a miss, or the status read fails on a hit, the typed exception is raised
+    and rule 8's mid-session skip and rule 9's absorption in `market.data`
+    handle it as they do today. A caller that skips a ticker for one cycle is
+    correct; a caller sizing an entry on a status nobody confirmed is not, and
+    outage survival is the one use this durable cache forbids.
+    """
+    now = clock.now()
+    cached = await _cached_instrument(ticker, now)
+    if cached is not None:
+        status = await _live_trading_status(cached.figi)
+        _note_success("get_instrument")
+        return Instrument(
+            figi=cached.figi,
+            ticker=cached.ticker,
+            lot=cached.lot,
+            min_price_increment=cached.min_price_increment,
+            currency=cached.currency,
+            trading_status=status,
+            # The instant the DIMENSIONS were read, never the status read: a
+            # caller reading this is asking how old the lot size is, which is
+            # the only question the field can answer. The row is not rewritten
+            # on this branch for the same reason — a fresh status is not
+            # evidence that the dimensions were re-read.
+            refreshed_at=cached.refreshed_at,
+        )
+    instrument = await _fetch_instrument(ticker, now)
+    await _store_instrument(instrument)
+    return instrument
 
 
 async def get_candles(
