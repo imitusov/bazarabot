@@ -529,6 +529,16 @@ Rows with `trade_date` in `[start, end]`, oldest first. Empty list when none.
 Access before `connect` or after `disconnect` raises `DatabaseNotOpenError`
 (rule 30).
 
+**`async update_intraday(trade_date: date, closing_equity: Decimal, cash: Decimal, realised_pnl: Decimal, unrealised_pnl: Decimal, open_positions: int, orders_placed: int) → None`**
+Updates exactly those six columns on the row for `trade_date`, and does nothing
+when that date has no row. `app.loops` step 4 calls it every in-session cycle,
+so the last call of a trading day is that day's close (v1.86, #17).
+`opening_equity` and `benchmark_value` are deliberately unreachable from here:
+the baseline is written once by `write_daily` and `benchmark_value` has no
+producer. Write failures are logged at ERROR and not propagated (rule 12).
+Access before `connect` or after `disconnect` raises `DatabaseNotOpenError`
+(rule 30).
+
 ## `zarabot.risk.sizing`
 
 Pure. No I/O. 95% coverage required.
