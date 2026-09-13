@@ -434,6 +434,13 @@ none. Raises `ValueError` on naive datetimes.
 **`async list_unresolved() → list[OrderRecord]`**
 `SUBMITTING` or `SUBMITTED`, oldest first. Empty list when none.
 
+**`async count_for_day(day: date) → int`**
+Order rows whose `created_at` has `clock.moscow_date(created_at) == day`, every
+status and both intents — what the bot *tried* to do, which is what
+`daily_snapshots.orders_placed` records. `0` for a day with no rows, never
+`None`. Timestamps are stored UTC, so the Moscow date is derived, never a
+string prefix (v1.86, #17).
+
 ## `zarabot.db.stop_orders`
 
 Sole owner of `stop_orders` rows. All SQL runs on `db.connection.shared()`.
