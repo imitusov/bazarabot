@@ -23,7 +23,7 @@ from zarabot.db.connection import (
     transaction,
 )
 from zarabot.db.migrations import apply
-from zarabot.db.positions import get, list_open, set_stop_protection
+from zarabot.db.positions import get, list_open, set_stop_protection, update_lots
 from zarabot.db.positions import open as open_position
 from zarabot.models import (
     ExitTrigger,
@@ -240,13 +240,20 @@ def _stop(
     price: Decimal = Decimal("95"),
     stop_id: str = "ex-stop",
     created_at: datetime = NOW,
+    lots: int = 2,
 ) -> StopOrderRecord:
+    """A live stop as `broker.client.list_stop_orders` returns one.
+
+    `position_id` is 0 and `lots` is the broker's `lots_requested` read back —
+    the same number `post_stop_loss` was given as `quantity`, which is what
+    makes an exact comparison against the position's count legitimate.
+    """
     return StopOrderRecord(
         key=stop_id,
         stop_order_id=stop_id,
         position_id=0,
         ticker=ticker,
-        lots=2,
+        lots=lots,
         stop_price=price,
         status=StopOrderStatus.ACTIVE,
         created_at=created_at,
@@ -561,6 +568,249 @@ async def test_lot_mismatch_writes_broker_count(env: _Broker) -> None:
     assert stored.lots == 1
     assert stored.status == "OPEN"
     assert env.alerts
+
+
+async def _raw_entry_price(position_id: int) -> str:
+    """The stored text of `entry_price`, not a Decimal round trip.
+
+    §3.2 asks for byte-for-byte, so the column is read as it sits: a re-derived
+    price that happened to compare equal as a Decimal would still be a number
+    this module invented (rule 33).
+    """
+    cursor = await shared().execute(
+        "SELECT entry_price FROM positions WHERE id = ?", (position_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def test_broker_holding_above_the_local_row_reports_a_missized_stop(
+    env: _Broker,
+) -> None:
+    """Spec §3.2 (v1.90, #233): the half-protected state is a finding.
+
+    The row agreed with the broker at 4, `stop_protection` read `EXCHANGE`, the
+    exchange stop covered 2, and `lifecycle.exits` fires nothing for an
+    `EXCHANGE` position — so nothing was watching two of the four lots.
+    """
+    position = await _open_local()
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "ex-stop")
+    env.holdings = (_broker_position(lots=4),)
+    env.stops = [_stop(lots=2)]
+
+    report = await reconcile(NOW)
+
+    types = [item["type"] for item in report.adjustments]
+    assert "LOTS_ADJUSTED" in types
+    missized = next(
+        item for item in report.adjustments if item["type"] == "STOP_MISSIZED"
+    )
+    assert missized["ticker"] == "SBER"
+    assert missized["position_id"] == position.id
+    assert missized["position_lots"] == 4
+    assert missized["stop_lots"] == 2
+
+
+async def test_missized_stop_is_re_reported_when_the_counts_already_agree(
+    env: _Broker,
+) -> None:
+    """Spec §3.2 (v1.90, #233): the finding is derived from live state.
+
+    A process death — or a step 7 failure on an earlier adjustment — between
+    the lot write committing and the remedy running leaves exactly this
+    database. On this pass the counts agree, so an implementation that keyed
+    the remedy to `LOTS_ADJUSTED` reports nothing and the undersized stop
+    stands forever with nothing looking at it. That is #233, reachable again
+    after its own fix.
+    """
+    await _open_local()
+    env.holdings = (_broker_position(lots=4),)
+    env.stops = [_stop(lots=2)]
+
+    first = await reconcile(NOW)
+    second = await reconcile(NOW)
+
+    assert any(item["type"] == "LOTS_ADJUSTED" for item in first.adjustments)
+    types = [item["type"] for item in second.adjustments]
+    assert "LOTS_ADJUSTED" not in types
+    missized = next(
+        item for item in second.adjustments if item["type"] == "STOP_MISSIZED"
+    )
+    assert missized["position_lots"] == 4
+    assert missized["stop_lots"] == 2
+
+
+async def test_stop_covering_more_than_the_broker_holds_is_missized(
+    env: _Broker,
+) -> None:
+    """Spec §3.2: both directions are found.
+
+    An oversized stop would try to sell shares the account does not hold —
+    rule 24's hazard arriving as a quantity rather than as a missing position.
+    """
+    position = await _open_local()
+    await update_lots(position.id, 4)
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "ex-stop")
+    env.holdings = (_broker_position(lots=2),)
+    env.stops = [_stop(lots=4)]
+
+    report = await reconcile(NOW)
+
+    missized = next(
+        item for item in report.adjustments if item["type"] == "STOP_MISSIZED"
+    )
+    assert missized["position_lots"] == 2
+    assert missized["stop_lots"] == 4
+
+
+async def test_stop_covering_the_position_exactly_is_not_missized(
+    env: _Broker,
+) -> None:
+    """Spec §3.2: the comparison cannot become a per-restart false positive.
+
+    The instrument's lot size is greater than one, so lots and units differ —
+    and the count still matches, because the number `post_stop_loss` sends as
+    `quantity` is the number `list_stop_orders` reads back from
+    `lots_requested`, whatever unit the broker keeps internally.
+    """
+    position = await _open_local()
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "ex-stop")
+    assert _instrument().lot > 1
+    env.holdings = (_broker_position(lots=2),)
+    env.stops = [_stop(lots=2)]
+
+    report = await reconcile(NOW)
+
+    assert not any(item["type"] == "STOP_MISSIZED" for item in report.adjustments)
+
+
+async def test_a_stop_both_mispriced_and_missized_is_reported_once(
+    env: _Broker,
+) -> None:
+    """Spec §3.2: one cancel-and-re-post per fault.
+
+    `replace_stop` corrects price and size in one call; two findings would have
+    step 7 unprotect the position twice for one fault.
+    """
+    position = await _open_local()
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "ex-stop")
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("94.99"), lots=1)]
+
+    report = await reconcile(NOW)
+
+    types = [item["type"] for item in report.adjustments]
+    assert "STOP_MISPRICED" in types
+    assert "STOP_MISSIZED" not in types
+
+
+async def test_missized_stop_is_still_reported_when_the_increment_is_unreadable(
+    env: _Broker,
+) -> None:
+    """Spec §3.2: rule 38 withholds the price-based findings and no others.
+
+    The size comparison reads no price, so it is not entitled to the blind
+    path — two integers from one round trip are a measured difference.
+    """
+    position = await _open_local()
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, "ex-stop")
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("90"), lots=1)]
+
+    async def _unavailable(ticker: str) -> Instrument:
+        raise BrokerUnavailable("instrument metadata down")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("zarabot.broker.reconcile.get_instrument", _unavailable)
+    try:
+        report = await reconcile(NOW)
+    finally:
+        monkeypatch.undo()
+
+    types = [item["type"] for item in report.adjustments]
+    assert "STOP_MISSIZED" in types
+    assert "STOP_MISPRICED" not in types
+    assert "STOP_ADOPTABLE" not in types
+
+
+async def test_missized_stop_on_a_local_position_is_never_adoptable(
+    env: _Broker,
+) -> None:
+    """Spec §3.2: adoption cannot hand sole protection to a partial stop.
+
+    The v1.47 defect one field along — there the unverified quantity was the
+    price, here it is the size. Adopting sets `stop_protection = EXCHANGE`,
+    after which `lifecycle.exits` stops watching the position's own stop.
+    """
+    position = await _open_local()
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop(price=Decimal("94.995"), lots=1)]
+
+    report = await reconcile(NOW)
+
+    types = [item["type"] for item in report.adjustments]
+    assert "STOP_MISSIZED" in types
+    assert "STOP_ADOPTABLE" not in types
+    reloaded = await get(position.id)
+    assert reloaded is not None
+    assert reloaded.stop_protection is StopProtection.LOCAL
+
+
+async def test_lot_increase_alert_names_the_cost_basis_consequence(
+    env: _Broker,
+) -> None:
+    """Spec §3.2: the inaccuracy reaches the only party who can explain it.
+
+    The added lots are carried at the recorded entry price, so realised P&L
+    for this position will be wrong by their true cost. The feed cannot say
+    which buys belong to this position, so the number is not re-derived — it is
+    recorded and told.
+    """
+    await _open_local()
+    env.holdings = (_broker_position(lots=4),)
+
+    await reconcile(NOW)
+
+    text = next(item for item in env.alerts if "lots adjusted" in item)
+    assert "2" in text
+    assert "4" in text
+    assert "entry price" in text
+    assert "P&L" in text
+
+
+async def test_lot_decrease_alert_carries_no_cost_basis_note(env: _Broker) -> None:
+    """Spec §3.2: a shrink is not reported as a broken basis it does not have.
+
+    The per-lot cost basis of the lots that remain is unchanged.
+    """
+    await _open_local()
+    env.holdings = (_broker_position(lots=1),)
+
+    await reconcile(NOW)
+
+    text = next(item for item in env.alerts if "lots adjusted" in item)
+    assert "entry price" not in text
+    assert "P&L" not in text
+
+
+async def test_lot_increase_leaves_the_entry_price_and_reads_no_operations(
+    env: _Broker,
+) -> None:
+    """Spec §3.2: the recorded price is not re-derived.
+
+    Rule 33 forbids inventing it, and the operations feed cannot supply it: any
+    buy in a window reaching before `entry_at` may be the owner's own, which is
+    rule 32's own reasoning.
+    """
+    position = await _open_local()
+    before = await _raw_entry_price(position.id)
+    env.holdings = (_broker_position(lots=4),)
+
+    await reconcile(NOW)
+
+    assert await _raw_entry_price(position.id) == before
+    assert "get_operations" not in env.calls
 
 
 async def test_reconcile_is_idempotent(env: _Broker) -> None:

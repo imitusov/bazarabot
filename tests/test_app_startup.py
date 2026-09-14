@@ -773,6 +773,396 @@ async def test_report_with_only_a_stop_duplicate_is_still_applied(
     assert cancelled == ["dup-1"]
 
 
+class _FakeExchange:
+    """The stop orders the broker actually holds.
+
+    Every record is shaped the way `broker.client.list_stop_orders` builds one
+    — `position_id` 0, `key` the `order_request_id` the bot sent, `lots` the
+    `lots_requested` read back — because that is the shape that reaches
+    `app.startup`. `post_stop_loss` returns what the real one returns, so the
+    stop set below is the account's, not a record of which function was called.
+    """
+
+    def __init__(self) -> None:
+        from zarabot.models import StopOrderRecord
+
+        self.live: dict[str, StopOrderRecord] = {}
+        self.placed: list[int] = []
+        self.cancelled: list[str] = []
+        self.reject = False
+
+    def seed(self, stop_order_id: str, key: str, lots: int) -> None:
+        from decimal import Decimal
+
+        from zarabot.models import StopOrderRecord, StopOrderStatus
+
+        self.live[stop_order_id] = StopOrderRecord(
+            key=key,
+            stop_order_id=stop_order_id,
+            position_id=0,
+            ticker="SBER",
+            lots=lots,
+            stop_price=Decimal("95"),
+            status=StopOrderStatus.ACTIVE,
+            created_at=NOW,
+            settled_at=None,
+        )
+
+    async def list_stop_orders(self) -> list[object]:
+        return list(self.live.values())
+
+    async def cancel_stop_order(self, stop_order_id: str) -> None:
+        self.cancelled.append(stop_order_id)
+        self.live.pop(stop_order_id, None)
+
+    async def post_stop_loss(
+        self, key: str, figi: str, lots: int, stop_price: Decimal
+    ) -> object:
+        from zarabot.broker.client import StopOrderRejected
+        from zarabot.models import StopOrderRecord, StopOrderStatus
+
+        self.placed.append(lots)
+        if self.reject:
+            raise StopOrderRejected("rejected")
+        stop_order_id = f"ex-new-{len(self.placed)}"
+        record = StopOrderRecord(
+            key=key,
+            stop_order_id=stop_order_id,
+            position_id=0,
+            ticker="SBER",
+            lots=lots,
+            stop_price=stop_price,
+            status=StopOrderStatus.ACTIVE,
+            created_at=NOW,
+            settled_at=None,
+        )
+        self.live[stop_order_id] = record
+        return record
+
+
+async def _seed_half_protected(path: Path) -> int:
+    """A position at the corrected 4 lots whose live stop still covers 2.
+
+    This is the database #233 leaves behind: reconciliation grew the row to the
+    broker's count, and the standing stop was posted for the count the row held
+    when it was placed.
+    """
+    from decimal import Decimal
+
+    from zarabot.db.connection import transaction
+    from zarabot.db.positions import open as open_position
+    from zarabot.db.positions import set_stop_protection, update_lots
+    from zarabot.db.stop_orders import activate, record_placing
+    from zarabot.models import OrderRecord, OrderStatus, Side, Signal, StopProtection
+
+    await connect(str(path))
+    try:
+        await apply(shared())
+        async with transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO orders (
+                    key, ticker, figi, side, intent, lots, status,
+                    filled_lots, filled_price, created_at, settled_at
+                ) VALUES (
+                    'entry-1', 'SBER', 'FIGI-SBER', 'BUY', 'ENTRY', 2,
+                    'FILLED', 2, '100.00', ?, ?
+                )
+                """,
+                (NOW.isoformat(), NOW.isoformat()),
+            )
+        signal = Signal(
+            ticker="SBER",
+            strategy="ma_crossover",
+            side=Side.BUY,
+            generated_at=NOW,
+            reference_price=Decimal("100"),
+        )
+        order = OrderRecord(
+            key="entry-1",
+            ticker="SBER",
+            figi="FIGI-SBER",
+            side=Side.BUY,
+            intent="ENTRY",
+            lots=2,
+            status=OrderStatus.FILLED,
+            filled_lots=2,
+            filled_price=Decimal("100"),
+            commission=None,
+            broker_reason=None,
+            created_at=NOW,
+            settled_at=NOW,
+        )
+        position = await open_position(
+            signal,
+            order,
+            _instrument_of("SBER"),
+            Decimal("95"),
+            Decimal("110"),
+            NOW,
+        )
+        await update_lots(position.id, 4)
+        await record_placing("old-stop", position.id, "SBER", 2, Decimal("95"))
+        await activate("old-stop", "ex-old")
+        await set_stop_protection(position.id, StopProtection.EXCHANGE, "old-stop")
+        return position.id
+    finally:
+        await disconnect()
+
+
+def _install_exchange(
+    monkeypatch: pytest.MonkeyPatch, exchange: _FakeExchange, calls: list[str]
+) -> None:
+    """Wire the fake account in at `broker.client`, the mocking seam.
+
+    `execution.orders` is deliberately NOT stubbed: the remedy has to run for
+    real, because the assertion is the resulting live stop set.
+    """
+
+    async def _orders_alert(text: str, urgent: bool = False) -> None:
+        calls.append(f"alert:{text}")
+
+    monkeypatch.setattr(
+        "zarabot.app.startup.list_stop_orders", exchange.list_stop_orders
+    )
+    monkeypatch.setattr(
+        "zarabot.execution.orders.cancel_stop_order", exchange.cancel_stop_order
+    )
+    monkeypatch.setattr(
+        "zarabot.execution.orders.post_stop_loss", exchange.post_stop_loss
+    )
+    monkeypatch.setattr("zarabot.execution.orders.alert", _orders_alert)
+
+
+async def test_stop_missized_leaves_one_live_stop_covering_the_position(
+    env: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §3.2 (v1.90, #233): the remedy restores coverage for the true size.
+
+    The assertions are the live stop set and its lot count, never that
+    `replace_stop` was called: an implementation that cancelled and placed
+    nothing, or placed a second stop beside the first, fails here rather than
+    on a call record.
+    """
+    from zarabot.app.startup import start
+    from zarabot.db.positions import get as get_position
+
+    position_id = await _seed_half_protected(tmp_path / "zarabot.db")
+    exchange = _FakeExchange()
+    exchange.seed("ex-old", "old-stop", 2)
+    _install_exchange(monkeypatch, exchange, env)
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "STOP_MISSIZED",
+                "ticker": "SBER",
+                "position_id": position_id,
+                "position_lots": 4,
+                "stop_lots": 2,
+            }
+        ),
+        env,
+    )
+
+    await start()
+
+    live = list(exchange.live.values())
+    assert len(live) == 1, live
+    assert live[0].lots == 4
+    assert "ex-old" not in exchange.live
+    assert exchange.cancelled == ["ex-old"]
+    stored = await get_position(position_id)
+    assert stored is not None
+    assert stored.lots == 4
+
+
+async def test_report_with_only_a_stop_missized_is_still_applied(
+    env: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §3.2: the remedy gate must not skip a lone `STOP_MISSIZED`.
+
+    That gate is what dropped `STOP_DUPLICATE` in #35.
+    """
+    from zarabot.app.startup import start
+
+    position_id = await _seed_half_protected(tmp_path / "zarabot.db")
+    exchange = _FakeExchange()
+    exchange.seed("ex-old", "old-stop", 2)
+    _install_exchange(monkeypatch, exchange, env)
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "STOP_MISSIZED",
+                "ticker": "SBER",
+                "position_id": position_id,
+                "position_lots": 4,
+                "stop_lots": 2,
+            }
+        ),
+        env,
+    )
+
+    await start()
+
+    assert exchange.placed == [4]
+    assert [stop.lots for stop in exchange.live.values()] == [4]
+
+
+async def test_lots_adjusted_beside_stop_missized_replaces_the_stop_once(
+    env: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §3.2: the two types are not both wired to a remedy.
+
+    `LOTS_ADJUSTED` owns the row correction and `STOP_MISSIZED` owns the
+    protection. A second replacement would cancel the stop the first just
+    placed.
+    """
+    from zarabot.app.startup import start
+
+    position_id = await _seed_half_protected(tmp_path / "zarabot.db")
+    exchange = _FakeExchange()
+    exchange.seed("ex-old", "old-stop", 2)
+    _install_exchange(monkeypatch, exchange, env)
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "LOTS_ADJUSTED",
+                "ticker": "SBER",
+                "position_id": position_id,
+                "from": 2,
+                "to": 4,
+            },
+            {
+                "type": "STOP_MISSIZED",
+                "ticker": "SBER",
+                "position_id": position_id,
+                "position_lots": 4,
+                "stop_lots": 2,
+            },
+        ),
+        env,
+    )
+
+    await start()
+
+    assert exchange.placed == [4]
+    assert exchange.cancelled == ["ex-old"]
+    assert len(exchange.live) == 1
+
+
+async def test_lots_adjusted_alone_is_recognised_and_does_not_stop_startup(
+    env: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §3.2: it is still a known type after leaving the self-resolving group.
+
+    The group it sat in is what #233 was; removing it from every group would
+    turn the loud path into a false alarm on every lot correction.
+    """
+    from zarabot.app.startup import start
+
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "LOTS_ADJUSTED",
+                "ticker": "SBER",
+                "position_id": 1,
+                "from": 2,
+                "to": 4,
+            }
+        ),
+        env,
+    )
+
+    context = await start()
+
+    assert context is not None
+    alerts = [item for item in env if item.startswith("alert:")]
+    assert not [text for text in alerts if "cannot act on" in text], alerts
+
+
+async def test_missized_replacement_rejected_three_times_degrades_to_local(
+    env: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Spec §3.2 (v1.90, #233): rule 23's degrade, not a halt.
+
+    Before the remedy: the row and the broker agree at 4, the exchange stop
+    covers 2, `stop_protection` reads `EXCHANGE`, and `lifecycle.exits` fires
+    nothing — nothing is watching two of the four lots, with no alert standing.
+    After a failed replacement: no exchange stop, protection `LOCAL`, the bot
+    watching the whole holding at the corrected size, and an alert sent.
+
+    The last claim is asserted rather than described: the real, pure
+    `lifecycle.exits.evaluate` is called on the position the database now
+    holds.
+    """
+    from datetime import date
+    from decimal import Decimal
+
+    from zarabot.app.startup import AppContext, start
+    from zarabot.db.positions import get as get_position
+    from zarabot.lifecycle.exits import evaluate
+    from zarabot.models import ExitTrigger, SessionInfo, StopProtection
+
+    position_id = await _seed_half_protected(tmp_path / "zarabot.db")
+    exchange = _FakeExchange()
+    exchange.seed("ex-old", "old-stop", 2)
+    exchange.reject = True
+    _install_exchange(monkeypatch, exchange, env)
+    _install_report(
+        monkeypatch,
+        _report_of(
+            {
+                "type": "STOP_MISSIZED",
+                "ticker": "SBER",
+                "position_id": position_id,
+                "position_lots": 4,
+                "stop_lots": 2,
+            }
+        ),
+        env,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="zarabot.execution.orders"):
+        context = await start()
+
+    assert isinstance(context, AppContext)
+    assert exchange.live == {}
+    stored = await get_position(position_id)
+    assert stored is not None
+    assert stored.status == "OPEN"
+    assert stored.lots == 4
+    assert stored.stop_protection is StopProtection.LOCAL
+    assert stored.stop_order_key is None
+    alerts = [item for item in env if item.startswith("alert:")]
+    assert [text for text in alerts if "unplaceable" in text], alerts
+    assert _events_in(caplog, "stop_protection_degraded")
+
+    session = SessionInfo(
+        trade_date=date(2026, 3, 16),
+        start=datetime(2026, 3, 16, 6, 50, tzinfo=UTC),
+        end=datetime(2026, 3, 16, 15, 50, tzinfo=UTC),
+        is_trading_day=True,
+    )
+    assert (
+        evaluate(
+            stored,
+            stored.stop_price - Decimal("1"),
+            NOW,
+            session,
+            None,
+            context.config,
+        )
+        is ExitTrigger.STOP_LOSS
+    )
+
+
 async def test_unrecognised_adjustment_type_alerts(
     env: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
