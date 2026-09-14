@@ -117,7 +117,9 @@ def test_empty_return_type_fails(tmp_path: Path) -> None:
 
 def test_untyped_parameter_fails(tmp_path: Path) -> None:
     check = _load()
-    spec = _SPEC.replace("build(ticker: str, lots: int = 1)", "build(ticker, lots: int)")
+    spec = _SPEC.replace(
+        "build(ticker: str, lots: int = 1)", "build(ticker, lots: int)"
+    )
     code, lines = check.evaluate(_tree(tmp_path, spec=spec), known={})
     assert code == 1
     assert any("ticker" in line for line in _fails(lines)), lines

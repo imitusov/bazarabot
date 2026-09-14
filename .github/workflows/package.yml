@@ -50,6 +50,10 @@ jobs:
       - name: Test-contract reachability
         run: python scripts/ci/check_test_contracts.py
 
+      # Issue #118 gate 1's format half (#116). Own step, same reason.
+      - name: Signature format
+        run: python scripts/ci/check_signature_format.py
+
       # Issue #118 sub-group delivery. Own step, for the same reason.
       - name: Sub-group delivery
         run: python scripts/ci/check_subgroup_delivery.py
