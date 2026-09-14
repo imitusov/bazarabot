@@ -67,6 +67,10 @@ _SUBGROUP = """\
 - A partial-fill case.
 - Another partial-fill case."""
 
+_TWO_OWNERS = _SUBGROUP.replace(
+    "(`execution.orders`)", "(`execution.orders`, `broker.reconcile`)"
+)
+
 
 def _load():
     spec = importlib.util.spec_from_file_location("check_subgroup_delivery", _CHECK)
@@ -104,6 +108,15 @@ def _tree(
     for name, text in files.items():
         (out / name).write_text(text, encoding="utf-8")
     return tmp_path
+
+
+_TWO_OWNER_TASKS = {
+    "01-models.md": "## Test cases\n\n- A case.\n",
+    "26-execution-orders.md": (
+        "## Test cases\n\n- An entry case.\n\n" + _TWO_OWNERS + "\n"
+    ),
+    "27-broker-reconcile.md": "## Test cases\n\n- A reconciliation case.\n",
+}
 
 
 def _fails(lines: list[str]) -> list[str]:
@@ -156,13 +169,14 @@ def test_subgroup_naming_a_second_module_must_reach_it_too(tmp_path: Path) -> No
         "**partial fills** (`execution.orders`)",
         "**partial fills** (`execution.orders`, `broker.reconcile`)",
     )
-    code, lines = check.evaluate(
-        _tree(tmp_path, spec=spec), prose=_PROSE, undelivered={}
-    )
+    tree = _tree(tmp_path, spec=spec, tasks=_TWO_OWNER_TASKS)
+    code, lines = check.evaluate(tree, prose=_PROSE, undelivered={})
     assert code == 1
     assert any(
         "partial fills" in line and "broker.reconcile" in line for line in _fails(lines)
     ), lines
+    # The owner that DID receive the cases must not be reported.
+    assert not any("execution.orders" in line for line in _fails(lines)), lines
 
 
 def test_subgroup_naming_no_module_fails(tmp_path: Path) -> None:
@@ -301,9 +315,8 @@ def test_allowlisted_undelivered_subgroup_passes_with_a_pass_line(
         "**partial fills** (`execution.orders`, `broker.reconcile`)",
     )
     allow = {"partial fills::broker.reconcile": "#999 — a real, recorded gap"}
-    code, lines = check.evaluate(
-        _tree(tmp_path, spec=spec), prose=_PROSE, undelivered=allow
-    )
+    tree = _tree(tmp_path, spec=spec, tasks=_TWO_OWNER_TASKS)
+    code, lines = check.evaluate(tree, prose=_PROSE, undelivered=allow)
     assert code == 0, lines
     assert any(
         "allowlisted" in line and "broker.reconcile" in line for line in lines
