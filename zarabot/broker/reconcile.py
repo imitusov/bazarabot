@@ -256,11 +256,39 @@ async def _recognising_orders() -> dict[str, str]:
 
 
 async def _adjust_lots(local: Position, broker_lots: int) -> dict[str, object]:
+    """Write the broker's count, and say what it costs when the count grows.
+
+    The entry price is deliberately not re-derived (v1.90, #233). The added
+    lots are carried at the original `entry_price`, so realised P&L for this
+    position will be wrong by their true cost — but the operations feed cannot
+    say which buys belong to this position, and any buy in a window reaching
+    before `entry_at` may be the owner's own. That is rule 32's own reasoning,
+    and inventing the number is rule 33.
+
+    What is owed instead is that the inaccuracy is on the record rather than
+    silent: `db.positions.update_lots` writes the `position_events` row, the
+    `reconciliations` row carries `from`/`to`, and this alert says it in words.
+    Only on growth — a shrink leaves the per-lot cost basis of the lots that
+    remain correct, and reporting a broken basis it does not have would train
+    the owner to ignore the channel.
+
+    The stop this write leaves covering the wrong quantity is **not** remedied
+    from here and is not this adjustment's to carry: `_stop_adjustments`
+    re-derives `STOP_MISSIZED` from live state on every pass, so the finding
+    survives a crash between this write committing and the remedy running.
+    """
     previous = local.lots
     await update_lots(local.id, broker_lots)
+    note = ""
+    if broker_lots > previous:
+        note = (
+            f"; the added lots are carried at the recorded entry price "
+            f"{local.entry_price}, so realised P&L for this position will be "
+            f"wrong by their true cost"
+        )
     await alert(
         f"lots adjusted for {local.ticker} id={local.id} "
-        f"from {previous} to {broker_lots}"
+        f"from {previous} to {broker_lots}{note}"
     )
     return {
         "type": "LOTS_ADJUSTED",
@@ -379,13 +407,14 @@ def _stop_adjustments(
             for stop in ticker_stops:
                 claimed.add(_identifier(stop))
             increment = increments.get(position.ticker)
-            if increment is None:
-                # Neither price-based finding is reported: the price comparison
-                # is the guard on adoption as much as on replacement, and it is
-                # the price that could not be read (rule 38). The position stays
-                # LOCAL and lifecycle.exits keeps watching its own stop.
-                pass
-            elif _is_mispriced(kept.stop_price, position.stop_price, increment):
+            # An increment that could not be read withholds the two price-based
+            # findings and no others: the price comparison is the guard on
+            # adoption as much as on replacement (rule 38). The position stays
+            # LOCAL and lifecycle.exits keeps watching its own stop.
+            mispriced = increment is not None and _is_mispriced(
+                kept.stop_price, position.stop_price, increment
+            )
+            if mispriced:
                 adjustments.append(
                     {
                         "type": "STOP_MISPRICED",
@@ -395,7 +424,38 @@ def _stop_adjustments(
                         "actual": str(kept.stop_price),
                     }
                 )
-            elif (
+            elif kept.lots != position.lots:
+                # The retained stop does not cover the holding, in either
+                # direction (v1.90, #233). Judged on every pass for every open
+                # position, whatever caused the difference: this run's lot
+                # correction, an earlier run's whose remedy never fired, or a
+                # stop posted for a count this module cannot see the origin of.
+                # A finding hung off LOTS_ADJUSTED is lost the moment the
+                # process dies between the lot write and the remedy, and the
+                # undersized stop then stands with nothing looking at it.
+                #
+                # Exact, and legitimately so: `post_stop_loss` sends the bot's
+                # own count as `quantity` and `list_stop_orders` reads it back
+                # from `lots_requested`, so the number returned is the number
+                # sent whatever unit the broker keeps internally. No tolerance
+                # is invented for a difference that cannot arise from rounding.
+                #
+                # Reported only where STOP_MISPRICED is not, because both take
+                # `replace_stop`, which corrects price and size in one call —
+                # two findings would have step 7 unprotect the position twice
+                # for one fault. And it precedes the adoption branch, because
+                # adopting binds `stop_protection = EXCHANGE` and would hand
+                # sole protection to a stop covering part of the holding.
+                adjustments.append(
+                    {
+                        "type": "STOP_MISSIZED",
+                        "ticker": position.ticker,
+                        "position_id": position.id,
+                        "position_lots": position.lots,
+                        "stop_lots": kept.lots,
+                    }
+                )
+            elif increment is not None and (
                 position.stop_protection is StopProtection.LOCAL
                 or position.stop_order_key is None
             ):

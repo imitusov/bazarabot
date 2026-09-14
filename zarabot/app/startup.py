@@ -71,31 +71,51 @@ _INSTANCE_LOCKED = "INSTANCE_LOCKED"
 # reason: a local would be garbage-collected when `start()` returns, closing
 # the descriptor and releasing the lock while the bot traded on.
 _lock_fd: int | None = None
-# Types the executor acts on. `STOP_DUPLICATE` belongs here: two live stops
-# against one position is the double-sell condition, and an executor with no
-# branch for it detected, reported and then dropped it (#35).
+# Step 7 recognises three groups (spec v1.90), and the distinction matters:
+# the single "reconciliation resolves itself" set this replaced was what #233
+# was. Every type in any of the three is *known*; a type in none of them alerts.
+#
+# Group 1 — remedied here, through `execution.orders`. `STOP_DUPLICATE` belongs
+# here: two live stops against one position is the double-sell condition, and an
+# executor with no branch for it detected, reported and then dropped it (#35).
 _STOP_TYPES = frozenset(
     {
         "STOP_MISSING",
         "STOP_ORPHAN",
         "STOP_MISPRICED",
+        "STOP_MISSIZED",
         "STOP_ADOPTABLE",
         "STOP_DUPLICATE",
     }
 )
-# Types reconciliation resolves itself. They need no remedy, but they are known,
-# so they must not be reported as an adjustment the executor cannot act on.
+# Both of these take `replace_stop`, which cancels the standing stop and posts
+# one at the position's stored price for its current lot count — price and size
+# corrected together, one cancel-and-re-post per fault (spec 7c, v1.90).
+_REPLACED_TYPES = frozenset({"STOP_MISPRICED", "STOP_MISSIZED"})
+# Group 2 — acted on here, but not through `execution.orders`: step 7b turns a
+# foreign holding into a refusal to start (rule 32).
+_REFUSED_TYPES = frozenset({"FOREIGN_HOLDING"})
+# Group 3 — recognised, and correctly acted on by nobody.
 _OBSERVED_TYPES = frozenset(
     {
+        # Complete when reconciliation writes them: the reconciliation is the fix.
         "CLOSED_EXTERNALLY",
         "ADOPTED",
-        "LOTS_ADJUSTED",
-        "FOREIGN_HOLDING",
         # A position the broker no longer holds whose sale could not be found in
         # the operations feed. The shares are already gone, so there is nothing
         # for execution.orders to do; it is here so it does not trip the alert
         # reserved for a report this build genuinely cannot read (#11).
         "EXIT_UNRESOLVED",
+        # Here for a different reason, and the reason has to be written down
+        # (v1.90, #233): its row correction is complete, and the protection it
+        # disturbs is not its own remedy to carry. The same report carries
+        # `STOP_MISSIZED` for that position when the standing stop no longer
+        # covers it, derived from live state rather than from this adjustment —
+        # which is what makes the remedy survive a crash, or a step 7 failure on
+        # an earlier adjustment, between the lot write and the replacement.
+        # `LOTS_ADJUSTED` needs no branch because another type owns the
+        # consequence, not because there is no consequence.
+        "LOTS_ADJUSTED",
     }
 )
 
@@ -375,7 +395,7 @@ async def _report_unhandled(report: ReconciliationReport) -> None:
     exactly how `STOP_DUPLICATE` was lost (#35). A report the executor does not
     understand must be loud.
     """
-    known = _STOP_TYPES | _OBSERVED_TYPES
+    known = _STOP_TYPES | _REFUSED_TYPES | _OBSERVED_TYPES
     unknown = sorted(
         {
             str(item.get("type"))
@@ -407,7 +427,20 @@ async def _apply_remedies(report: ReconciliationReport) -> None:
                 continue
             instrument = await get_instrument(position.ticker)
             await place_protective_stop(position, instrument)
-        elif kind == "STOP_MISPRICED":
+        elif kind in _REPLACED_TYPES:
+            # STOP_MISSIZED takes the branch STOP_MISPRICED already takes, and
+            # the same call (step 7c, v1.90, #233). `replace_stop` cancels the
+            # standing stop, demotes the position to LOCAL, clears
+            # `stop_order_key`, re-reads the position and posts one stop for its
+            # current lot count — the count reconciliation has just made agree
+            # with the broker. Cancel-then-place is the only shape available:
+            # posting first would put two live stops on one position, and
+            # leaving the wrong-sized one standing while demoting to LOCAL would
+            # put both owners on one position. If the placement fails, rule 23
+            # applies unchanged — `_place_stop` retries three times, alerts and
+            # emits `stop_protection_degraded`, and the bot watches the whole
+            # holding at the corrected size rather than the exchange watching
+            # part of it with nothing watching the rest.
             if position is None:
                 continue
             instrument = await get_instrument(position.ticker)

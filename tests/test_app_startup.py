@@ -1129,6 +1129,9 @@ async def test_missized_replacement_rejected_three_times_degrades_to_local(
         env,
     )
 
+    # `configure` strips every root handler, caplog's included, so the record
+    # would be emitted into a logger nothing is listening to.
+    monkeypatch.setattr("zarabot.app.startup.configure", lambda level, secrets: None)
     with caplog.at_level(logging.ERROR, logger="zarabot.execution.orders"):
         context = await start()
 
