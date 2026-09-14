@@ -56,6 +56,7 @@ M = [
  (34,"app.shutdown","zarabot/app/shutdown.py","`app.loops` / `app.shutdown`",[],[21,30],"Graceful shutdown. Never cancels or liquidates positions - restarts must have no financial consequence. 70% coverage."),
  (35,"__main__","zarabot/__main__.py",None,[],[15],"Process entry point so that `python -m zarabot` works. No logic of its own."),
  (36,"sandbox.data","sandbox/",None,[],[],"Historical candle loading for research. Laptop only."),
+ ("36b","sandbox.exchange","sandbox/","`sandbox.exchange`",[],[],"The simulated broker the backtester runs against. A double for every broker.client function the trading cycle calls, so a backtest runs the live path with only the broker and the clock replaced."),
  (37,"sandbox.backtest","sandbox/","`sandbox.backtest`",[],[],"The backtester. Imports the live strategy, sizing and exit modules UNCHANGED - reimplementing any of them makes every backtest meaningless."),
  (38,"sandbox.train","sandbox/",None,[],[],"Model training and export with a feature manifest. Walk-forward validation only."),
 ]

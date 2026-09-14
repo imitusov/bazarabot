@@ -124,6 +124,8 @@ remedies through the executor. Building it second keeps that separation obvious.
 ## Layer 9 — Research sandbox (never imported by server code)
 
 36. **sandbox.data** — depends on: broker.client, models
+36b. **sandbox.exchange** — depends on: models, sandbox.data, and the signatures
+     `interfaces.md` records for `broker.client`
 37. **sandbox.backtest** — depends on: models, strategies.*, risk.sizing,
     lifecycle.exits
 38. **sandbox.train** — depends on: sandbox.data, sandbox.backtest

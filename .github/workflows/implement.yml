@@ -122,6 +122,16 @@ jobs:
         if: steps.pick.outputs.task != ''
         run: python scripts/ci/check_test_contracts.py
 
+      # Issue #118 gate 1's format half (#116). Own step, same reason.
+      - name: Signature format
+        if: steps.pick.outputs.task != ''
+        run: python scripts/ci/check_signature_format.py
+
+      # Issue #118 sub-group delivery. Own step, for the same reason.
+      - name: Sub-group delivery
+        if: steps.pick.outputs.task != ''
+        run: python scripts/ci/check_subgroup_delivery.py
+
       # Issue #118 gate 4. Own step, for the same reason as the one above.
       - name: Module-set completeness
         if: steps.pick.outputs.task != ''

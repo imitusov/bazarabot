@@ -29,6 +29,8 @@ docs:
 	@$(PY) scripts/ci/check_compose.py
 	@$(PY) scripts/ci/check_test_contracts.py
 	@$(PY) scripts/ci/check_module_set.py
+	@$(PY) scripts/ci/check_subgroup_delivery.py
+	@$(PY) scripts/ci/check_signature_format.py
 	@$(PY) scripts/ci/check_file_tree.py
 
 # If tasks/ changes when regenerated, the spec and the tasks an agent is fed

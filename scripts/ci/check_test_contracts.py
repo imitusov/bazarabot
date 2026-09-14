@@ -8,10 +8,11 @@ block in §3.2. Derive cases from the contract above". Both halves of that
 arrangement can be wrong silently, and both have been:
 
   * a §3.2 block reachable from no `M` entry — written cases no agent is ever
-    shown (`sandbox.exchange`, still live; and `partial fills`, eleven cases
-    for the highest-risk module in the project, closed by spec v1.80 (#189)
-    which gave the sub-block trailing prose naming `execution.orders` so its
-    cases sit inside that module's block);
+    shown (`sandbox.exchange`, fifteen cases with no `M` row at all until
+    #118 added one; and `partial fills`, eleven cases for the highest-risk
+    module in the project, closed by spec v1.80 (#189) which gave the
+    sub-block trailing prose naming `execution.orders` so its cases sit
+    inside that module's block);
   * a `None` key whose §3.2 block exists — the task file tells the agent to
     invent cases the spec already wrote (#114, `ops.commissions`, fixed as a
     single datum by #156 with no check behind it);
@@ -38,7 +39,11 @@ completeness must enumerate what it leaves out (failure class 6):
     ``**stop-order lifecycle** (`execution.orders`, `broker.reconcile`)``
     carries trailing prose, so neither `test_block` nor this gate sees it as
     a heading — it is swallowed into whichever block precedes it. This gate
-    mirrors the generator's blindness rather than correcting it.
+    mirrors the generator's blindness rather than correcting it, and that
+    blindness is exactly why a green run here would not have caught #189.
+    `scripts/ci/check_subgroup_delivery.py` is the correction: it reads the
+    trailing prose and requires the sub-group to land in each module it
+    names.
   * The generated task FILES. It re-derives the key set from `M`; that the
     files on disk match is the `drift` target's job (`make_tasks.py` +
     `git diff --exit-code tasks/`).
@@ -50,9 +55,13 @@ file's claim about its own test block is true — NOT that every module has a
 test contract, and not that the contracts it does have are any good.
 
 The allowlist is an inventory of the orphans that existed when the gate was
-written. Every entry names its issue, and an entry that stops describing a
-real gap FAILS rather than being ignored: a stale waiver is a silent
-exemption, which is how #124's and #180's entries were caught.
+written. It is EMPTY today: `sandbox.exchange`'s was its last entry and #118
+deleted it by giving that module the `M` row it never had. Every entry names
+its issue, and an entry that stops describing a real gap FAILS rather than
+being ignored: a stale waiver is a silent exemption, which is how #124's and
+#180's entries were caught — and re-adding the `sandbox.exchange` entry now
+fails on that arm, which is the evidence the deletion was required rather
+than convenient.
 """
 
 from __future__ import annotations
@@ -63,13 +72,10 @@ import re
 import sys
 
 # §3.2 blocks reachable from no `M` entry today. Key is the heading text as it
-# appears between the asterisks. Delete an entry with its issue.
-KNOWN_UNREACHED_TEST_BLOCKS: dict[str, str] = {
-    "`sandbox.exchange`": (
-        "#114/#118 — sandbox/exchange.py has a §3.2 block and no `M` entry at "
-        "all; adding the entry is issue #118 gate 4's territory"
-    ),
-}
+# appears between the asterisks. Delete an entry with its issue. Empty since
+# #118 gave `sandbox.exchange` an `M` row; do not add an entry to make this
+# gate pass — an unreached block is cases written for nobody.
+KNOWN_UNREACHED_TEST_BLOCKS: dict[str, str] = {}
 
 _H32 = re.compile(r"(?m)^### 3\.2[ .]")
 _H4 = re.compile(r"(?m)^## 4\.[ ]")

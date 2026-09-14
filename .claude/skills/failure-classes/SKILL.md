@@ -1,6 +1,6 @@
 ---
 name: failure-classes
-description: "Reference catalogue of the failure classes that recur in document-first, agent-built projects, each with the mechanical check that catches it. Use when writing a critic checklist, when a finding looks familiar, when adding a gate to make check, or when an incident needs a 'how is this prevented' answer that names a mechanism rather than an intention. Triggers: 'failure class', 'why did the tests miss this', 'how do we prevent this next time', 'vacuous contract', 'orphaned obligation', 'seam', 'latch', 'fixture drift'. Knowing a class does not prevent writing it again; only a check does."
+description: "Reference catalogue of the failure classes that recur in document-first, agent-built projects, each with the mechanical check that catches it. Use when writing a critic checklist, when a finding looks familiar, when adding a gate to make check, or when an incident needs a 'how is this prevented' answer that names a mechanism rather than an intention. Triggers: 'failure class', 'why did the tests miss this', 'how do we prevent this next time', 'vacuous contract', 'orphaned obligation', 'seam', 'latch', 'fixture drift', 'the test was green for the wrong reason', 'narrowing the catch broke tests'. Knowing a class does not prevent writing it again; only a check does."
 ---
 
 # Failure Classes
@@ -173,6 +173,40 @@ in a module global; a restart through the hour loses the week's report.
 **Check.** Brief operating assumption: restarts are routine. Spec:
 scheduled work is "due and not yet done" against durable state. Composed
 test includes a restart.
+
+## 16. Green because the code under test swallowed the evidence
+**Shape.** A test passes not because the behaviour is right but because
+production code absorbed the failure the test exists to detect. Two variants,
+same cause: a broad `except` upstream of the assertion eats the error —
+including the test's own stub guards — or a swallow in a *collaborator* makes
+the asserted path unreachable in production while a stub still delivers it in
+the test.
+**Hides.** Everything is green and coverage is full. The swallow is in the
+code, not in the test, so reading the test tells you nothing is wrong; and it
+is not class 3 either, because the assertion is not vacuous, it is unreached.
+Narrowing the catch is the only thing that moves it, and narrowing a catch
+feels like a cleanup, so it is done expecting no test to change.
+**Check.** **Narrowing a catch must be expected to turn tests RED.** A
+narrowing that leaves the suite green is evidence the path was never
+exercised, not evidence the change was safe; a narrowing that reddens tests is
+the gate working — fix the test, never re-widen the catch. Mechanically: every
+`except` that survives (each `# noqa: BLE001`) owes a **propagation** test
+asserting a non-contract exception escapes, as well as the swallow test — a
+swallow test alone passes against `except Exception` and pins nothing.
+
+Three independent firings in one sweep. #198 narrowed nine broad catches to
+the classes their contracts name and had to add a propagation test to every
+one of them. #203 narrowed `app/startup.py`'s step 8a catch and two
+pre-existing tests went red: step 8a had been reading through a step 7 stub
+and raising `KeyError` from a fixture's price table and the stub's own
+`AssertionError` — the blind catch was what let those stubs stay wrong. #214
+removed `db.cooldowns.start`'s `aiosqlite.Error` swallow, which was what made
+the rule 11 halt in `execution.orders._finish_close` unreachable in
+production: the halt's test raised from a patched `db.cooldowns`, so it had
+been green for a path the real module could never deliver.
+
+Class 5 is about the blind catch being there. This class is about what to
+expect the day you take one away.
 
 ## Using this file
 

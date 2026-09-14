@@ -66,6 +66,19 @@ jobs:
       - name: Test-contract reachability
         run: python scripts/ci/check_test_contracts.py
 
+      # Issue #118 gate 1's format half (#116): check_docs.py check 3 finds §4
+      # signatures with one regex, so a signature missing `→` or a parameter
+      # type is not reported as different — it is never seen. Own step.
+      - name: Signature format
+        run: python scripts/ci/check_signature_format.py
+
+      # Issue #118: a §3.2 sub-group carries trailing prose naming the module
+      # that owes it. check_test_contracts.py is blind to sub-groups by
+      # construction, which is how #189's eighteen execution.orders cases
+      # reached nobody. Own step, like the one above.
+      - name: Sub-group delivery
+        run: python scripts/ci/check_subgroup_delivery.py
+
       # Issue #118 gate 4: §4 headings, `M` in make_tasks.py and
       # dependency-order.md must name the same modules. A contract in the spec
       # and absent from `M` reaches no agent. Own step, like the two above.

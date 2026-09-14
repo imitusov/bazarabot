@@ -1,12 +1,12 @@
-# Task 36/43: Implement `sandbox/data.py`
+# Task 36b/43: Implement `sandbox/exchange.py`
 
 ## Product context
 
-Historical candle loading for research. Laptop only.
+The simulated broker the backtester runs against. A double for every broker.client function the trading cycle calls, so a backtest runs the live path with only the broker and the clock replaced.
 
 ## Build order position
 
-Module **36** of 43 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **36b** of 43 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -220,20 +220,57 @@ would catch it — the names would still match.
 
 From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
-No dedicated test block in §3.2. Derive cases from the contract above: happy path, every early return, every boundary, and every documented exception.
+- A market buy is **priced at the next bar's open**, never at the bar the
+  decision was made on (proves look-ahead is absent: the price was not knowable
+  when the order was placed).
+- That fill is returned on the submitting call, not deferred (proves the
+  control flow matches live — a deferred fill sends every entry through
+  `open_position`'s crash-recovery path and trips the outage counter, which is
+  precisely the live/backtest divergence this rebuild removes).
+- An order placed on the last bar of history stays `SUBMITTED` and never fills
+  (proves history running out is not filled in with an invented price).
+- A bar whose **low** is below the stop triggers `STOP_LOSS`, even when its
+  close is above it (proves the optimism is gone: on daily bars this is the
+  difference between a 5% stop that fires and one that never does).
+- A bar whose **high** reaches the target triggers `TAKE_PROFIT` on the same
+  rule.
+- A bar that gaps **through** the stop fills at its open, not at the stop price
+  (proves the exchange cannot fill where the market never traded).
+- A bar touching both stop and target books the **stop** (proves the pessimistic
+  tie-break, which daily bars cannot resolve any other way).
+- A buy for more than the simulated cash raises `OrderRejected` and leaves cash
+  and holdings unchanged (proves the double refuses what the broker refuses, and
+  that a backtest cannot fund a position the account could not).
+- `get_portfolio()` returns without raising after any sequence of fills (proves
+  the negative-cash crash is closed at its cause rather than at its symptom).
+- `advance(moment, phase)` makes `get_last_price` report that phase of the
+  current bar, and its close by default (proves the sub-bar marks reach the code
+  that values a position).
+- Two instruments advanced to the same phase each report **their own** bar's
+  value (proves the phase is resolved per instrument — a scalar price passed in
+  by the caller would report one ticker's low as every ticker's).
+- A standing stop is checked once per bar however many marks are walked (proves
+  four cycles are not four chances to fire).
+- Commission is a percentage of turnover with a minimum, charged once per fill
+  (proves the tariff shape, and that a round trip is not charged twice for one
+  leg).
+- Every function it exposes raises the same exception type as its
+  `broker.client` counterpart for the same condition (proves it is a double, not
+  an approximation — a simulator that cannot fail the way the broker fails
+  cannot exercise the code that handles failure).
 
 ## Expected output
 
-- `sandbox/data.py` implementing the contract exactly
-- `tests/test_sandbox_data.py` implementing every test case above
+- `sandbox/exchange.py` implementing the contract exactly
+- `tests/test_sandbox_exchange.py` implementing every test case above
 - All tests passing, coverage threshold met
 - This module's public signatures appended to `interfaces.md`
 
 ## Agent instructions
 
-1. Write `tests/test_sandbox_data.py` FIRST, from the test cases above. No implementation yet.
+1. Write `tests/test_sandbox_exchange.py` FIRST, from the test cases above. No implementation yet.
 2. Run it. Confirm it **fails** — nothing is implemented.
-3. Write `sandbox/data.py` to satisfy the contract.
+3. Write `sandbox/exchange.py` to satisfy the contract.
 4. Run again. Iterate until all pass.
 5. Match contract signatures EXACTLY, including `| None`.
 6. Call interfaces as recorded; do not reimplement them.
