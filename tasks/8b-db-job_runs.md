@@ -1,4 +1,4 @@
-# Task 8b/42: Implement `zarabot/db/job_runs.py`
+# Task 8b/43: Implement `zarabot/db/job_runs.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of job_runs. Periodic jobs ask has_run so a restart cannot double-sen
 
 ## Build order position
 
-Module **8b** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **8b** of 43 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

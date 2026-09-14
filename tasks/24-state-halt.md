@@ -1,4 +1,4 @@
-# Task 24/42: Implement `zarabot/state/halt.py`
+# Task 24/43: Implement `zarabot/state/halt.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of the halt flag and of the halt_state table, which it writes itself 
 
 ## Build order position
 
-Module **24** of 42 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **24** of 43 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
