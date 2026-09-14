@@ -1,8 +1,8 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.91
+**Version:** 1.92
 **Date:** 2026-09-15
-**Implements:** `business-brief.md` v1.14
+**Implements:** `business-brief.md` v1.15
 
 **Companion document.** Read the brief first. When this spec and the brief
 conflict, **the brief takes precedence**.
@@ -481,6 +481,10 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
   (`1`, `yes`, `TRUE`, `on`) raises `ConfigError` rather than enabling it (proves
   the safe default — this flag exists to be set deliberately by the owner, never
   to be arrived at).
+- `max_holding_days` is **18** when `MAX_HOLDING_DAYS` is unset, and takes the
+  environment value when it is set (proves the default is the derived horizon and
+  that it is still overridable). The literal 18 belongs in this test and in
+  `_DEFAULTS`, and in no third place.
 
 **`logging_setup`**
 - A log record whose message contains the token value emits the token replaced by
@@ -1276,6 +1280,12 @@ Additionally, `strategies.ml_model`:
 - A position whose age reaches the maximum during the final fifteen minutes
   triggers `MAX_AGE`; the same position earlier in that session does not
   (boundary, proves the timing rule).
+- Every maximum-age case builds its threshold from `config.max_holding_days`
+  rather than from the literal 18, and a case with the config value set to a
+  different number ages by that number instead (proves the module reads the
+  configured horizon. Without it, a suite written against today's default passes
+  unchanged after the horizon moves and proves nothing about the move — and the
+  horizon has already moved once, from 3 to 18 in v1.91).
 - A position at both stop and maximum age returns `STOP_LOSS` (proves the
   documented precedence, so the recorded reason is deterministic).
 - Age is counted in trading days: a position opened Friday is not aged by the
@@ -1913,6 +1923,13 @@ Additionally, on exits booked from an exchange stop:
 - A position held past `MAX_HOLDING_DAYS` exits with `MAX_AGE` (proves the
   closing-window mark: with one cycle at the session start, twenty flat bars and
   `max_holding_days=1` produced zero exits).
+- That case sets `max_holding_days` explicitly and supplies **more bars than the
+  horizon it sets** (v1.92). The horizon is configuration and it moved from 3 to
+  18 in v1.91; a fixture of a dozen flat bars that proved `MAX_AGE` fires at 3
+  proves nothing at 18 and goes green by never reaching the trigger, which is the
+  same silence the case was written to break. A fixture sized from the
+  configured horizon rather than from a remembered default is what keeps it
+  honest — this is fixture drift, and it is invisible in a result.
 - A `LOCAL` position whose bar low breaches its stop exits `STOP_LOSS`, on a bar
   that closes above it (proves the close-only optimism is gone from the path
   where the bot owns the stop, not only from the exchange's).
@@ -2185,6 +2202,30 @@ Loads and validates every setting once at startup.
   0–100. It is an **alert threshold, not a risk limit**: nothing rejects an
   order or unwinds a position because of it, `risk.gate` never reads it, and a
   missing value therefore takes its default rather than failing the load.
+- **`max_holding_days` defaults to 18, raised from 3 (v1.92).** From
+  `MAX_HOLDING_DAYS`, a positive integer, unchanged in type, name and validation.
+  It is the number of trading days after which `lifecycle.exits` returns
+  `MAX_AGE`, and 3 made both price exits unreachable — six of six closed
+  positions exited on age and the stop-loss path had never run on real money
+  (#211). The new value is derived at an assumed 1.5% daily volatility;
+  `lifecycle/exits.py` §4 carries the arithmetic and the sensitivity, and the
+  brief §9 carries the decision. **This module is the only place the number
+  lives**: nothing else may carry a literal, and `.env.example` matches.
+
+  *Amendment scope.* This changes a default in a module that is already built,
+  so **`tasks/03-config.md` is re-run** — the value in `_DEFAULTS` and the
+  `.env.example` line are the whole change, and no signature moves. Nothing in
+  `interfaces.md` changes, which is exactly why the re-run has to be named here
+  rather than left for a signature check to notice.
+
+  *Pre-existing and not settled here.* `MAX_HOLDING_DAYS` is a risk variable with
+  a default, while the bullet below reads "must never substitute a default for a
+  missing **risk** variable". The two have disagreed since before this amendment
+  — the brief's §18 table has always marked it "Required? No" with a default, and
+  the brief wins — and seven of the eight risk variables are in the same
+  position, which makes that bullet true only of `ALLOCATED_CAPITAL`. It is named
+  here so that it is not read as introduced by this change. **No decision is
+  taken on it and no code follows from this paragraph.**
 - Adds `allow_foreign_holdings`, defaulting to **false**. The trading account is
   the bot's alone (brief v1.8); this flag is the owner's explicit acknowledgement
   that it is not, and it is deliberately awkward to set by accident. It is not a
@@ -4150,6 +4191,31 @@ is the failure this cadence exists to prevent.
   day simply is not counted, `trading_days_open` comes back short, and `MAX_AGE`
   does not fire. Nothing raises. #45 lived for the project's whole life on
   exactly that.
+- **It checks the boundary, not contiguity, and the longer holding period is
+  what makes that matter (v1.92).** `covers` is `earliest() ≤ day`: it proves the
+  recorded calendar *reaches back* to the entry, not that every day between the
+  entry and now was recorded. A **gap in the middle** of the range passes it, and
+  `clock.trading_days_between` then counts only the days that are there, so the
+  position ages slower than it did in fact and `MAX_AGE` fires late — silently,
+  with `covers` vouching for the count.
+
+  A gap requires an outage longer than the 14-day schedule window, because each
+  refresh records the whole window forward. Against the old three-trading-day
+  hold that was unreachable: the refresh on a position's entry day already
+  covered its entire five-calendar-day life, so no outage during the hold could
+  open a gap inside it. At 18 trading days a position lives about 25 calendar
+  days, and a fifteen-day outage inside that span now leaves a real gap that
+  `covers` reports as covered. The failure direction is *late*, never early, and
+  the exchange keeps the stop standing throughout, so nothing is left unprotected
+  — but a position exiting several days late on a trigger the owner believes is
+  exact is a wrong number, which is what this document exists to prevent.
+
+  **This is an open decision and nothing here implements one.** The shapes
+  available are a contiguity check (`covers` proves one recorded row per calendar
+  day from `day` to today, not merely a boundary) and a count that returns `None`
+  on a gap the way it already does on an uncovered entry. Both change this
+  module's contract and `app.loops`' handling of it, both would need their tasks
+  re-run, and neither is required by #211's decision. **Recorded, not settled.**
 - Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
   minute** for data that changes at most daily and that this module already
   holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
@@ -4517,8 +4583,132 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 - Precedence when more than one applies: `STOP_LOSS`, then `TAKE_PROFIT`, then
   `MAX_AGE`. Fixed, so the recorded reason never depends on evaluation order.
 - Boundaries are inclusive at the stop and the target.
+- **The threshold is `config.max_holding_days` and never a literal (v1.92).**
+  This module holds no number of its own; the horizon changed from 3 to 18 in
+  v1.91 and no line of this contract changed with it, which is the property that
+  made the change a configuration edit rather than a re-specification. A test
+  that pins the count to 3 rather than to the configured value is the way that
+  property gets lost.
 - Must never place an order, and must never consult a halt — an active halt does
   not suppress exits.
+
+**How `MAX_HOLDING_DAYS` was derived, and how to derive it again (v1.92).**
+
+Until v1.91 the horizon was three trading days and neither price exit was
+reachable inside it. Every position the bot had ever closed — six of six — exited
+on `MAX_AGE`, with realised moves spanning −1.0% to +3.3% inside a −5%/+10% band
+(#211). The stop-loss path had never executed on real money, and the take-profit
+class that `sandbox/train.py` labels on was empty by construction, which is the
+mechanical cause of #14's near-zero positive rate. The brief's decision is to
+lengthen the hold and leave the bands alone (brief §9); this section is the
+arithmetic behind the number, recorded so that it can be re-checked rather than
+re-argued.
+
+**The number is a function of assumed volatility, not a constant of nature.**
+Nothing below is a property of the market. Every figure is conditional on a
+single assumed daily volatility, and the answer moves by a factor of two and a
+half — seven trading days to eighteen — across the range the audit measured.
+
+*The model.* A driftless log random walk, one path per position, eight intraday
+sub-steps per trading day so that a bar has a real high and a real low. A
+position resolves on the first bar whose low touches `entry × (1 − 5%)` or whose
+high touches `entry × (1 + 10%)`; a bar touching both counts as the stop. That is
+exactly the rule `sandbox/train.py::_label` applies, which is what makes the
+label horizon and the trade horizon the same question (see `sandbox/` §4).
+Figures below are 200,000 independent paths, standard error about ±0.11
+percentage points — reproduce them approximately, not bit-for-bit.
+
+*The model reproduces the measurement it is being run backwards from.* At a
+three-day horizon it gives a target-before-stop rate of **0.02% at 1.5%/day** and
+**2.1% at 2.5%/day**, against the audit's measured 0.00% and 2.96% (#211, #14).
+Agreement at the horizon where the answer is already known is the only reason to
+trust it at horizons where it is not.
+
+*Two closed forms bound it.* In log terms the barriers are `a = ln(1.10) =
++0.0953` and `b = −ln(0.95) = 0.0513`. With unlimited time a driftless walk
+reaches the target first with probability `b / (a + b) = 35.0%` — that is the
+ceiling, and no holding period beats it. The mean time to resolve on either
+barrier is `a · b / σ²` trading days: **21.7 at 1.5%/day, 12.2 at 2.0%, 7.8 at
+2.5%**.
+
+*The criterion.* The horizon is long enough when **the price band, not the clock,
+is the usual answer** — the smallest whole number of trading days at which more
+than half of positions resolve on the stop or the target. That is the median
+resolution time, which is shorter than the mean above because the distribution is
+right-skewed.
+
+| Daily volatility | H where the band resolves >50% | `MAX_AGE` share at that H | Target-first at that H | Stop-first at that H |
+|---|---|---|---|---|
+| 1.5% | **18 trading days** | 48.5% | 12.1% | 39.3% |
+| 2.0% | 11 trading days | 46.3% | 13.4% | 40.4% |
+| 2.5% | 7 trading days | 47.8% | 12.8% | 39.4% |
+
+For comparison, at the old three-day horizon: `MAX_AGE` 96.2% / 88.4% / 78.5% and
+target-first 0.02% / 0.45% / 2.1% at the same three volatilities.
+
+*One independent check, on real bars rather than synthetic ones.* When #53 made
+`MAX_AGE` reachable in the backtester, the same 180-bar run at the shipped
+`MAX_HOLDING_DAYS=3` produced 13 exits, all `MAX_AGE`; loosening the cap to 8
+brought all three triggers back (`ops/STATE.md`, 2026-09-07). That is the
+direction this table predicts and roughly the place it predicts it: at 8 the
+model puts the resolved-on-price share at 22% / 41% / 58% across the three
+volatilities — enough for the stop and the target to *appear*, not enough for
+either to be the usual answer. It is corroboration of the shape, not a second
+measurement of the number; one strategy over one 180-bar window is not a
+distribution.
+
+*The chosen value is 18, at an assumed 1.5%/day.* The low end of the audit's
+range is taken rather than the midpoint because 1.5%/day is the volatility at
+which the measured positive rate was **exactly zero** — the observation that
+opened #211. A horizon derived at 2.0% gives eleven days, and eleven days leaves
+the case that produced the incident still broken: at 1.5%/day it resolves 32% of
+positions on a price and 68% on the clock.
+
+*To re-derive it, H scales as `σ⁻²`.* `H(σ) ≈ 17.4 × (1.5% / σ)²` over
+1–2.5%/day, good to about one trading day — the table above is the authority
+where the two differ. Halving assumed volatility quadruples the horizon: at
+1.0%/day the same criterion gives about 39 trading days, roughly two calendar
+months. That sensitivity is why the brief
+attaches a re-open condition to a measurement of realised watchlist volatility
+(brief §9) rather than treating 18 as settled.
+
+*What the change buys, in the two places it was supposed to.* At 1.5%/day the
+stop-first rate rises from 3.8% to 39.3%, so the stop path stops being code with
+no production evidence behind it; and the take-profit label's positive class
+rises from 0.02% to 12.1%, which is a class a classifier can be trained on.
+Neither is a claim about profit. A longer hold makes the exits reachable; it does
+not make them favourable.
+
+**What else keys off the horizon (v1.92).** Traced when the number changed, and
+recorded so the next change traces the same list.
+
+- **`config`** is the only definition. `lifecycle.exits.evaluate` is the only
+  module in `zarabot/` that compares against it, and `telegram.commands` renders
+  `cfg.max_holding_days` into `/limits`. No module carries a literal 3, so no
+  module other than `config` changes.
+- **`clock.trading_days_between`, `market.session.calendar()` and
+  `app.loops._age_in_trading_days`** produce the count the comparison is made
+  against. The count is unchanged in kind, but its *dependency* changes: the
+  schedule window is 14 calendar days and the broker refuses a wider one (§2.1),
+  while a hold of H trading days spans roughly `7H/5` calendar days. At H ≤ 10
+  the single refresh that ran on a position's entry day already covers its whole
+  life; at H = 18 (about 25 calendar days) it does not, and the age count depends
+  on at least one further successful refresh during the hold. Daily rollover
+  supplies one, so this is a change in what the guarantee rests on, not a break —
+  and `market.session` §4 records the case where it does break.
+- **`risk.gate`.** The re-entry cooldown is 120 minutes against an 18-day hold,
+  so the duplicate-ticker rule now does nearly all of the anti-looping work: a
+  ticker is unavailable for the length of the hold, and the cooldown binds only
+  in the two hours after it frees up. No limit changes; the brief's §12 row is
+  restated rather than amended.
+- **`reporter.weekly`.** Closed trades per week fall roughly six-fold — about
+  three a week across all strategies in steady state, against seventeen. "A week
+  with no closed trades produces a valid report saying so" stops being an edge
+  case and becomes an ordinary week. Nothing in the contract changes.
+- **`sandbox.backtest` and `sandbox.exchange`.** A backtest fixture must now be
+  long enough for `MAX_AGE` to be reachable at all; see §3.2.
+- **`sandbox/train.py`.** The label horizon is the same horizon. See `sandbox/`
+  §4.
 
 ### `zarabot/execution/orders.py`
 
@@ -6371,6 +6561,41 @@ questions and #44 is still the other one.
 - Trains a buy/no-buy classifier. The label is whether the take-profit level is
   reached before the stop level within `horizon_days`, so the model is trained on
   the question the live system actually asks it.
+- **`horizon_days` is `MAX_HOLDING_DAYS` and the two move together (v1.92).**
+  The label horizon is defined here and nowhere else: `sandbox/train.py::_label`,
+  which walks forward from a bar until the stop level or the target level is
+  touched or `horizon_days` runs out. It is the same window `lifecycle.exits`
+  closes a position on, so a training run that passes any other number trains the
+  model on a target the bot does not trade — it would score a setup the live
+  system would have exited before the setup resolved. `MAX_HOLDING_DAYS` moved
+  from 3 to 18 in v1.91 (`config` §4), and every model exported after that is
+  trained at 18. **A model exported at the old horizon is stale and must be
+  retrained, not re-scored**; nothing in the manifest check will say so, because
+  the feature names are unchanged.
+- The signature does not change and no task is re-run for this. The obligation
+  binds the **training run**, not `fit`'s code: the caller is a notebook and it
+  passes `config.max_holding_days`.
+- **Making the coupling mechanical is an open decision.** Two shapes exist —
+  defaulting the argument from `config` the way `_label` already reads
+  `stop_loss_pct` and `take_profit_pct` from it, or recording the horizon in the
+  exported bundle so `strategies.ml_model.load` refuses a model trained at a
+  horizon the deployment does not use. The second is the stronger one, because it
+  catches a stale model file rather than a careless call. Both are ML work and
+  the owner has excluded ML work from #211's round. **Recorded, not settled** —
+  and until one is taken, the only thing holding the two horizons together is
+  this paragraph, which is an intention rather than a prevention.
+- **The unit mismatch is #14's, it is untouched here, and the longer hold widens
+  it.** `_label` computes its deadline as
+  `candles[index].timestamp + timedelta(days=horizon_days)` — **calendar** days —
+  while `MAX_AGE` counts **trading** days, so an 18-day horizon labels over about
+  13 trading bars rather than 18. At 1.5% daily volatility that is a positive
+  class of roughly 7% where the trade horizon gives 12%. The gap grows with the
+  horizon: at 3 days it was under one bar, at 18 it is about five. **This
+  amendment does not fix it** — the owner's decision on #211 is the holding
+  period and nothing else, and the remaining label defects (#14 also reports that
+  Thursday and Friday rows receive exactly one lookforward bar) belong to #14's
+  own round. It is stated so that "the two horizons are the same number" is not
+  read as "the two horizons measure the same thing", which would be false.
 - `seed` is required and recorded in the export: an unreproducible model cannot
   be audited after a losing week.
 - Uses **walk-forward** validation across `folds`; a single train/test split on a

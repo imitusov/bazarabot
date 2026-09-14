@@ -209,6 +209,31 @@ is the failure this cadence exists to prevent.
   day simply is not counted, `trading_days_open` comes back short, and `MAX_AGE`
   does not fire. Nothing raises. #45 lived for the project's whole life on
   exactly that.
+- **It checks the boundary, not contiguity, and the longer holding period is
+  what makes that matter (v1.91).** `covers` is `earliest() ≤ day`: it proves the
+  recorded calendar *reaches back* to the entry, not that every day between the
+  entry and now was recorded. A **gap in the middle** of the range passes it, and
+  `clock.trading_days_between` then counts only the days that are there, so the
+  position ages slower than it did in fact and `MAX_AGE` fires late — silently,
+  with `covers` vouching for the count.
+
+  A gap requires an outage longer than the 14-day schedule window, because each
+  refresh records the whole window forward. Against the old three-trading-day
+  hold that was unreachable: the refresh on a position's entry day already
+  covered its entire five-calendar-day life, so no outage during the hold could
+  open a gap inside it. At 18 trading days a position lives about 25 calendar
+  days, and a fifteen-day outage inside that span now leaves a real gap that
+  `covers` reports as covered. The failure direction is *late*, never early, and
+  the exchange keeps the stop standing throughout, so nothing is left unprotected
+  — but a position exiting several days late on a trigger the owner believes is
+  exact is a wrong number, which is what this document exists to prevent.
+
+  **This is an open decision and nothing here implements one.** The shapes
+  available are a contiguity check (`covers` proves one recorded row per calendar
+  day from `day` to today, not merely a boundary) and a count that returns `None`
+  on a gap the way it already does on an uncovered entry. Both change this
+  module's contract and `app.loops`' handling of it, both would need their tasks
+  re-run, and neither is required by #211's decision. **Recorded, not settled.**
 - Added in v1.40 so `app.loops` stops fetching a fourteen-day schedule **once a
   minute** for data that changes at most daily and that this module already
   holds (#19). `_schedule_refresh_loop` refreshes this cache once per Moscow
