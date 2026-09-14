@@ -1080,8 +1080,14 @@ and **no position row is written**; `app.startup` refuses to start on it (rule
 own for the ticker, the crash-recovery case — → `positions.adopt`, passing that
 order's key as `open_order_key` (oldest by `created_at` if somehow more than
 one). Lot mismatch →
-`positions.update_lots`. Stop discrepancies are reported (`STOP_MISSING`,
-`STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_ADOPTABLE`, `STOP_DUPLICATE`) and not
+`positions.update_lots`, and the alert says, **on growth only**, that the added
+lots are carried at the recorded `entry_price` so realised P&L for the position
+will be wrong by their true cost. `entry_price` is **never** re-derived and
+`get_operations` is not called on that path: the feed cannot say which buys
+belong to this position, and a buy in any window reaching before `entry_at` may
+be the owner's own (v1.90, #233, rules 7, 32, 33). Stop discrepancies are reported (`STOP_MISSING`,
+`STOP_ORPHAN`, `STOP_MISPRICED`, `STOP_MISSIZED`, `STOP_ADOPTABLE`,
+`STOP_DUPLICATE`) and not
 acted on. `STOP_MISPRICED` is reported only when the broker's stop differs from
 the position's by a full `min_price_increment` or more, read from
 `get_instrument(ticker)` — the broker snaps every posted stop to the tick, and
@@ -1091,7 +1097,20 @@ When the increment cannot be read, or is zero or less, that position's stop
 price is not judged at all: **neither `STOP_MISPRICED` nor `STOP_ADOPTABLE`** is
 reported for it, the failure is alerted, and it stays `LOCAL` so
 `lifecycle.exits` keeps watching its own stop. `STOP_DUPLICATE` and
-`STOP_ORPHAN` do not depend on the price and still stand (rule 38, v1.56). `STOP_DUPLICATE` carries `keep` (the stop matching the position's
+`STOP_ORPHAN` do not depend on the price and still stand (rule 38, v1.56).
+`STOP_MISSIZED` carries `position_lots` and `stop_lots` (integers) and is
+reported for **every** open position whose retained live stop covers a different
+lot count, in either direction — re-derived from live state on every pass, never
+hung off `LOTS_ADJUSTED`, so a crash or a step 7 failure between the lot write
+and the remedy cannot lose it (v1.90, #233). The comparison is exact:
+`post_stop_loss` sends the count as `quantity` and `list_stop_orders` reads it
+back from `lots_requested`, one round trip in one unit. It reads no price, so
+rule 38 does not reach it — a missized stop is reported even when the increment
+could not be read. It is reported **only where `STOP_MISPRICED` is not** (both
+take `replace_stop`, which corrects price and size in one call), and it
+**precedes the adoption branch**: a missized stop is never `STOP_ADOPTABLE`,
+because adopting would make a stop covering part of the holding its sole
+protection. `STOP_DUPLICATE` carries `keep` (the stop matching the position's
 `stop_order_key`, else the oldest by `created_at`) and `cancel` (every other
 identifier); an identifier is `stop_order_id` when known, else the stop's key.
 Idempotent against an unchanged broker. Raises `ValueError` on naive `now`.
@@ -1219,10 +1238,15 @@ when Telegram credentials are present. Sleep-on-failure belongs to `__main__`.
 Wires `/report` to `reporter.weekly.build`. Applies stop remedies from
 reconciliation via `execution.orders` — every adjustment type the report can
 carry is handled, and an unrecognised one alerts rather than being dropped.
-`CLOSED_EXTERNALLY`, `ADOPTED`, `LOTS_ADJUSTED`, `FOREIGN_HOLDING` and
-`EXIT_UNRESOLVED` are recognised without a remedy; `EXIT_UNRESOLVED` in
-particular does not stop startup, since the shares it names are already gone
-(#11).
+Three recognised groups (v1.90, #233): remedied through `execution.orders`
+(`STOP_MISSING`, `STOP_MISPRICED`, `STOP_MISSIZED`, `STOP_ADOPTABLE`,
+`STOP_ORPHAN`, `STOP_DUPLICATE`); acted on without it (`FOREIGN_HOLDING`, which
+becomes a refusal to start); and recognised with no remedy anywhere
+(`CLOSED_EXTERNALLY`, `ADOPTED`, `EXIT_UNRESOLVED`, `LOTS_ADJUSTED`).
+`EXIT_UNRESOLVED` in particular does not stop startup, since the shares it names
+are already gone (#11). `LOTS_ADJUSTED` needs no branch because `STOP_MISSIZED`
+owns the protection its row correction disturbs — not because there is no
+consequence, which is what #233 was.
 
 **`StartupError`**
 Raised when startup aborts. No trading has begun.
@@ -1247,11 +1271,16 @@ emits `config_invalid` with `variable`, and raises `StartupError` with no
 `startup_ok`. Any later `StartupError` emits `startup_failed` with `stage` and
 `reason`. `__main__` does not emit those events.
 The connection is opened here, not at import. The TLS env write precedes every
-broker call. Remedies: `STOP_MISSING` → `place_protective_stop`, `STOP_MISPRICED`
-→ `replace_stop`, `STOP_ADOPTABLE` → `adopt_existing_stop`, `STOP_ORPHAN` →
+broker call. Remedies: `STOP_MISSING` → `place_protective_stop`,
+`STOP_MISPRICED` **and `STOP_MISSIZED`** → `replace_stop` (step 7c, v1.90, #233:
+one cancel-and-re-post corrects price and size together), `STOP_ADOPTABLE` →
+`adopt_existing_stop`, `STOP_ORPHAN` →
 `cancel_orphaned_stop`, and `STOP_DUPLICATE` → `cancel_orphaned_stop` for every
 identifier in its `cancel` list while `keep` is retained. The remedy gate does
-not skip a report whose only stop adjustment is a duplicate. A type outside the
+not skip a report whose only stop adjustment is a duplicate, or a missized stop.
+A `STOP_MISSIZED` whose replacement cannot be placed takes rule 23 unchanged —
+three retries, alert, `stop_protection_degraded`, position open and `LOCAL` at
+the corrected lot count — never a halt, and `start()` still completes. A type outside the
 handled set alerts urgently. A `FOREIGN_HOLDING` adjustment raises
 `StartupError` naming every ticker, after alerting, unless
 `config.allow_foreign_holdings` is true (rule 32); when it is, the ready alert
