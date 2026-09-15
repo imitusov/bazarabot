@@ -1,7 +1,7 @@
 # Zarabot — Business Brief
 
-**Version:** 1.14
-**Date:** 2026-09-13
+**Version:** 1.15
+**Date:** 2026-09-14
 **Status:** Ready for technical spec
 
 **Companion document.** Implementation contracts are in `technical-spec.md`.
@@ -21,8 +21,17 @@ Moscow Exchange through the T-Invest brokerage API, and reports on itself once
 a week. It executes a handful of simple, well-understood trading strategies —
 and, optionally, a machine-learning model trained separately on the owner's own
 laptop — trading within hard risk limits it cannot exceed. In ordinary operation
-this is expected to produce somewhere around five to ten orders a day, but that
-is an expectation about the strategies, not a cap the bot enforces.
+this is expected to produce **roughly one order a day**, but that is an
+expectation about the strategies, not a cap the bot enforces.
+
+That figure follows from the holding period, not from how often the strategies
+speak. Ten slots turning over every eighteen trading days is ten entries and ten
+exits per eighteen days, a little over one order a day. Until v1.15 this document
+said "five to ten orders a day", which was the same arithmetic over a
+three-trading-day hold — ten slots, 6.7 orders a day — and lengthening the hold
+to eighteen (§9) divides it by six. The old number was never a target and is not
+one now; it is restated so that a bot placing one order a day reads as working
+rather than as stuck.
 
 Its purpose is education first and income second. The owner wants to be in
 contact with their own money: to see strategies win and lose in real conditions,
@@ -313,7 +322,7 @@ assumes it and a wrong assumption invalidates a component.
   rejected when it was.
 - Place and monitor real orders automatically, without human approval.
 - Close a position automatically when it hits its stop-loss, reaches its
-  take-profit target, or has been held for three trading days — the same three
+  take-profit target, or has reached its maximum holding period — the same three
   rules for every position, regardless of which strategy opened it.
 - Track open positions, realised and unrealised profit and loss, and cash.
 - Reconcile its own view of the account against the broker's on every startup.
@@ -338,7 +347,7 @@ flattered or handicapped by having a better exit than another.
 |---|---|---|---|
 | Stop-loss | Price at or below 5% under the entry price | **The exchange** | Sells automatically |
 | Take-profit | Price at or above 10% over the entry price | The bot | Close at market |
-| Maximum age | Position open for 3 trading days | The bot | Close at market, whatever the profit or loss |
+| Maximum age | Position open for 18 trading days | The bot | Close at market, whatever the profit or loss |
 
 **Whichever fires first wins.** The bot evaluates the take-profit and the age
 limit on every polling cycle during the session; the stop-loss is watched by the
@@ -372,9 +381,56 @@ later change.
 
 **Maximum age is counted in trading days, not calendar days.** A weekend or a
 market holiday does not age a position. The forced exit is placed in the final
-fifteen minutes of the third session, so that the full day's price action has had
-its chance to reach the target first, and so the order goes out while the market
-is liquid rather than at the open.
+fifteen minutes of the **last session of the holding period**, so that the full
+day's price action has had its chance to reach the target first, and so the order
+goes out while the market is liquid rather than at the open.
+
+**The holding period is eighteen trading days, and it was three (v1.15).** The
+first six positions this bot ever closed all closed on age. The best of them
+reached a third of the way to the +10% target; the worst got a fifth of the way
+to the −5% stop; and the stop-loss path has never executed on real money. That is
+not a run of bad luck, it is arithmetic. At the 1.5–2.5% daily volatility the
+audit assumed, a +10% move inside three trading days is a 2.3σ event even at the
+top of that range, and a simulation of the exit rules put the chance of reaching
+the target before the stop at **0.0% at 1.5% a day and 3.0% at 2.5%**. With a target that cannot be reached and a stop that is
+never approached, the bot was not running the strategy this document describes —
+it was buying on a signal and selling at market three days later, and the ±band
+was doing nothing but sizing the position.
+
+**Lengthening the hold is the fix, and the bands stay where they are.** Eighteen
+trading days is the horizon at which, at 1.5% daily volatility, a position is
+more likely to end on a price than on the clock — the median time for this ±band
+to resolve at that volatility. It is **a function of assumed volatility, not a
+constant**: at 2.0% a day the same criterion gives eleven trading days and at
+2.5% it gives seven. The full arithmetic, the criterion and the sensitivity table
+are in `technical-spec.md` §4 under `lifecycle.exits`, so the number can be
+re-derived rather than re-argued when volatility changes.
+
+The alternative — shrinking the +10% target to something three days can reach —
+was considered and rejected. It would work, in the sense that the target would
+start firing, but it buys nothing: a nearer target is hit more often by exactly
+as much as it pays less, so the trade is the same fair bet dressed in a better
+win rate, and the 2:1 reward-to-risk shape set out above — one winner covering
+two losers — is the one thing about these exit rules that was deliberate. It is
+not being traded away for a more flattering statistic.
+
+*Re-open condition:* the 1.5–2.5% band is the audit's assumption, not a
+measurement of this watchlist. The six closed positions imply something nearer
+1% a day, on a sample far too small to act on. **If realised daily volatility is
+measured and comes in materially below 1.5%, eighteen trading days does not
+deliver what it was chosen for and the holding period must be derived again.** At
+1% a day the ±band does not resolve inside any holding period this bot should
+accept, and the answer would then be a different one — a shorter target, or the
+admission that the strategy is time-based. That question is not settled here.
+
+**What the longer hold costs, accepted deliberately.** Capital is tied up six
+times as long, so the allocation turns over six times more slowly; the bot places
+about one order a day rather than six or seven (§1); and per-strategy results —
+the whole evidence base for switching a strategy off — accumulate about six times
+more slowly, roughly three closed trades a week across all strategies rather than
+seventeen. The weekly report will often have little to say. That is the price of
+letting the exit rules mean something, and it is preferred to a faster stream of
+results that measure only the clock.
 
 **Exits are never blocked.** An exit order bypasses the risk gate entirely. The
 portfolio exposure ceiling, the re-entry cooldown, and an active kill-switch halt all apply to
@@ -389,13 +445,28 @@ unguarded. The bot alerts immediately, falls back to watching that position's
 stop level itself on every cycle, and marks it in `/positions` so the weaker
 protection is visible rather than assumed.
 
-**Overnight holding and gap risk.** Positions are held across session boundaries
-until an exit rule fires. The bot observes prices only while the market is open,
-so a price that gaps overnight can open well below the stop level; the exit then
-happens at whatever the market offers, and the realised loss can be materially
-larger than 5%. This is an accepted and understood cost of holding overnight,
-not a malfunction. The weekly report records the gap between the intended exit
-price and the actual one, so the cost is visible rather than assumed.
+**Overnight, weekend and holiday holding, and gap risk.** Positions are held
+across session boundaries until an exit rule fires. The bot observes prices only
+while the market is open, so a price that gaps between sessions can open well
+below the stop level; the exit then happens at whatever the market offers, and
+the realised loss can be materially larger than 5%. This is an accepted and
+understood cost of holding across a closed market, not a malfunction. The weekly
+report records the gap between the intended exit price and the actual one, so the
+cost is visible rather than assumed.
+
+**The eighteen-day hold multiplies that exposure, and it is still accepted
+(v1.15).** Gap risk is per closed market, not per position, so a position now
+sits through about eighteen overnight closes and three or four weekends instead
+of three closes and at most one weekend — roughly six times as many chances for
+the stop to be jumped rather than touched. Two things bound it and neither
+changes with the hold: the stop is a standing order at the exchange, so it fires
+on the first print past the level whether the bot is running or not, and there is
+no leverage, so the loss on any one position is bounded by what was put into it.
+What is **not** bounded is the excess beyond 5% on a gapped open, and that excess
+is now six times more likely to be met per position. The weekly report's
+intended-versus-actual exit price is the measurement that makes this visible; if
+it shows the gap cost exceeding what the longer hold buys, that is evidence to
+bring back to the holding-period decision above.
 
 **When a position closes**, its instrument enters the two-hour re-entry cooldown,
 the result is recorded against the strategy that opened it together with which
@@ -562,9 +633,9 @@ the order is not sent.
 |---|---|---|
 | Position size on entry | 10% of allocated capital | Every position is the same size, so per-strategy results are directly comparable and no single mistake is expensive. |
 | Total portfolio exposure | 100% of allocated capital | The summed cost of open positions, plus any new order, stays within the allocation. Checked at order time, against holdings the bot did not necessarily open — an adopted position or a lowered allocation is exactly when it binds. Replaces the per-position cap, which could not bind. |
-| Exit rules: stop −5%, target +10%, max age 3 trading days | See *Position lifecycle* | Bound what any single position can lose and how long it can tie up capital. Exits are never blocked by any other limit on this table. |
+| Exit rules: stop −5%, target +10%, max age 18 trading days | See *Position lifecycle* | Bound what any single position can lose and how long it can tie up capital. Exits are never blocked by any other limit on this table. The age limit was 3 trading days until v1.15, at which neither price bound was reachable; §9 carries the derivation. |
 | Maximum concurrent open positions | 10 | Bounds total exposure. At 10% per entry this allows the full allocation to be deployed and nothing beyond it. |
-| Re-entry cooldown per instrument | 2 hours after closing | Prevents a strategy from looping on the same ticker. Constrains repetition without capping how much the bot may trade in a day. |
+| Re-entry cooldown per instrument | 2 hours after closing | Prevents a strategy from looping on the same ticker. Constrains repetition without capping how much the bot may trade in a day. Since v1.15 most of that work is done by the holding period instead — one position per ticker at a time means a ticker is unavailable for eighteen trading days, and the cooldown binds only in the two hours after it frees up. The cooldown is kept because it is the control that does not depend on how long a position happens to be held. |
 | Daily loss limit | 5% of allocated capital | Trips the kill switch. A bad day this size is more likely a bug or a regime change than noise. |
 | Leverage | None | Losses cannot exceed allocated capital. |
 | Short selling | Not permitted | Removes unbounded loss entirely. |
@@ -799,7 +870,7 @@ of its own behaviour.
 | `FILL_SLIPPAGE_ALERT_PCT` | No | `2` | How far an entry fill may land from the signal's reference price before the owner is alerted. Alert only — it never blocks an order and never unwinds a position. |
 | `STOP_LOSS_PCT` | No | `5` | How far below entry price a position is closed automatically. |
 | `TAKE_PROFIT_PCT` | No | `10` | How far above entry price a position is closed automatically. |
-| `MAX_HOLDING_DAYS` | No | `3` | Trading days after which an open position is closed regardless of result. |
+| `MAX_HOLDING_DAYS` | No | `18` | Trading days after which an open position is closed regardless of result. Derived at 1.5% daily volatility (§9); it is a function of assumed volatility, not a constant. |
 | `MAX_OPEN_POSITIONS` | No | `10` | Maximum concurrent open positions. At the default entry size this permits full deployment. |
 | `REENTRY_COOLDOWN_MINUTES` | No | `120` | How long an instrument is blocked from re-entry after a position in it closes. |
 | `DAILY_LOSS_LIMIT_PCT` | No | `5` | Daily loss, as a percentage of allocated capital, that trips the kill switch. |
@@ -853,12 +924,18 @@ depends on the bot being profitable.
     take-profit, and a maximum-age exit. Each closed its position automatically
     without intervention, recorded the result and the trigger against the
     strategy that opened it, started the instrument's cooldown, and alerted the
-    owner.
+    owner. Under the three-day hold this criterion could not be met at all: the
+    first six closed positions were six maximum-age exits, and the stop and the
+    target were not reachable inside the window. The eighteen-day hold (§9) is
+    what makes it reachable; it will also take longer to observe, because the
+    bot closes about three positions a week rather than seventeen.
 14. **Exits continue to work while the bot is halted**, verified by halting it
     with a position open and confirming the position is still monitored and still
     exits on its own triggers.
-15. **A position held over a weekend** is aged correctly — three trading days, not
-    three calendar days — and is not force-closed early.
+15. **A position held over a weekend** is aged correctly — in trading days, not
+    calendar days — and is not force-closed early. At an eighteen-day hold every
+    position crosses at least three weekends, so this is now exercised by
+    ordinary operation rather than by a case that had to be waited for.
 16. **The protective stop survives the bot being stopped.** With a position open,
     the bot is shut down entirely; the stop-loss order is confirmed still live in
     the broker's own application; and on restart the bot adopts the existing stop
@@ -936,7 +1013,7 @@ record, the following were open during drafting and are now settled:
 | Runaway-loop protection | A 2-hour per-instrument re-entry cooldown, replacing the order cap. |
 | Who decides exits | The bot, uniformly. Strategies generate entry signals only. |
 | Take-profit | 10% above entry — twice the stop distance. |
-| Maximum holding period | 3 trading days, then close at market regardless of result. |
+| Maximum holding period | 18 trading days, then close at market regardless of result. Was 3; raised in v1.15 because neither the stop nor the target was reachable inside three days. Derived at 1.5% daily volatility and re-derivable — see §9. |
 | Exits while halted | They continue. A halt blocks entries only. |
 | Overnight positions | Held until an exit rule fires. Gap risk accepted and documented. |
 | Where the stop-loss lives | With the exchange, as a standing order, so protection survives the bot being down. |

@@ -194,6 +194,41 @@ questions and #44 is still the other one.
 - Trains a buy/no-buy classifier. The label is whether the take-profit level is
   reached before the stop level within `horizon_days`, so the model is trained on
   the question the live system actually asks it.
+- **`horizon_days` is `MAX_HOLDING_DAYS` and the two move together (v1.92).**
+  The label horizon is defined here and nowhere else: `sandbox/train.py::_label`,
+  which walks forward from a bar until the stop level or the target level is
+  touched or `horizon_days` runs out. It is the same window `lifecycle.exits`
+  closes a position on, so a training run that passes any other number trains the
+  model on a target the bot does not trade — it would score a setup the live
+  system would have exited before the setup resolved. `MAX_HOLDING_DAYS` moved
+  from 3 to 18 in v1.91 (`config` §4), and every model exported after that is
+  trained at 18. **A model exported at the old horizon is stale and must be
+  retrained, not re-scored**; nothing in the manifest check will say so, because
+  the feature names are unchanged.
+- The signature does not change and no task is re-run for this. The obligation
+  binds the **training run**, not `fit`'s code: the caller is a notebook and it
+  passes `config.max_holding_days`.
+- **Making the coupling mechanical is an open decision.** Two shapes exist —
+  defaulting the argument from `config` the way `_label` already reads
+  `stop_loss_pct` and `take_profit_pct` from it, or recording the horizon in the
+  exported bundle so `strategies.ml_model.load` refuses a model trained at a
+  horizon the deployment does not use. The second is the stronger one, because it
+  catches a stale model file rather than a careless call. Both are ML work and
+  the owner has excluded ML work from #211's round. **Recorded, not settled** —
+  and until one is taken, the only thing holding the two horizons together is
+  this paragraph, which is an intention rather than a prevention.
+- **The unit mismatch is #14's, it is untouched here, and the longer hold widens
+  it.** `_label` computes its deadline as
+  `candles[index].timestamp + timedelta(days=horizon_days)` — **calendar** days —
+  while `MAX_AGE` counts **trading** days, so an 18-day horizon labels over about
+  13 trading bars rather than 18. At 1.5% daily volatility that is a positive
+  class of roughly 7% where the trade horizon gives 12%. The gap grows with the
+  horizon: at 3 days it was under one bar, at 18 it is about five. **This
+  amendment does not fix it** — the owner's decision on #211 is the holding
+  period and nothing else, and the remaining label defects (#14 also reports that
+  Thursday and Friday rows receive exactly one lookforward bar) belong to #14's
+  own round. It is stated so that "the two horizons are the same number" is not
+  read as "the two horizons measure the same thing", which would be false.
 - `seed` is required and recorded in the export: an unreproducible model cannot
   be audited after a losing week.
 - Uses **walk-forward** validation across `folds`; a single train/test split on a

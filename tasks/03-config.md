@@ -43,6 +43,30 @@ Loads and validates every setting once at startup.
   0–100. It is an **alert threshold, not a risk limit**: nothing rejects an
   order or unwinds a position because of it, `risk.gate` never reads it, and a
   missing value therefore takes its default rather than failing the load.
+- **`max_holding_days` defaults to 18, raised from 3 (v1.92).** From
+  `MAX_HOLDING_DAYS`, a positive integer, unchanged in type, name and validation.
+  It is the number of trading days after which `lifecycle.exits` returns
+  `MAX_AGE`, and 3 made both price exits unreachable — six of six closed
+  positions exited on age and the stop-loss path had never run on real money
+  (#211). The new value is derived at an assumed 1.5% daily volatility;
+  `lifecycle/exits.py` §4 carries the arithmetic and the sensitivity, and the
+  brief §9 carries the decision. **This module is the only place the number
+  lives**: nothing else may carry a literal, and `.env.example` matches.
+
+  *Amendment scope.* This changes a default in a module that is already built,
+  so **`tasks/03-config.md` is re-run** — the value in `_DEFAULTS` and the
+  `.env.example` line are the whole change, and no signature moves. Nothing in
+  `interfaces.md` changes, which is exactly why the re-run has to be named here
+  rather than left for a signature check to notice.
+
+  *Pre-existing and not settled here.* `MAX_HOLDING_DAYS` is a risk variable with
+  a default, while the bullet below reads "must never substitute a default for a
+  missing **risk** variable". The two have disagreed since before this amendment
+  — the brief's §18 table has always marked it "Required? No" with a default, and
+  the brief wins — and seven of the eight risk variables are in the same
+  position, which makes that bullet true only of `ALLOCATED_CAPITAL`. It is named
+  here so that it is not read as introduced by this change. **No decision is
+  taken on it and no code follows from this paragraph.**
 - Adds `allow_foreign_holdings`, defaulting to **false**. The trading account is
   the bot's alone (brief v1.8); this flag is the owner's explicit acknowledgement
   that it is not, and it is deliberately awkward to set by accident. It is not a
@@ -134,6 +158,10 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   (`1`, `yes`, `TRUE`, `on`) raises `ConfigError` rather than enabling it (proves
   the safe default — this flag exists to be set deliberately by the owner, never
   to be arrived at).
+- `max_holding_days` is **18** when `MAX_HOLDING_DAYS` is unset, and takes the
+  environment value when it is set (proves the default is the derived horizon and
+  that it is still overridable). The literal 18 belongs in this test and in
+  `_DEFAULTS`, and in no third place.
 
 ## Expected output
 
