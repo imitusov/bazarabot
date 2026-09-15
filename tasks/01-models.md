@@ -173,7 +173,20 @@ and so on) and `state` is the `OperationState` member's name.
 to book an external close at the price it actually happened at (#11), and the
 sign of a payment is not a thing to build a money number on. `OperationRecord`
 also carries `parent_operation_id`, which is how a fee is tied to the trade that
-incurred it. `TradingCalendar` is
+incurred it.
+
+`OrderRecord` and `OperationRecord` both carry `trade_ids: tuple[str, ...]`,
+defaulting to `()` (v1.91). On an `OrderRecord` it is `OrderState.stages[].trade_id`;
+on an `OperationRecord` it is `Operation.trades[].trade_id`. It is how a fee is
+tied to the **order** that incurred it, which `parent_operation_id` alone cannot
+do: a fee's parent is a trade operation, and nothing else in either message says
+which of the bot's orders that trade belongs to. Both are populated only by
+`broker.client` from a live response and are **never persisted** — no column
+holds them, and `db.orders` returns `()` for every row it reads, which is
+correct: a stored row is not evidence about a broker response. An empty tuple
+means "no join material", never "no trades".
+
+`TradingCalendar` is
 the queried schedule that `clock.trading_days_between` and `market.session` read.
 `AppContext` (the assembled dependencies) and `LoadedModel` (an ML model plus its
 feature manifest) are **not** domain types — they live with `app.startup` and

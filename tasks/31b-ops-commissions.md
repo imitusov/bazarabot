@@ -66,6 +66,56 @@ that depended on them.
   through `get_order_state` otherwise** (v1.39) — either way by an identifier,
   never by matching on instrument, time and quantity, which is ambiguous exactly
   when two similar orders are close together.
+- **The order state is not the last word, and a zero there is not an answer
+  (v1.91, #246).** `broker.client` now records `None` rather than `Decimal(0)`
+  when the broker reports a zero commission on a fill, which is what makes these
+  rows visible to `list_missing_commission` at all — but re-querying the same
+  order state returns the same zero, so resolving from it alone would write the
+  original defect back in a second place. When the state carries a number, that
+  number wins and nothing else is read. When it does not, **the operations feed
+  is the arbiter.**
+- **One feed read per run, not one per order.** `backfill` calls
+  `broker.client.get_operations(since, until)` **once**, after
+  `list_missing_commission` returns a non-empty list, and never at all when it
+  returns nothing. The window is the caller's own, and it needs no margin: the
+  fee posts a measured **one second** after its trade (§2.1), and the trade is
+  inside `[since, until]` by construction because that is the window the order
+  was selected in.
+- **Resolution is three-way, and the third case is what stops the alert.** For
+  one order, given the feed:
+  1. the order's `trade_ids` appear in one or more operations' `trade_ids`, and
+     at least one operation's `parent_operation_id` is one of those trades →
+     **the sum of those fees**, recorded;
+  2. the trades are found, no fee operation names any of them as a parent, and
+     the latest of those trades occurred at least `_FEE_SETTLE` before `now` →
+     **`Decimal(0)`, a measured zero**, recorded. The row leaves
+     `list_missing_commission` forever and is never asked about again. This is
+     the commission-free trade, and it is the case that keeps v1.91's "a zero at
+     fill is unknown" from becoming an alert that repeats forever (failure class
+     14);
+  3. anything else — no `trade_ids` on the order state, no matching trade in the
+     feed, or a matching trade younger than `_FEE_SETTLE` → **unknown**. The row
+     is asked about again on the next run, and alerts once at 24 hours as before.
+- **`_FEE_SETTLE` is five minutes, and it is set from the measurement.** The
+  observed trade→fee lag is min 1s, median 1s, max 1s over the full account
+  history (§2.1); five minutes is 300× the worst observed. It exists for exactly
+  one hazard: a trade that fills seconds before `until`, whose fee has not posted
+  yet, must not be read as case 2 and written off as free. It is **not** a
+  settlement window and it is not a reason to widen
+  `app.loops._BACKFILL_LOOKBACK`, which at 7 days is already five orders of
+  magnitude wider than the lag and stays where it is.
+- **Failure of the feed read is not failure of the run.** `BrokerUnavailable`
+  and `BrokerRateLimited` from `get_operations` are caught, logged at WARNING,
+  and the run proceeds with an empty feed — every unresolved row is then case 3,
+  unknown, and is retried tomorrow. That is the same posture `broker.reconcile`
+  takes on the same two classes for the same feed, and the narrowness is the
+  point: **every other exception propagates** under rule 21 (failure class 5).
+  `OrderNotFound` continues to mean "unknown" for the order-state read alone.
+- **A write failure here propagates. It is not swallowed (rule 11).**
+  `record_commission` and `mark_commission_alerted` write the `orders` table,
+  which rule 11 names as trading-critical; this module catches no
+  `aiosqlite.Error` and adds no `except` around either call. Rule 12's
+  non-critical swallow does not reach this module or `db.orders`.
 - Recomputes `realised_pnl` via `db.positions.recompute_realised` for every
   closed position whose orders changed, and returns the number of orders updated.
 - Alerts only when an order's commission is still unknown more than 24 hours
@@ -120,6 +170,29 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   run, daily and before every weekly report, once per stop-loss exit ever taken).
 - That same row is still re-queried on the second run (proves the terminal state
   is on the telling, not the trying).
+- **A row settled from a real zero-at-fill — commission unknown, the re-queried
+  order state still reporting no commission and carrying the fill's `trade_ids` —
+  resolves from the operations feed: the trade operation bearing one of those
+  `trade_ids` has a fee child, the fee is written, and the closed position's
+  `realised_pnl` is recomputed net of it** (v1.91; proves #246 is fixed where it
+  broke. A test that starts from a commission of `None` and a state that reports
+  a number proves nothing about this bug: that path already worked, and the row
+  never reached it).
+- **A trade found in the feed with no fee child, older than `_FEE_SETTLE`, is
+  recorded as `Decimal(0)` and never selected again — no alert, on that run or
+  any later one** (v1.91; proves the commission-free trade terminates. Without
+  this case "a zero at fill is unknown" is an alert that repeats forever, which
+  is failure class 14 and is what the previous remedy for #8 was written to end).
+- **The same trade younger than `_FEE_SETTLE` is left unknown and re-queried**
+  (v1.91; proves the terminal zero is a measurement about a settled trade and not
+  a race with the fee that posts a second later).
+- **`get_operations` raising `BrokerUnavailable` leaves every row unknown and
+  raises nothing**, and the run still alerts on a row past 24 hours (v1.91;
+  proves the feed is an arbiter the run can do without for a day, not a new way
+  for the backfill to fail).
+- The feed is read **once** for a run with several unresolved orders, and **not
+  at all** when nothing is missing (v1.91; proves the daily job costs one call,
+  not one per order and not one on an empty day).
 
 ## Expected output
 
