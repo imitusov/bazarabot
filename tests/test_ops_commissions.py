@@ -10,7 +10,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from zarabot.broker.client import OrderNotFound
+from zarabot.broker.client import BrokerUnavailable, OrderNotFound
 from zarabot.db.connection import connect, disconnect
 from zarabot.db.migrations import apply
 from zarabot.db.orders import get as get_order
@@ -19,6 +19,7 @@ from zarabot.db.positions import close, get, open
 from zarabot.models import (
     ExitTrigger,
     Instrument,
+    OperationRecord,
     OrderRecord,
     OrderStatus,
     Side,
@@ -69,6 +70,7 @@ def _state(
     side: Side = Side.BUY,
     intent: str = "ENTRY",
     trigger: ExitTrigger | None = None,
+    trade_ids: tuple[str, ...] = (),
 ) -> OrderRecord:
     return OrderRecord(
         key=key,
@@ -85,6 +87,45 @@ def _state(
         created_at=NOW,
         settled_at=NOW,
         exit_trigger=trigger,
+        trade_ids=trade_ids,
+    )
+
+
+def _trade(
+    op_id: str, trade_ids: tuple[str, ...], at: datetime | None = None
+) -> OperationRecord:
+    return OperationRecord(
+        id=op_id,
+        figi="BBG000000001",
+        ticker="",
+        occurred_at=at or NOW,
+        commission=Decimal("0"),
+        payment=Decimal("-2000"),
+        price=PRICE,
+        quantity=20,
+        operation_type="OPERATION_TYPE_BUY",
+        state="OPERATION_STATE_EXECUTED",
+        parent_operation_id=None,
+        trade_ids=trade_ids,
+    )
+
+
+def _fee(
+    op_id: str, parent: str, amount: Decimal, at: datetime | None = None
+) -> OperationRecord:
+    return OperationRecord(
+        id=op_id,
+        figi="BBG000000001",
+        ticker="",
+        occurred_at=at or NOW,
+        commission=amount,
+        payment=-amount,
+        price=None,
+        quantity=None,
+        operation_type="OPERATION_TYPE_BROKER_FEE",
+        state="OPERATION_STATE_EXECUTED",
+        parent_operation_id=parent,
+        trade_ids=(),
     )
 
 
@@ -122,7 +163,22 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, obje
             raise OrderNotFound("gone")
         return state
 
+    operations: list[OperationRecord] = []
+    feed_calls: list[tuple[datetime, datetime]] = []
+    feed_failure: list[BaseException] = []
+
+    async def _get_operations(
+        since: datetime, until: datetime
+    ) -> list[OperationRecord]:
+        feed_calls.append((since, until))
+        if feed_failure:
+            raise feed_failure[0]
+        return list(operations)
+
     monkeypatch.setattr("zarabot.ops.commissions.alert", _alert, raising=False)
+    monkeypatch.setattr(
+        "zarabot.ops.commissions.get_operations", _get_operations, raising=False
+    )
     monkeypatch.setattr(
         "zarabot.ops.commissions.get_order_state", _get_order_state, raising=False
     )
@@ -138,6 +194,9 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, obje
             "broker_calls": broker_calls,
             "states": states,
             "monkeypatch": monkeypatch,
+            "operations": operations,
+            "feed_calls": feed_calls,
+            "feed_failure": feed_failure,
         }
     finally:
         await disconnect()
@@ -343,3 +402,206 @@ async def test_backfill_rejects_naive(env: dict[str, object]) -> None:
     naive = datetime(2026, 3, 16, 10, 0)  # noqa: DTZ001
     with pytest.raises(ValueError):
         await backfill(naive, NOW)
+
+
+# --- #246: the operations feed is the arbiter when the state reports no fee ---
+
+
+async def _entry_only() -> None:
+    """One filled order, settled the way a real fill settles it now: unknown."""
+    await record_submitting(KEY, "SBER", Side.BUY, 2, "ENTRY")
+    await settle(KEY, OrderStatus.FILLED, 2, PRICE, None, None)
+
+
+async def test_backfill_resolves_a_zero_at_fill_order_from_the_feed(
+    env: dict[str, object],
+) -> None:
+    """The regression for #246, started from a real fill shape.
+
+    `broker.client` reports no commission at fill because the broker reports a
+    zero there, and re-querying the same order state returns the same zero. The
+    fee exists on the operations feed one second later, as a child of the trade
+    the order executed. A test that starts from a state reporting a number
+    proves nothing about this bug: that path already worked, and the row could
+    never reach it.
+    """
+    position_id = await _round_trip()
+    states = env["states"]
+    assert isinstance(states, dict)
+    states[KEY] = _state(KEY, None, trade_ids=("T-ENTRY",))
+    states[EXIT_KEY] = _state(
+        EXIT_KEY,
+        None,
+        side=Side.SELL,
+        intent="EXIT",
+        trigger=ExitTrigger.TAKE_PROFIT,
+        trade_ids=("T-EXIT",),
+    )
+    operations = env["operations"]
+    assert isinstance(operations, list)
+    operations.extend(
+        [
+            _trade("op-entry", ("T-ENTRY",)),
+            _fee("op-entry-fee", "op-entry", Decimal("0.53")),
+            _trade("op-exit", ("T-EXIT",)),
+            _fee("op-exit-fee", "op-exit", Decimal("0.41")),
+        ]
+    )
+    assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 2
+    entry = await get_order(KEY)
+    exit_order = await get_order(EXIT_KEY)
+    assert entry is not None
+    assert exit_order is not None
+    assert entry.commission == Decimal("0.53")
+    assert exit_order.commission == Decimal("0.41")
+    closed = await get(position_id)
+    assert closed is not None
+    # Gross (110 - 100) x 2 lots x 10 = 200, net of both legs' real fees.
+    assert closed.realised_pnl == Decimal("199.06")
+    assert env["alerts"] == []
+
+
+async def test_backfill_sums_every_fee_child_of_the_trade(
+    env: dict[str, object],
+) -> None:
+    """A fill split across stages carries a fee per trade, not one per order."""
+    await _entry_only()
+    states = env["states"]
+    assert isinstance(states, dict)
+    states[KEY] = _state(KEY, None, trade_ids=("T-1", "T-2"))
+    operations = env["operations"]
+    assert isinstance(operations, list)
+    operations.extend(
+        [
+            _trade("op-a", ("T-1",)),
+            _trade("op-b", ("T-2",)),
+            _fee("fee-a", "op-a", Decimal("0.30")),
+            _fee("fee-b", "op-b", Decimal("0.23")),
+        ]
+    )
+    assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 1
+    loaded = await get_order(KEY)
+    assert loaded is not None
+    assert loaded.commission == Decimal("0.53")
+
+
+async def test_backfill_records_a_measured_zero_and_stops_asking(
+    env: dict[str, object],
+) -> None:
+    """A trade in the feed with no fee child is a commission-free trade.
+
+    It is terminal: recorded as zero, never selected again, and never alerted
+    about. Without this case, "a zero at fill is unknown" is an alert that
+    repeats forever, which is the failure the previous remedy for #8 removed.
+    """
+    await _entry_only()
+    states = env["states"]
+    assert isinstance(states, dict)
+    states[KEY] = _state(KEY, None, trade_ids=("T-FREE",))
+    operations = env["operations"]
+    assert isinstance(operations, list)
+    operations.append(_trade("op-free", ("T-FREE",)))
+    monkeypatch = env["monkeypatch"]
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    monkeypatch.setattr(
+        "zarabot.ops.commissions.now", lambda: NOW + timedelta(hours=25)
+    )
+    since, until = NOW - timedelta(days=1), NOW + timedelta(days=1)
+    assert await backfill(since, until) == 1
+    loaded = await get_order(KEY)
+    assert loaded is not None
+    assert loaded.commission == Decimal("0")
+    assert env["alerts"] == []
+    # Selected once and never again: the row has an answer now.
+    assert await backfill(since, until) == 0
+    assert env["alerts"] == []
+
+
+async def test_backfill_leaves_a_trade_younger_than_the_settle_margin_unknown(
+    env: dict[str, object],
+) -> None:
+    """The terminal zero is a measurement about a settled trade, not a race
+    with the fee that posts a second later."""
+    await _entry_only()
+    states = env["states"]
+    assert isinstance(states, dict)
+    states[KEY] = _state(KEY, None, trade_ids=("T-FRESH",))
+    operations = env["operations"]
+    assert isinstance(operations, list)
+    operations.append(_trade("op-fresh", ("T-FRESH",)))
+    monkeypatch = env["monkeypatch"]
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    monkeypatch.setattr(
+        "zarabot.ops.commissions.now", lambda: NOW + timedelta(seconds=30)
+    )
+    assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 0
+    loaded = await get_order(KEY)
+    assert loaded is not None
+    assert loaded.commission is None
+    assert env["alerts"] == []
+
+
+async def test_backfill_leaves_an_order_with_no_trade_in_the_feed_unknown(
+    env: dict[str, object],
+) -> None:
+    await _entry_only()
+    states = env["states"]
+    assert isinstance(states, dict)
+    states[KEY] = _state(KEY, None, trade_ids=("T-MISSING",))
+    operations = env["operations"]
+    assert isinstance(operations, list)
+    operations.append(_trade("op-other", ("T-SOMEONE-ELSE",)))
+    assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 0
+    loaded = await get_order(KEY)
+    assert loaded is not None
+    assert loaded.commission is None
+
+
+async def test_backfill_survives_an_unavailable_operations_feed(
+    env: dict[str, object],
+) -> None:
+    """The feed is an arbiter the run can do without for a day, not a new way
+    for the backfill to fail."""
+    await _entry_only()
+    states = env["states"]
+    assert isinstance(states, dict)
+    states[KEY] = _state(KEY, None, trade_ids=("T-ENTRY",))
+    failure = env["feed_failure"]
+    assert isinstance(failure, list)
+    failure.append(BrokerUnavailable("feed down"))
+    monkeypatch = env["monkeypatch"]
+    assert isinstance(monkeypatch, pytest.MonkeyPatch)
+    monkeypatch.setattr(
+        "zarabot.ops.commissions.now", lambda: NOW + timedelta(hours=25)
+    )
+    assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 0
+    loaded = await get_order(KEY)
+    assert loaded is not None
+    assert loaded.commission is None
+    alerts = env["alerts"]
+    assert isinstance(alerts, list)
+    assert any(KEY in text for text in alerts)
+
+
+async def test_backfill_reads_the_feed_once_per_run(env: dict[str, object]) -> None:
+    await _round_trip()
+    states = env["states"]
+    assert isinstance(states, dict)
+    states[KEY] = _state(KEY, None, trade_ids=("T-ENTRY",))
+    states[EXIT_KEY] = _state(
+        EXIT_KEY,
+        None,
+        side=Side.SELL,
+        intent="EXIT",
+        trigger=ExitTrigger.TAKE_PROFIT,
+        trade_ids=("T-EXIT",),
+    )
+    await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1))
+    assert len(env["feed_calls"]) == 1  # type: ignore[arg-type]
+
+
+async def test_backfill_does_not_read_the_feed_when_nothing_is_missing(
+    env: dict[str, object],
+) -> None:
+    assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 0
+    assert env["feed_calls"] == []

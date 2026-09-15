@@ -150,3 +150,54 @@ async def test_recorded_version_ahead_of_code_raises_and_changes_nothing(
         highest = await cursor.fetchone()
     assert before == after
     assert highest == (current + 10,)
+
+
+async def test_008_rewrites_a_zero_commission_on_a_filled_order_to_null(
+    tmp_path: Path,
+) -> None:
+    """#246: the history half. Every zero in that column was written by
+    `_executed_commission` reading a zero off the order state, which spec v1.91
+    rules an absence — and `list_missing_commission` selects `IS NULL`, so those
+    rows are invisible to the backfill built to correct them.
+
+    Applied to every spelling a serialised `Decimal` zero may have, and to
+    nothing else.
+    """
+    path = tmp_path / "m.db"
+    script = (MIGRATIONS_DIR / "008_commission_zero_is_unknown.sql").read_text(
+        encoding="utf-8"
+    )
+    rows = [
+        ("k-plain", "FILLED", "0"),
+        ("k-scaled", "FILLED", "0E-9"),
+        ("k-decimals", "FILLED", "0.00"),
+        ("k-real", "FILLED", "0.53"),
+        ("k-unknown", "FILLED", None),
+        ("k-cancelled", "CANCELLED", "0"),
+    ]
+    async with aiosqlite.connect(path) as conn:
+        await apply(conn)
+        for key, status, commission in rows:
+            await conn.execute(
+                """
+                INSERT INTO orders (
+                    key, ticker, figi, side, intent, lots, status,
+                    commission, created_at
+                ) VALUES (?, 'SBER', 'BBG1', 'BUY', 'ENTRY', 1, ?, ?,
+                          '2026-03-16T10:00:00+00:00')
+                """,
+                (key, status, commission),
+            )
+        await conn.commit()
+        # The migration is already applied; running its text again proves the
+        # predicate, which is the part that can be wrong.
+        await conn.executescript(script)
+        cursor = await conn.execute("SELECT key, commission FROM orders")
+        found = dict(await cursor.fetchall())
+    assert found["k-plain"] is None
+    assert found["k-scaled"] is None
+    assert found["k-decimals"] is None
+    assert found["k-real"] == "0.53"
+    assert found["k-unknown"] is None
+    # A cancelled order's zero is not a missing fill commission.
+    assert found["k-cancelled"] == "0"
