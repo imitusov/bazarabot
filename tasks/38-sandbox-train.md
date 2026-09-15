@@ -194,7 +194,7 @@ questions and #44 is still the other one.
 - Trains a buy/no-buy classifier. The label is whether the take-profit level is
   reached before the stop level within `horizon_days`, so the model is trained on
   the question the live system actually asks it.
-- **`horizon_days` is `MAX_HOLDING_DAYS` and the two move together (v1.91).**
+- **`horizon_days` is `MAX_HOLDING_DAYS` and the two move together (v1.92).**
   The label horizon is defined here and nowhere else: `sandbox/train.py::_label`,
   which walks forward from a bar until the stop level or the target level is
   touched or `horizon_days` runs out. It is the same window `lifecycle.exits`

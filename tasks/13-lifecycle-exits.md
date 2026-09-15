@@ -43,7 +43,7 @@ Module **13** of 43 in `dependency-order.md`. Everything before it is complete a
 - Precedence when more than one applies: `STOP_LOSS`, then `TAKE_PROFIT`, then
   `MAX_AGE`. Fixed, so the recorded reason never depends on evaluation order.
 - Boundaries are inclusive at the stop and the target.
-- **The threshold is `config.max_holding_days` and never a literal (v1.91).**
+- **The threshold is `config.max_holding_days` and never a literal (v1.92).**
   This module holds no number of its own; the horizon changed from 3 to 18 in
   v1.91 and no line of this contract changed with it, which is the property that
   made the change a configuration edit rather than a re-specification. A test
@@ -52,7 +52,7 @@ Module **13** of 43 in `dependency-order.md`. Everything before it is complete a
 - Must never place an order, and must never consult a halt — an active halt does
   not suppress exits.
 
-**How `MAX_HOLDING_DAYS` was derived, and how to derive it again (v1.91).**
+**How `MAX_HOLDING_DAYS` was derived, and how to derive it again (v1.92).**
 
 Until v1.91 the horizon was three trading days and neither price exit was
 reachable inside it. Every position the bot had ever closed — six of six — exited
@@ -139,7 +139,7 @@ rises from 0.02% to 12.1%, which is a class a classifier can be trained on.
 Neither is a claim about profit. A longer hold makes the exits reachable; it does
 not make them favourable.
 
-**What else keys off the horizon (v1.91).** Traced when the number changed, and
+**What else keys off the horizon (v1.92).** Traced when the number changed, and
 recorded so the next change traces the same list.
 
 - **`config`** is the only definition. `lifecycle.exits.evaluate` is the only

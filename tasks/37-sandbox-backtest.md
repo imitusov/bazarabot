@@ -194,7 +194,7 @@ questions and #44 is still the other one.
 - Trains a buy/no-buy classifier. The label is whether the take-profit level is
   reached before the stop level within `horizon_days`, so the model is trained on
   the question the live system actually asks it.
-- **`horizon_days` is `MAX_HOLDING_DAYS` and the two move together (v1.91).**
+- **`horizon_days` is `MAX_HOLDING_DAYS` and the two move together (v1.92).**
   The label horizon is defined here and nowhere else: `sandbox/train.py::_label`,
   which walks forward from a bar until the stop level or the target level is
   touched or `horizon_days` runs out. It is the same window `lifecycle.exits`
@@ -270,7 +270,7 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   closing-window mark: with one cycle at the session start, twenty flat bars and
   `max_holding_days=1` produced zero exits).
 - That case sets `max_holding_days` explicitly and supplies **more bars than the
-  horizon it sets** (v1.91). The horizon is configuration and it moved from 3 to
+  horizon it sets** (v1.92). The horizon is configuration and it moved from 3 to
   18 in v1.91; a fixture of a dozen flat bars that proved `MAX_AGE` fires at 3
   proves nothing at 18 and goes green by never reaching the trigger, which is the
   same silence the case was written to break. A fixture sized from the

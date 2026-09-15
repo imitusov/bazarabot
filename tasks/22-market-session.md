@@ -210,7 +210,7 @@ is the failure this cadence exists to prevent.
   does not fire. Nothing raises. #45 lived for the project's whole life on
   exactly that.
 - **It checks the boundary, not contiguity, and the longer holding period is
-  what makes that matter (v1.91).** `covers` is `earliest() ≤ day`: it proves the
+  what makes that matter (v1.92).** `covers` is `earliest() ≤ day`: it proves the
   recorded calendar *reaches back* to the entry, not that every day between the
   entry and now was recorded. A **gap in the middle** of the range passes it, and
   `clock.trading_days_between` then counts only the days that are there, so the

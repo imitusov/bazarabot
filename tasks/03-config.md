@@ -43,7 +43,7 @@ Loads and validates every setting once at startup.
   0–100. It is an **alert threshold, not a risk limit**: nothing rejects an
   order or unwinds a position because of it, `risk.gate` never reads it, and a
   missing value therefore takes its default rather than failing the load.
-- **`max_holding_days` defaults to 18, raised from 3 (v1.91).** From
+- **`max_holding_days` defaults to 18, raised from 3 (v1.92).** From
   `MAX_HOLDING_DAYS`, a positive integer, unchanged in type, name and validation.
   It is the number of trading days after which `lifecycle.exits` returns
   `MAX_AGE`, and 3 made both price exits unreachable — six of six closed
