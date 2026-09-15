@@ -605,3 +605,22 @@ async def test_backfill_does_not_read_the_feed_when_nothing_is_missing(
 ) -> None:
     assert await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1)) == 0
     assert env["feed_calls"] == []
+
+
+async def test_backfill_propagates_a_non_contract_error_from_the_feed(
+    env: dict[str, object],
+) -> None:
+    """The feed catch is exactly as broad as its rule and no broader.
+
+    A rename inside `get_operations` is a programming error, not a broker that
+    is unavailable, and a job that cannot tell the two apart reports a quiet day
+    of no commissions instead of a traceback (failure class 5). This is the
+    propagation half that a swallow test alone cannot pin: it passes against
+    `except Exception` too.
+    """
+    await _entry_only()
+    failure = env["feed_failure"]
+    assert isinstance(failure, list)
+    failure.append(AttributeError("Operation has no attribute 'trades'"))
+    with pytest.raises(AttributeError):
+        await backfill(NOW - timedelta(days=1), NOW + timedelta(days=1))

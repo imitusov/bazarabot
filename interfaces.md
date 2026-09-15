@@ -46,18 +46,22 @@ Entry signal produced by a strategy.
 **`Position(id: int, ticker: str, figi: str, strategy: str, lots: int, lot_size: int, entry_price: Decimal, entry_at: datetime, stop_price: Decimal, target_price: Decimal, status: str, adopted: bool, open_order_key: str, close_order_key: str | None, exit_trigger: ExitTrigger | None, exit_price: Decimal | None, exit_at: datetime | None, realised_pnl: Decimal | None, stop_protection: StopProtection, stop_order_key: str | None)`**
 Open or closed holding. `lots` must be positive. `stop_protection=EXCHANGE` requires `stop_order_key`; `LOCAL` forbids one. Raises `ValueError` on a pairing violation.
 
-**`OrderRecord(key: str, ticker: str, figi: str, side: Side, intent: str, lots: int, status: OrderStatus, filled_lots: int | None, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, created_at: datetime, settled_at: datetime | None, exit_trigger: ExitTrigger | None = None, broker_order_id: str | None = None, commission_alerted_at: datetime | None = None)`**
+**`OrderRecord(key: str, ticker: str, figi: str, side: Side, intent: str, lots: int, status: OrderStatus, filled_lots: int | None, filled_price: Decimal | None, commission: Decimal | None, broker_reason: str | None, created_at: datetime, settled_at: datetime | None, exit_trigger: ExitTrigger | None = None, broker_order_id: str | None = None, commission_alerted_at: datetime | None = None, trade_ids: tuple[str, ...] = ())`**
 Client-keyed order. `intent` is `ENTRY` or `EXIT`. `exit_trigger` is non-null
 exactly when `intent` is `EXIT` (`STOP_LOSS`, `TAKE_PROFIT`, `MAX_AGE`).
 `broker_order_id` is the broker's own identifier where the bot knows it — a row
 describing an execution the exchange performed is filed under a key the broker
 has never seen. `commission_alerted_at` is set once, when the owner is first
-told this row's commission is unknown (#8).
+told this row's commission is unknown (#8). `trade_ids` is
+`OrderState.stages[].trade_id` — the executions the broker attributes to this
+order, used to tie a fee on the operations feed to the order that incurred it
+(v1.91, #246). Broker-sourced and **never persisted**: `db.orders` returns `()`
+for every row it reads, and an empty tuple means "no join material".
 
 **`StopOrderRecord(key: str, stop_order_id: str | None, position_id: int, ticker: str, lots: int, stop_price: Decimal, status: StopOrderStatus, created_at: datetime, settled_at: datetime | None)`**
 Standing stop-loss tracked locally.
 
-**`OperationRecord(id: str, figi: str, ticker: str, occurred_at: datetime, commission: Decimal, payment: Decimal, price: Decimal | None, quantity: int | None, operation_type: str = "", state: str = "", parent_operation_id: str | None = None)`**
+**`OperationRecord(id: str, figi: str, ticker: str, occurred_at: datetime, commission: Decimal, payment: Decimal, price: Decimal | None, quantity: int | None, operation_type: str = "", state: str = "", parent_operation_id: str | None = None, trade_ids: tuple[str, ...] = ())`**
 Broker operation including actual commission. `payment` may be negative (a
 debit). `operation_type` and `state` are the broker's own enum names
 (`OPERATION_TYPE_SELL`, `OPERATION_STATE_EXECUTED`, …); `parent_operation_id`
@@ -791,7 +795,10 @@ at WARNING; the rest of the window is still returned. Empty list when the
 exchange is absent from the response.
 **`async post_market_order(key: str, figi: str, side: Side, lots: int) → OrderRecord`**
 `confirm_margin_trade=False`. Raises `OrderRejected`. `commission` is
-`executed_commission` converted with `money_to_decimal`, or `None` until filled.
+`executed_commission`, or `None` until filled — **and `None` when the broker
+reports it as zero on a fill**, which it does on every fill: a zero there is an
+absence, not a measurement, and writing `Decimal(0)` is what hid it from the
+backfill and left every realised P&L gross (v1.91, #246).
 `EXECUTION_REPORT_STATUS_PARTIALLYFILL` maps to `SUBMITTED` — still live at the
 broker — with `filled_lots` below `lots` and `settled_at` null; `FILLED` means
 `filled_lots == lots` (#10).
@@ -821,15 +828,20 @@ naive datetimes.
 **`async get_max_lots(figi: str) → int`**
 Buy-side market max lots.
 **`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**
-Period cost reconciliation, and the resolution of a sale the bot did not
-submit (#11). Not the per-order commission source — `OperationRecord` has no
-order id. Carries `operation_type`, `state` and `parent_operation_id` verbatim;
-`commission` is set for fee operations identified by type, never by a substring
-of a name. Returns only `OPERATION_STATE_EXECUTED` operations.
+Period cost reconciliation, the resolution of a sale the bot did not submit
+(#11), and — since v1.91 and **only by identifier** — the per-order commission
+source of last resort (#246). Carries `operation_type`, `state`,
+`parent_operation_id` and `trade_ids` verbatim; `commission` is set for fee
+operations identified by type, never by a substring of a name. Returns only
+`OPERATION_STATE_EXECUTED` operations. Attribution to an order is by
+`trade_ids` against the order state's own; matching on instrument, time and
+quantity remains forbidden.
 **`async get_order_state(key: str) → OrderRecord`**
 Lookup by `order_id_type=ORDER_ID_TYPE_REQUEST`. Raises `OrderNotFound`.
-`commission` is `executed_commission` via `money_to_decimal`, or `None` until filled.
-Same partial-fill mapping as `post_market_order`.
+`commission` is `executed_commission`, `None` until filled and `None` when the
+broker reports zero on a fill (v1.91, #246). `trade_ids` carries the state's
+`stages[].trade_id`, `()` where there are none. Same partial-fill mapping as
+`post_market_order`.
 **`async get_order_state_by_broker_id(broker_order_id: str) → OrderRecord`**
 The same lookup with `ORDER_ID_TYPE_EXCHANGE`, for a row whose `key` the broker
 has never seen — a stop the exchange fired on the bot's behalf. The returned
@@ -1226,6 +1238,15 @@ present, and `recompute_realised` for affected closed positions. The lookup is
 by `get_order_state_by_broker_id(broker_order_id)` when the row carries one —
 a stop the exchange fired is filed under a key the broker never saw — and by
 `get_order_state(key)` otherwise; never by matching on instrument and time (#8).
+**The order state is not the last word (v1.91, #246):** it reports zero on every
+fill, so when it carries no number the operations feed is the arbiter, read
+**once** per run over the caller's own window and joined on `trade_ids`.
+Resolution is three-way — a fee child of the order's trades is a value; the
+trades found with no fee child and settled more than `_FEE_SETTLE` (5 minutes)
+ago is a **measured zero**, recorded, terminal, never alerted about; anything
+else is unknown and retried. `BrokerUnavailable` / `BrokerRateLimited` from the
+feed leave every row unknown and raise nothing; every other exception
+propagates. The feed is not read at all when no order is missing a commission.
 Returns how many orders were updated. Alerts only when commission is still
 unknown more than 24 hours after the fill (strictly greater than 24h), and
 **once per order**, marking it via `db.orders.mark_commission_alerted`; the row

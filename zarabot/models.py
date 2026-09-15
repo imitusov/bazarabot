@@ -253,6 +253,14 @@ class OrderRecord:
     broker_order_id: str | None = None
     # Set once, when the owner is first told this row's commission is unknown.
     commission_alerted_at: datetime | None = None
+    # `OrderState.stages[].trade_id` — the executions the broker attributes to
+    # this order. It is how a fee on the operations feed is tied to the *order*
+    # that incurred it, which `parent_operation_id` alone cannot do: a fee's
+    # parent is a trade operation, and nothing else in either message says which
+    # order that trade belongs to (#246). Broker-sourced and never persisted —
+    # no column holds it, and `db.orders` returns `()` for every row it reads,
+    # which is correct: a stored row is not evidence about a broker response.
+    trade_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_common(self)
@@ -292,6 +300,9 @@ class OperationRecord:
     operation_type: str = ""
     state: str = ""
     parent_operation_id: str | None = None
+    # `Operation.trades[].trade_id` — the other half of the join above (#246).
+    # Empty on a fee row, which carries its link in `parent_operation_id`.
+    trade_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_common(self)

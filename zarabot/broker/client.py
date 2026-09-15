@@ -393,12 +393,49 @@ def _decimal_money(raw: object | None) -> Decimal:
 
 
 def _executed_commission(raw: object | None) -> Decimal | None:
+    """The broker's commission for one order, or `None` where it has not said.
+
+    **A zero here is an absence, not a measurement (spec v1.91, #246).** The
+    order state reports `executed_commission` as zero on every fill — 22 of 22
+    on the live account, against 22 fee operations totalling 14.67 for the same
+    trades — because the fee posts a second later as a separate operation. The
+    value written was `Decimal(0)`, `db.orders.list_missing_commission` selects
+    `commission IS NULL`, and so the backfill built to recover exactly this was
+    never shown one of those rows. Every realised P&L the bot produced was
+    gross, and nothing anywhere said so.
+
+    `None` is what "the broker has not told us" looks like, and it is what makes
+    the row visible to `ops.commissions`, which resolves it from the operations
+    feed. A genuinely commission-free trade is recorded unknown here too and is
+    settled there as a *measured* zero, terminally — it does not alert forever.
+
+    Nothing is estimated by this: the arbiter is still the broker.
+    """
     if raw is None:
         return None
     # _as_decimal, like the money and quote converters beside it, reads
     # units/nano directly. money_to_decimal wants an SDK MoneyProtocol, which
     # this module deliberately does not thread through its own helpers.
-    return _as_decimal(raw)
+    value = _as_decimal(raw)
+    return None if value == 0 else value
+
+
+def _trade_ids(raw: object | None) -> tuple[str, ...]:
+    """Execution identifiers, verbatim and in order; `()` where there are none.
+
+    `OrderState.stages[].trade_id` and `Operation.trades[].trade_id` are the
+    same identifier on the two sides of the join `ops.commissions` uses to tie a
+    fee to the order that incurred it (#246). An empty tuple means "no join
+    material", never "no trades".
+    """
+    if raw is None:
+        return ()
+    ids: list[str] = []
+    for item in raw:  # type: ignore[attr-defined]
+        trade_id = getattr(item, "trade_id", None)
+        if trade_id:
+            ids.append(str(trade_id))
+    return tuple(ids)
 
 
 def _decimal_quote(raw: object | None) -> Decimal:
@@ -901,6 +938,7 @@ def _order_record(
     broker_reason: str | None,
     created_at: datetime,
     settled_at: datetime | None,
+    trade_ids: tuple[str, ...] = (),
 ) -> OrderRecord:
     intent = "ENTRY" if side is Side.BUY else "EXIT"
     return OrderRecord(
@@ -917,6 +955,7 @@ def _order_record(
         broker_reason=broker_reason,
         created_at=created_at,
         settled_at=settled_at,
+        trade_ids=trade_ids,
     )
 
 
@@ -1161,6 +1200,7 @@ async def get_executed_stop_fills(
             commission=_executed_commission(
                 getattr(state, "executed_commission", None)
             ),
+            trade_ids=_trade_ids(getattr(state, "stages", None)),
             broker_reason=None,
             created_at=getattr(state, "order_date", None) or clock.now(),
             settled_at=getattr(state, "order_date", None) or clock.now(),
@@ -1223,6 +1263,7 @@ async def get_operations(since: datetime, until: datetime) -> list[OperationReco
                 operation_type=operation_type,
                 state=state,
                 parent_operation_id=getattr(raw, "parent_operation_id", "") or None,
+                trade_ids=_trade_ids(getattr(raw, "trades", None)),
             )
         )
     _note_success("get_operations")
@@ -1298,6 +1339,7 @@ def _state_to_record(key: str, response: Any) -> OrderRecord:
             if filled
             else None
         ),
+        trade_ids=_trade_ids(getattr(response, "stages", None)),
         broker_reason=None,
         created_at=created,
         settled_at=created if status is OrderStatus.FILLED else None,
