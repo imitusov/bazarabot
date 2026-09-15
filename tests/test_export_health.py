@@ -286,10 +286,15 @@ def test_health_unit_treats_a_failed_push_as_failure() -> None:
     assert push_at < fail_at
 
 
-def test_schema_v7_queries_succeed_on_migrated_database(tmp_path: Path) -> None:
-    """Verification from issue #68: a current schema is aggregates, not errors."""
+def test_current_schema_queries_succeed_on_migrated_database(tmp_path: Path) -> None:
+    """Verification from issue #68: a current schema is aggregates, not errors.
+
+    The expected version is read from `migrations/` rather than written down, so
+    a new migration does not turn this into a failure about the number while
+    saying nothing about the queries, which is what it exists to check.
+    """
     mod = _mod()
-    db = tmp_path / "v7.db"
+    db = tmp_path / "current.db"
     conn = sqlite3.connect(db)
     migrations = sorted(Path("migrations").glob("*.sql"))
     for sql_file in migrations:
@@ -302,12 +307,13 @@ def test_schema_v7_queries_succeed_on_migrated_database(tmp_path: Path) -> None:
         )
     conn.commit()
     conn.close()
+    highest = max(int(path.name.split("_", 1)[0]) for path in migrations)
     # `since` is passed rather than defaulted: with None, read_database falls
     # through to datetime.now(), and the rulebook forbids a test relying on the
     # wall clock. It is also the parameter the window queries filter on.
     info, problems = mod.read_database(db, since=NOW.isoformat())
     assert info["present"] is True
-    assert info["schema_version"] == 7
+    assert info["schema_version"] == highest
     assert problems == []
     assert info["positions_open"] == 0
     assert info["daily_snapshots_rows"] == 0

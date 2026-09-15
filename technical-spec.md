@@ -1,7 +1,7 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.90
-**Date:** 2026-09-13
+**Version:** 1.91
+**Date:** 2026-09-15
 **Implements:** `business-brief.md` v1.14
 
 **Companion document.** Read the brief first. When this spec and the brief
@@ -265,6 +265,30 @@ status from this endpoint and must not be written against a mock that agrees wit
 an assumption. Run it on demand, before that branch is built. V12 sets the
 precedent for a numbered check outside the suite.
 
+**V14 — `verify_commission_attribution.py` (v1.91).** On the live account,
+read-only, over a window the operator supplies: for every `FILLED` order the bot
+has a `broker_order_id` for, reads the order state and the operations feed and
+reports whether the order's execution identifiers — `OrderState.stages[].trade_id`
+— appear in any operation's `Operation.trades[].trade_id`, and whether that
+operation has a fee child. PASS requires at least one order to join and every
+joined trade's fee to resolve; a joined trade with no fee child is reported, not
+failed, because a commission-free trade is possible and this check cannot tell
+one from a broken join on a single row.
+
+**V14 gates the join `ops.commissions` rests on, and is not in `run_all.sh`
+(v1.91).** The join is the one part of the #246 remedy that is inferred from the
+SDK's own message definitions rather than measured: `trade_id` is the same named
+field on both sides of the same API, so a match is a match by construction, but
+nobody has yet confirmed that a real fill populates `stages` or that the same
+identifier reaches the operations feed. Its failure mode is benign — no join
+means the commission stays **unknown** and the once-per-order alert fires —
+so it cannot produce a wrong number, only a missing one. It is still an
+assumption, and §2.1 records it as unmeasured with this check as its gate. V12
+and V13 set the precedent for a numbered check outside the suite. **Run V14
+before the one-off history repair in `ops/RUNBOOK.md`**: a repair run over the
+full account history against a join that does not resolve alerts once per order
+and fixes nothing.
+
 ### 2.1 Measured values
 
 The suite ran green for the first time on **2026-08-27** — V1–V11, 11 of 11.
@@ -287,6 +311,9 @@ that inspection could not have falsified.
 | Operations feed, fee attribution | **Every fee row carries a parent id that resolves inside the same window.** 7 fee rows of 16, 0 without a parent | Measured 2026-09-10 by V12 against the live account over 90 days. This is the assumption `get_operations` rests on: a fee whose parent is outside the window is attributed to nothing and the position's commission stays `Decimal(0)` while looking settled |
 | Operations feed, executed state | `OPERATION_STATE_EXECUTED` is the only state seen; the name matches the parser's constant | Measured 2026-09-10 by V12. The parser drops every other state, so a renamed constant would silently drop all 16 rows rather than fail |
 | Operations feed, types seen | `OPERATION_TYPE_BUY`, `OPERATION_TYPE_BROKER_FEE`, `OPERATION_TYPE_INPUT`. **No SELL row has ever existed** | Measured 2026-09-10 by V12. `broker.reconcile._resolve_sale` is therefore **unmeasured**: the path that books an external close has never run against real data. V12's SELL check fails by design until the account has sold once (#44) |
+| **`executed_commission` at fill** | **Zero on 22 of 22 real fills.** The same account's feed carries 22 fee operations totalling 14.67 over the same history, one per trade | Measured 2026-09-15 against the live account, full history 2026-03-19 → 2026-09-15 (#246). The order state's `executed_commission` is what `broker.client` recorded, so all 22 order rows carry `commission = '0'` — a *value*, not a null — and `db.orders.list_missing_commission` selects `commission IS NULL`, so the backfill written to correct exactly this has never seen one of these rows. Realised P&L across 7 closed positions read 66.18 gross against 14.67 of fees, roughly 22% overstated. A figure wrong on 100% of observed fills is not a measurement, which is what v1.91 settles |
+| **Fee posting lag** | **min 1s, median 1s, max 1s.** 22 of 22 fees have a parent trade inside the window; **0 orphan fees, 0 trades with no fee** | Measured 2026-09-15 against the live account, full history (#246). This is what rules out "the fee has not posted yet" as the explanation and rules out widening `app.loops._BACKFILL_LOOKBACK`, which at 7 days is already five orders of magnitude wider than the lag. It is also the number `ops.commissions._FEE_SETTLE` is set from. A genuinely commission-free trade has **never** occurred on this account — an observation, not a guarantee, so the code must still terminate on one |
+| **Order state ↔ operations join by `trade_id`** | **NOT MEASURED.** Inferred from the SDK's own messages: `OrderState.stages[].trade_id` and `Operation.trades[].trade_id`, the same named field on both sides of the same API | Recorded 2026-09-15 as an assumption with a gate, not as a measurement (#246). `ops.commissions` joins on it to attribute a fee to an order. **V14 is its check** and must run before the one-off history repair. It is recorded here because #39 and #43 were both assumptions inspection could not falsify; unlike those, this one fails *loudly* — no join means the commission stays unknown and alerts once, never a wrong number |
 | `get_operations` deprecation | Emits `DeprecatedWarning` — "deprecated as of 1.0.0" | Observed 2026-09-10. Same posture as `share_by`: it works at 1.49.1, noted, not acted on |
 | **Trading schedule, past** | **Not obtainable.** Any `from_` before today's midnight is rejected with `INVALID_ARGUMENT` / **30003** | Measured 2026-08-28 against the live account across seven ranges — 14 days back, 7, 1, and every end date from midnight to +7d. Every one failed; only a range starting at today's midnight is served. This is why `MAX_AGE` cannot simply be given a backward window (#45) |
 | **Trading schedule, a closed day's `date`** | **Populated and correct.** `TradingDay.date` carries the real calendar date on a **non-trading** day; `start_time` and `end_time` carry the `1970-01-01T00:00:00+00:00` sentinel, not null. The returned sequence is **contiguous** — one entry per calendar day, no gaps | Measured 2026-09-12 against the live account, one read-only `trading_schedules` call over today +14d. Five closed days in the window returned `2026-09-12`, `09-13`, `09-19`, `09-20`, `09-26` — the actual weekends. Field 1 is therefore a usable key for a day with no session, which is what `SessionInfo.trade_date` rests on (#51), and contiguity is what makes "oldest first by `trade_date`" a total order rather than an aspiration. It also explains why #51 was invisible: a closed day genuinely has no session times, so mapping them to `None` looks right, and discarding the date alongside them looks like part of the same normalisation. It is not — the sentinel is in fields 3 and 4 only |
@@ -697,6 +724,21 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
 **`broker.client`**
 - Each method returns the documented domain type given a scripted broker
   response (happy path per method).
+- **An order state reporting `execution_report_status = FILL` and
+  `executed_commission` of units 0 / nano 0 yields `commission is None`, and the
+  same state with a non-zero `executed_commission` yields that `Decimal`**
+  (v1.91; proves a zero at fill is recorded as unknown and not as a measurement,
+  which is the whole of #246. A fixture whose `executed_commission` is absent
+  pins nothing: `None` already produced `None`, and that is exactly why this
+  survived — failure class 3).
+- `post_market_order` on a fill with a zero `executed_commission` writes
+  `commission is None` too (v1.91; proves the rule is on the field and not on one
+  call site — the same helper serves four).
+- An order state whose `stages` carry `trade_id`s exposes them as `trade_ids` in
+  order, and one with no stages exposes `()` (v1.91; proves the join material
+  reaches `ops.commissions` rather than being read and dropped).
+- `get_operations` exposes each operation's `trades[].trade_id` as `trade_ids`,
+  and `()` where there are none (v1.91; the other half of the same join).
 - A transport error raises `BrokerUnavailable` (proves transport failures are
   typed, not leaked as SDK exceptions).
 - **An `INVALID_ARGUMENT` response does not raise `BrokerUnavailable`** — it
@@ -1391,6 +1433,29 @@ Additionally, on exits booked from an exchange stop:
   run, daily and before every weekly report, once per stop-loss exit ever taken).
 - That same row is still re-queried on the second run (proves the terminal state
   is on the telling, not the trying).
+- **A row settled from a real zero-at-fill — commission unknown, the re-queried
+  order state still reporting no commission and carrying the fill's `trade_ids` —
+  resolves from the operations feed: the trade operation bearing one of those
+  `trade_ids` has a fee child, the fee is written, and the closed position's
+  `realised_pnl` is recomputed net of it** (v1.91; proves #246 is fixed where it
+  broke. A test that starts from a commission of `None` and a state that reports
+  a number proves nothing about this bug: that path already worked, and the row
+  never reached it).
+- **A trade found in the feed with no fee child, older than `_FEE_SETTLE`, is
+  recorded as `Decimal(0)` and never selected again — no alert, on that run or
+  any later one** (v1.91; proves the commission-free trade terminates. Without
+  this case "a zero at fill is unknown" is an alert that repeats forever, which
+  is failure class 14 and is what the previous remedy for #8 was written to end).
+- **The same trade younger than `_FEE_SETTLE` is left unknown and re-queried**
+  (v1.91; proves the terminal zero is a measurement about a settled trade and not
+  a race with the fee that posts a second later).
+- **`get_operations` raising `BrokerUnavailable` leaves every row unknown and
+  raises nothing**, and the run still alerts on a row past 24 hours (v1.91;
+  proves the feed is an arbiter the run can do without for a day, not a new way
+  for the backfill to fail).
+- The feed is read **once** for a run with several unresolved orders, and **not
+  at all** when nothing is missing (v1.91; proves the daily job costs one call,
+  not one per order and not one on an empty day).
 
 **`state.halt`**
 - A `DAILY_LOSS_LIMIT` halt emits `halt_triggered` carrying `reason`, `detail`
@@ -2041,7 +2106,20 @@ and so on) and `state` is the `OperationState` member's name.
 to book an external close at the price it actually happened at (#11), and the
 sign of a payment is not a thing to build a money number on. `OperationRecord`
 also carries `parent_operation_id`, which is how a fee is tied to the trade that
-incurred it. `TradingCalendar` is
+incurred it.
+
+`OrderRecord` and `OperationRecord` both carry `trade_ids: tuple[str, ...]`,
+defaulting to `()` (v1.91). On an `OrderRecord` it is `OrderState.stages[].trade_id`;
+on an `OperationRecord` it is `Operation.trades[].trade_id`. It is how a fee is
+tied to the **order** that incurred it, which `parent_operation_id` alone cannot
+do: a fee's parent is a trade operation, and nothing else in either message says
+which of the bot's orders that trade belongs to. Both are populated only by
+`broker.client` from a live response and are **never persisted** — no column
+holds them, and `db.orders` returns `()` for every row it reads, which is
+correct: a stored row is not evidence about a broker response. An empty tuple
+means "no join material", never "no trades".
+
+`TradingCalendar` is
 the queried schedule that `clock.trading_days_between` and `market.session` read.
 `AppContext` (the assembled dependencies) and `LoadedModel` (an ML model plus its
 feature manifest) are **not** domain types — they live with `app.startup` and
@@ -3376,12 +3454,22 @@ consecutive-failure alert and is retried as though waiting would help.
 
 **`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**
 - Executed operations including actual commission charged. Used for independent
-  reconciliation of costs over a period — **not** as the per-order commission
-  source: `OperationRecord` carries no order identifier, so attributing an
-  operation to an order would mean matching on instrument, time and quantity,
-  which is ambiguous exactly when two similar orders are close together.
-- Each record carries `operation_type`, `state` and `parent_operation_id`
-  verbatim (v1.35). `commission` is populated for fee operations, identified by
+  reconciliation of costs over a period, and — **since v1.91 and only by
+  identifier** — as the per-order commission source of last resort.
+- **What is still forbidden is the matching, not the feed (v1.91, #246).** Until
+  v1.91 this line read "**not** as the per-order commission source:
+  `OperationRecord` carries no order identifier, so attributing an operation to
+  an order would mean matching on instrument, time and quantity, which is
+  ambiguous exactly when two similar orders are close together." The second half
+  of that sentence is still binding and always will be; the first half was a
+  conclusion drawn from it that does not follow, and it is what left every
+  realised P&L gross (§2.1). `OperationRecord` **does** carry an identifier the
+  broker issued — `trades[].trade_id`, exposed as `trade_ids` — and an order's
+  own `stages[].trade_id` is the same identifier. Attribution by that join is
+  exact: an id matches or it does not. Matching on instrument, time and quantity
+  remains forbidden here and everywhere.
+- Each record carries `operation_type`, `state`, `parent_operation_id` and
+  `trade_ids` verbatim (v1.35; `trade_ids` v1.91). `commission` is populated for fee operations, identified by
   `operation_type`, and is zero elsewhere. It was identified by testing whether
   the string `FEE` appeared in an attribute the record did not expose, which
   worked only because every fee type happens to contain it.
@@ -3409,11 +3497,52 @@ process environment immediately after `config.load()` and before any broker call
 environment when a channel is created, so the only requirement is that it is set
 before the first client is constructed.
 
-**Commission comes back on the order itself.** Both `PostOrderResponse` and
-`OrderState` carry `executed_commission`, keyed by our own idempotency key.
-`post_market_order` and `get_order_state` therefore populate
-`OrderRecord.commission` directly, with no matching and no ambiguity. Commission
-is never estimated, and never inferred from an operations feed.
+**Commission does not come back on the order itself, and a zero there is
+unknown, not measured (v1.91, #246).** Both `PostOrderResponse` and `OrderState`
+carry `executed_commission`, keyed by our own idempotency key, and this spec
+said until v1.91 that populating `OrderRecord.commission` from it was the whole
+story. It is not: on the live account the field reads **zero on 22 of 22 real
+fills** while 22 fee operations totalling 14.67 exist in the same feed for the
+same trades (§2.1). `Decimal(0)` was therefore written where nothing was known,
+`db.orders.list_missing_commission` selects `commission IS NULL`, and the
+backfill built to recover a late commission has never been shown a single one of
+these rows.
+
+The contract question that produced this is *"is a zero at fill a measurement or
+an absence?"*, and v1.91 answers it: **an absence.**
+
+- **`_executed_commission` returns `None` when the broker reports a zero
+  commission on an order it reports as filled.** A non-zero value is the
+  broker's own number for that order and is recorded as before. This applies
+  everywhere the helper is used — `post_market_order`, `get_order_state`,
+  `get_order_state_by_broker_id` and `get_executed_stop_fills` — because the
+  field is the same field in all four.
+- The cost of this reading is that a **genuinely commission-free trade** is
+  recorded as unknown rather than as zero. That is not left hanging: the
+  operations feed settles it as a *measured zero*, terminally, under
+  `ops.commissions` below. Nothing alerts forever on one.
+- The value of this reading is that the row becomes visible to the backfill at
+  all. Nothing is estimated: `None` is what "the broker has not told us" looks
+  like, and the arbiter is still the broker.
+
+**Commission is never estimated. The per-order source is the order state where
+it carries a number and the operations feed where it does not, joined by an
+identifier the broker issued** — never by matching on instrument, time and
+quantity, which is ambiguous exactly when two similar orders are close together,
+and which was declined once already for #8.
+
+**`OrderRecord.trade_ids` and `OperationRecord.trade_ids` carry the join
+(v1.91).** `OrderState.stages[].trade_id` is the set of executions the broker
+attributes to one order; `Operation.trades[].trade_id` is the same identifier on
+the operations feed. Both are read verbatim into a `tuple[str, ...]`, empty where
+the broker supplies none. They are **broker-sourced and never persisted**: no
+column holds them, `db.orders` returns `()` for every row it reads, and nothing
+downstream may treat an empty tuple as anything but "no join material".
+
+**The join is an assumption with a gate, not a measurement (v1.91).** §2.1
+records it as unmeasured and names **V14** as its check. Its failure mode is an
+unresolved commission and a once-per-order alert — loud and recoverable — never a
+wrong number, which is why it is admissible where FIGI-and-time matching is not.
 
 **`async get_order_state(key: str) → OrderRecord`**
 - Retrieves an order **by the client idempotency key alone**, so a restarted
@@ -5818,6 +5947,56 @@ that depended on them.
   through `get_order_state` otherwise** (v1.39) — either way by an identifier,
   never by matching on instrument, time and quantity, which is ambiguous exactly
   when two similar orders are close together.
+- **The order state is not the last word, and a zero there is not an answer
+  (v1.91, #246).** `broker.client` now records `None` rather than `Decimal(0)`
+  when the broker reports a zero commission on a fill, which is what makes these
+  rows visible to `list_missing_commission` at all — but re-querying the same
+  order state returns the same zero, so resolving from it alone would write the
+  original defect back in a second place. When the state carries a number, that
+  number wins and nothing else is read. When it does not, **the operations feed
+  is the arbiter.**
+- **One feed read per run, not one per order.** `backfill` calls
+  `broker.client.get_operations(since, until)` **once**, after
+  `list_missing_commission` returns a non-empty list, and never at all when it
+  returns nothing. The window is the caller's own, and it needs no margin: the
+  fee posts a measured **one second** after its trade (§2.1), and the trade is
+  inside `[since, until]` by construction because that is the window the order
+  was selected in.
+- **Resolution is three-way, and the third case is what stops the alert.** For
+  one order, given the feed:
+  1. the order's `trade_ids` appear in one or more operations' `trade_ids`, and
+     at least one operation's `parent_operation_id` is one of those trades →
+     **the sum of those fees**, recorded;
+  2. the trades are found, no fee operation names any of them as a parent, and
+     the latest of those trades occurred at least `_FEE_SETTLE` before `now` →
+     **`Decimal(0)`, a measured zero**, recorded. The row leaves
+     `list_missing_commission` forever and is never asked about again. This is
+     the commission-free trade, and it is the case that keeps v1.91's "a zero at
+     fill is unknown" from becoming an alert that repeats forever (failure class
+     14);
+  3. anything else — no `trade_ids` on the order state, no matching trade in the
+     feed, or a matching trade younger than `_FEE_SETTLE` → **unknown**. The row
+     is asked about again on the next run, and alerts once at 24 hours as before.
+- **`_FEE_SETTLE` is five minutes, and it is set from the measurement.** The
+  observed trade→fee lag is min 1s, median 1s, max 1s over the full account
+  history (§2.1); five minutes is 300× the worst observed. It exists for exactly
+  one hazard: a trade that fills seconds before `until`, whose fee has not posted
+  yet, must not be read as case 2 and written off as free. It is **not** a
+  settlement window and it is not a reason to widen
+  `app.loops._BACKFILL_LOOKBACK`, which at 7 days is already five orders of
+  magnitude wider than the lag and stays where it is.
+- **Failure of the feed read is not failure of the run.** `BrokerUnavailable`
+  and `BrokerRateLimited` from `get_operations` are caught, logged at WARNING,
+  and the run proceeds with an empty feed — every unresolved row is then case 3,
+  unknown, and is retried tomorrow. That is the same posture `broker.reconcile`
+  takes on the same two classes for the same feed, and the narrowness is the
+  point: **every other exception propagates** under rule 21 (failure class 5).
+  `OrderNotFound` continues to mean "unknown" for the order-state read alone.
+- **A write failure here propagates. It is not swallowed (rule 11).**
+  `record_commission` and `mark_commission_alerted` write the `orders` table,
+  which rule 11 names as trading-critical; this module catches no
+  `aiosqlite.Error` and adds no `except` around either call. Rule 12's
+  non-critical swallow does not reach this module or `db.orders`.
 - Recomputes `realised_pnl` via `db.positions.recompute_realised` for every
   closed position whose orders changed, and returns the number of orders updated.
 - Alerts only when an order's commission is still unknown more than 24 hours
@@ -6614,6 +6793,31 @@ historical record is the purpose of the project. Backups are retained 30 days.
   re-fetched any more than any other past day can.
 - `007_job_runs.sql` creates `job_runs`. Empty at first, which simply means
   every job is due once after the migration — correct, not a gap.
+- `008_commission_zero_is_unknown.sql` rewrites `orders.commission` to `NULL` on
+  every `FILLED` row whose recorded commission is numerically zero (v1.91, #246).
+  It adds no column. This is the **history half** of v1.91: recording `None` at
+  fill fixes the next order, and does nothing at all for the 22 rows already
+  carrying `'0'`, which `list_missing_commission` cannot see and the backfill has
+  therefore never been shown. Without this migration the repair below finds
+  nothing and the P&L series stays uniformly gross.
+- **A genuine measured zero cannot be lost by `008`, because none has ever been
+  written.** Every zero in the column was produced by `_executed_commission`
+  reading the order state, which v1.91 rules an absence; the *measured* zero is a
+  concept v1.91 introduces, and the only code that can write one is the backfill
+  running after this migration. It is nonetheless a one-way rewrite of recorded
+  money data, which is why it is scoped to `status = 'FILLED'` and to a numeric
+  zero, compared as `CAST(commission AS NUMERIC) = 0` so that every spelling a
+  `Decimal` may have been serialised as is caught and nothing else is.
+- **This migration alone does not repair the P&L; the one-off run does.** The
+  seven closed positions keep their gross `realised_pnl` until a `backfill` with
+  a window wide enough to reach their orders runs and calls
+  `db.positions.recompute_realised` for each. That is an operator action with a
+  procedure in `ops/RUNBOOK.md`, run once, after V14 — not a startup step and not
+  a widened `_BACKFILL_LOOKBACK`. **History is repaired**, and it is repaired
+  through the same code path as every ordinary day, with no separate estimator
+  and no reconstructed number: a half-repaired series is worse than a uniformly
+  gross one because nothing marks where the discontinuity is, and a repair by a
+  bespoke one-off script is a second implementation of the thing that was wrong.
 - **The list above is in ascending numeric order, which is also the order the
   driver applies them in (v1.82).** Until v1.82 it ran `001, 002, 007, 006, 005,
   004, 003` — newest first for the four added last — against this section's own

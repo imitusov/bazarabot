@@ -579,12 +579,22 @@ consecutive-failure alert and is retried as though waiting would help.
 
 **`async get_operations(since: datetime, until: datetime) → list[OperationRecord]`**
 - Executed operations including actual commission charged. Used for independent
-  reconciliation of costs over a period — **not** as the per-order commission
-  source: `OperationRecord` carries no order identifier, so attributing an
-  operation to an order would mean matching on instrument, time and quantity,
-  which is ambiguous exactly when two similar orders are close together.
-- Each record carries `operation_type`, `state` and `parent_operation_id`
-  verbatim (v1.35). `commission` is populated for fee operations, identified by
+  reconciliation of costs over a period, and — **since v1.91 and only by
+  identifier** — as the per-order commission source of last resort.
+- **What is still forbidden is the matching, not the feed (v1.91, #246).** Until
+  v1.91 this line read "**not** as the per-order commission source:
+  `OperationRecord` carries no order identifier, so attributing an operation to
+  an order would mean matching on instrument, time and quantity, which is
+  ambiguous exactly when two similar orders are close together." The second half
+  of that sentence is still binding and always will be; the first half was a
+  conclusion drawn from it that does not follow, and it is what left every
+  realised P&L gross (§2.1). `OperationRecord` **does** carry an identifier the
+  broker issued — `trades[].trade_id`, exposed as `trade_ids` — and an order's
+  own `stages[].trade_id` is the same identifier. Attribution by that join is
+  exact: an id matches or it does not. Matching on instrument, time and quantity
+  remains forbidden here and everywhere.
+- Each record carries `operation_type`, `state`, `parent_operation_id` and
+  `trade_ids` verbatim (v1.35; `trade_ids` v1.91). `commission` is populated for fee operations, identified by
   `operation_type`, and is zero elsewhere. It was identified by testing whether
   the string `FEE` appeared in an attribute the record did not expose, which
   worked only because every fee type happens to contain it.
@@ -612,11 +622,52 @@ process environment immediately after `config.load()` and before any broker call
 environment when a channel is created, so the only requirement is that it is set
 before the first client is constructed.
 
-**Commission comes back on the order itself.** Both `PostOrderResponse` and
-`OrderState` carry `executed_commission`, keyed by our own idempotency key.
-`post_market_order` and `get_order_state` therefore populate
-`OrderRecord.commission` directly, with no matching and no ambiguity. Commission
-is never estimated, and never inferred from an operations feed.
+**Commission does not come back on the order itself, and a zero there is
+unknown, not measured (v1.91, #246).** Both `PostOrderResponse` and `OrderState`
+carry `executed_commission`, keyed by our own idempotency key, and this spec
+said until v1.91 that populating `OrderRecord.commission` from it was the whole
+story. It is not: on the live account the field reads **zero on 22 of 22 real
+fills** while 22 fee operations totalling 14.67 exist in the same feed for the
+same trades (§2.1). `Decimal(0)` was therefore written where nothing was known,
+`db.orders.list_missing_commission` selects `commission IS NULL`, and the
+backfill built to recover a late commission has never been shown a single one of
+these rows.
+
+The contract question that produced this is *"is a zero at fill a measurement or
+an absence?"*, and v1.91 answers it: **an absence.**
+
+- **`_executed_commission` returns `None` when the broker reports a zero
+  commission on an order it reports as filled.** A non-zero value is the
+  broker's own number for that order and is recorded as before. This applies
+  everywhere the helper is used — `post_market_order`, `get_order_state`,
+  `get_order_state_by_broker_id` and `get_executed_stop_fills` — because the
+  field is the same field in all four.
+- The cost of this reading is that a **genuinely commission-free trade** is
+  recorded as unknown rather than as zero. That is not left hanging: the
+  operations feed settles it as a *measured zero*, terminally, under
+  `ops.commissions` below. Nothing alerts forever on one.
+- The value of this reading is that the row becomes visible to the backfill at
+  all. Nothing is estimated: `None` is what "the broker has not told us" looks
+  like, and the arbiter is still the broker.
+
+**Commission is never estimated. The per-order source is the order state where
+it carries a number and the operations feed where it does not, joined by an
+identifier the broker issued** — never by matching on instrument, time and
+quantity, which is ambiguous exactly when two similar orders are close together,
+and which was declined once already for #8.
+
+**`OrderRecord.trade_ids` and `OperationRecord.trade_ids` carry the join
+(v1.91).** `OrderState.stages[].trade_id` is the set of executions the broker
+attributes to one order; `Operation.trades[].trade_id` is the same identifier on
+the operations feed. Both are read verbatim into a `tuple[str, ...]`, empty where
+the broker supplies none. They are **broker-sourced and never persisted**: no
+column holds them, `db.orders` returns `()` for every row it reads, and nothing
+downstream may treat an empty tuple as anything but "no join material".
+
+**The join is an assumption with a gate, not a measurement (v1.91).** §2.1
+records it as unmeasured and names **V14** as its check. Its failure mode is an
+unresolved commission and a once-per-order alert — loud and recoverable — never a
+wrong number, which is why it is admissible where FIGI-and-time matching is not.
 
 **`async get_order_state(key: str) → OrderRecord`**
 - Retrieves an order **by the client idempotency key alone**, so a restarted
@@ -786,6 +837,21 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 
 - Each method returns the documented domain type given a scripted broker
   response (happy path per method).
+- **An order state reporting `execution_report_status = FILL` and
+  `executed_commission` of units 0 / nano 0 yields `commission is None`, and the
+  same state with a non-zero `executed_commission` yields that `Decimal`**
+  (v1.91; proves a zero at fill is recorded as unknown and not as a measurement,
+  which is the whole of #246. A fixture whose `executed_commission` is absent
+  pins nothing: `None` already produced `None`, and that is exactly why this
+  survived — failure class 3).
+- `post_market_order` on a fill with a zero `executed_commission` writes
+  `commission is None` too (v1.91; proves the rule is on the field and not on one
+  call site — the same helper serves four).
+- An order state whose `stages` carry `trade_id`s exposes them as `trade_ids` in
+  order, and one with no stages exposes `()` (v1.91; proves the join material
+  reaches `ops.commissions` rather than being read and dropped).
+- `get_operations` exposes each operation's `trades[].trade_id` as `trade_ids`,
+  and `()` where there are none (v1.91; the other half of the same join).
 - A transport error raises `BrokerUnavailable` (proves transport failures are
   typed, not leaked as SDK exceptions).
 - **An `INVALID_ARGUMENT` response does not raise `BrokerUnavailable`** — it

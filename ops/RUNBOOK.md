@@ -120,3 +120,51 @@ dependencies that are already correct.
 **Sandbox last.** F-12 says the backtester measures a system that does not
 exist. Fixing it before the live modules means backtesting a system you are
 about to change.
+
+---
+
+## One-off — repairing commission history (#246, spec v1.91)
+
+Not part of the batch loop. Run once, on the deployed database, after the v1.91
+code is live. Everything below uses code that already exists; nothing here is a
+bespoke repair script, because a bespoke repair of a money figure is a second
+implementation of the thing that was wrong.
+
+**Why it is needed.** Until v1.91 `broker.client` wrote `Decimal(0)` whenever
+the order state reported a zero `executed_commission`, which it does on every
+fill. `db.orders.list_missing_commission` selects `commission IS NULL`, so the
+daily backfill has never been shown one of those rows. Recording `None` from now
+on fixes the next order and does nothing for the 22 already on disk.
+
+1. **Back up first.** `make backup`, or whatever the deployment's backup step
+   is. Step 3 rewrites recorded money data and there is no down-migration.
+2. **Run V14** — `python scripts/verify/verify_commission_attribution.py`. It is
+   read-only and it measures the one assumption the repair rests on: that an
+   order's `stages[].trade_id` reaches the operations feed as a trade's
+   `trades[].trade_id`. **If V14 does not join, stop.** The repair would then
+   resolve nothing, alert once per unrepaired order, and leave the series
+   exactly as gross as it is now. That is a finding to report, not a reason to
+   loosen the join.
+3. **Deploy v1.91.** `008_commission_zero_is_unknown.sql` runs at startup and
+   rewrites every `FILLED` row's numerically-zero commission to `NULL`. The
+   rows become visible to the backfill; nothing is recomputed yet.
+4. **Run the backfill once over the whole account history**, in the deployed
+   process's environment:
+
+   ```python
+   from datetime import UTC, datetime
+   from zarabot.ops.commissions import backfill
+   await backfill(datetime(2026, 3, 1, tzinfo=UTC), now())
+   ```
+
+   The window is wide only for this run. `app.loops._BACKFILL_LOOKBACK` stays at
+   7 days: the measured trade-to-fee lag is one second, so nothing daily needs a
+   wider window, and widening it would re-alert on old rows every day.
+5. **Read the return value and the alerts.** It returns the number of orders
+   updated — expect 22 — and alerts once per order it could not resolve. Every
+   closed position touched by an updated order has had `realised_pnl` recomputed
+   by the same call.
+6. **Check the series.** Realised P&L across the closed positions should fall by
+   the total commission the feed reports for the same period (14.67 as of
+   2026-09-15). If it falls by some other amount, stop and report it: a partial
+   repair is worse than none, because nothing marks where the discontinuity is.

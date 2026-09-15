@@ -209,6 +209,11 @@ class _Capture:
         self.order_status = OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
         self.order_lots_executed: int | None = None
         self.order_message = ""
+        # A fill's commission and its execution stages. Both are knobs because
+        # the live account reports a ZERO commission on every fill and carries
+        # the real fee only on the operations feed (#246, §2.1).
+        self.order_commission = Decimal("0.5")
+        self.order_stages: list[SimpleNamespace] | None = None
         self.last_price = Decimal("123.45")
         self.last_price_time: datetime | None = NOW
         # When true the quote object carries no `time` attribute at all, which
@@ -362,7 +367,9 @@ class _Services:
             lots_requested=requested,
             lots_executed=executed,
             executed_order_price=decimal_to_money(Decimal("100"), "rub"),
-            executed_commission=decimal_to_money(Decimal("0.5"), "rub"),
+            executed_commission=decimal_to_money(
+                self._capture.order_commission, "rub"
+            ),
             message=self._capture.order_message,
             figi=kwargs.get("instrument_id", "BBG000000001"),
             direction=kwargs.get("direction"),
@@ -437,11 +444,14 @@ class _Services:
             lots_requested=1,
             lots_executed=1,
             executed_order_price=decimal_to_money(Decimal("100"), "rub"),
-            executed_commission=decimal_to_money(Decimal("0.5"), "rub"),
+            executed_commission=decimal_to_money(
+                self._capture.order_commission, "rub"
+            ),
             figi="BBG000000001",
             direction=OrderDirection.ORDER_DIRECTION_BUY,
             order_date=NOW,
             order_request_id=kwargs.get("order_id", ""),
+            stages=self._capture.order_stages or [],
         )
 
 
@@ -727,6 +737,7 @@ def _raw_operation(**overrides: Any) -> SimpleNamespace:
         "operation_type": SimpleNamespace(name="OPERATION_TYPE_SELL"),
         "state": SimpleNamespace(name="OPERATION_STATE_EXECUTED"),
         "parent_operation_id": "",
+        "trades": [],
     }
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -1911,3 +1922,78 @@ def test_instruments_is_owned_in_both_directions() -> None:
         if path != owner and "instruments" in _tables_touched(path)
     )
     assert trespassers == []
+
+
+# --- #246: a zero commission at fill is unknown, not measured (spec v1.91) ---
+
+
+async def test_zero_executed_commission_on_a_fill_is_unknown(
+    capture: _Capture,
+) -> None:
+    """The live account reports zero on 22 of 22 real fills while 22 fee rows
+    totalling 14.67 exist for the same trades (§2.1, #246).
+
+    This starts from the real fill shape — `executed_commission` present and
+    numerically zero — and not from an absent field. `None` already produced
+    `None`, which is exactly why this survived: a fixture that omits the field
+    proves nothing about the bug (failure class 3).
+    """
+    capture.order_commission = Decimal("0")
+    record = await get_order_state("key-1")
+    assert record.status is OrderStatus.FILLED
+    assert record.commission is None
+
+
+async def test_non_zero_executed_commission_is_still_the_brokers_number(
+    capture: _Capture,
+) -> None:
+    capture.order_commission = Decimal("0.53")
+    record = await get_order_state("key-1")
+    assert record.commission == Decimal("0.53")
+
+
+async def test_post_market_order_zero_commission_is_unknown(
+    capture: _Capture,
+) -> None:
+    """The rule is on the field, not on one call site: the same helper serves
+    `post_market_order`, `get_order_state`, `get_order_state_by_broker_id` and
+    `get_executed_stop_fills`."""
+    capture.order_commission = Decimal("0")
+    posted = await post_market_order("key-2", "BBG000000001", Side.BUY, 1)
+    assert posted.status is OrderStatus.FILLED
+    assert posted.commission is None
+
+
+async def test_order_state_exposes_its_stage_trade_ids(capture: _Capture) -> None:
+    """`stages[].trade_id` is the join material `ops.commissions` needs to tie a
+    fee on the operations feed to this order (#246)."""
+    capture.order_stages = [
+        SimpleNamespace(trade_id="T-1"),
+        SimpleNamespace(trade_id="T-2"),
+    ]
+    record = await get_order_state("key-1")
+    assert record.trade_ids == ("T-1", "T-2")
+
+
+async def test_order_state_with_no_stages_exposes_an_empty_tuple(
+    capture: _Capture,
+) -> None:
+    record = await get_order_state("key-1")
+    assert record.trade_ids == ()
+
+
+async def test_get_operations_exposes_trade_ids(capture: _Capture) -> None:
+    """The other half of the join: an operation's own executions."""
+    capture.operations_override = [
+        _raw_operation(trades=[SimpleNamespace(trade_id="T-1")]),
+        _raw_operation(
+            id="op-2",
+            payment=decimal_to_money(Decimal("-0.53"), "rub"),
+            operation_type=SimpleNamespace(name="OPERATION_TYPE_BROKER_FEE"),
+            parent_operation_id="op-1",
+        ),
+    ]
+    trade, fee = await get_operations(NOW - timedelta(days=1), NOW)
+    assert trade.trade_ids == ("T-1",)
+    assert fee.trade_ids == ()
+    assert fee.parent_operation_id == "op-1"
