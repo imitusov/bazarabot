@@ -1,7 +1,7 @@
 # Zarabot — Business Brief
 
-**Version:** 1.15
-**Date:** 2026-09-14
+**Version:** 1.16
+**Date:** 2026-09-16
 **Status:** Ready for technical spec
 
 **Companion document.** Implementation contracts are in `technical-spec.md`.
@@ -345,13 +345,22 @@ flattered or handicapped by having a better exit than another.
 
 | Exit trigger | Condition | Enforced by | Action |
 |---|---|---|---|
-| Stop-loss | Price at or below 5% under the entry price | **The exchange** | Sells automatically |
+| Stop-loss | Price at or below 5% under the entry price | **The exchange**, when `STOP_LOSS_ENABLED` is true | Sells automatically |
 | Take-profit | Price at or above 10% over the entry price | The bot | Close at market |
 | Maximum age | Position open for 18 trading days | The bot | Close at market, whatever the profit or loss |
 
 **Whichever fires first wins.** The bot evaluates the take-profit and the age
 limit on every polling cycle during the session; the stop-loss is watched by the
 exchange continuously.
+
+**The stop-loss is optional, and on this deployment it is off (v1.16).** The
+owner has decided that positions exit on **target or age only**. That decision is
+expressed as configuration — `STOP_LOSS_ENABLED=false` (§18) — and not as removed
+code, so everything in the rest of this section describes what the bot does when
+the switch is back on. With it off: no stop order is placed at entry, the bot
+does not watch a stop level of its own, and the only two exits are the
+take-profit and the maximum age. The reasoning, what is given up, and what
+happens to the positions already open are below.
 
 **The stop-loss is a real order held by the exchange.** At the moment a position
 opens, a stop-loss order is placed with the broker and left standing until the
@@ -444,6 +453,58 @@ the ones already placed.
 unguarded. The bot alerts immediately, falls back to watching that position's
 stop level itself on every cycle, and marks it in `/positions` so the weaker
 protection is visible rather than assumed.
+
+**What turning the stop off gives up, stated plainly and accepted (v1.16).**
+
+*The headline promise is untouched.* "Losses cannot exceed allocated capital"
+(§12) rests on there being no leverage and no short selling, not on the stop. A
+position can lose everything put into it and not a rouble more, with the stop on
+or off. Nothing on the risk-limits table weakens.
+
+*What the stop actually provided was protection while the bot was not running,
+and that is what is given up.* It is the only exit that operates when the process
+is down. This was not a hypothetical: on 2026-09-16 the bot was down through 159
+failed restarts, and the exchange stop on MTSS executed at 186.75 against a
+186.77 stop, capping that position's loss at exactly −5.01% (−100.04 realised).
+Reconciliation booked it `CLOSED_EXTERNALLY` on the next startup. With
+`STOP_LOSS_ENABLED=false` the same outage leaves every open position **entirely
+unprotected until the bot returns** — no exit of any kind fires while the process
+is down, and the position is worth whatever the market says when it comes back.
+The take-profit and the age limit were always in the bot and always had this
+property; the stop was the one that did not, and now nothing does.
+
+*What it costs while the bot is running, measured rather than asserted.* Under
+the same driftless-walk model that derived the eighteen-day hold
+(`technical-spec.md` §4, `lifecycle.exits`), at 1.5% daily volatility and no
+lower barrier: 12.1% of positions still reach the +10% target, and the other
+87.9% exit on age at whatever the price is. Of those age exits, **24% land below
+−5%** — the losses the stop used to cap — **5.6% land below −10%**, and the 1st
+percentile is **−14.1%**. At 2.5% daily volatility those become 47%, 24% and
+−23.1%. The per-position tail is no longer cut at −5%; it is cut at −100%, by
+having no leverage.
+
+*What is bought.* Two things, and they are the owner's reasons. The stop was
+firing on ordinary volatility rather than on being wrong — at 1.5%/day the
+two-sided model puts stop-first at 39.3% against target-first at 12.1%, so more
+than three positions were stopped out for every one that reached its target. And
+with no risk leg to be twice, the reward-to-risk constraint on configuration
+(§18, `TAKE_PROFIT_PCT` greater than `STOP_LOSS_PCT`) no longer binds, so a
+nearer target becomes configurable. This is a deliberate trade of a capped
+per-position loss for a position that is given room to resolve, taken with the
+numbers above in view.
+
+*The positions already open keep their stops.* Six positions are open with live
+exchange stops at the exchange. **This change cancels none of them.** They stay
+`EXCHANGE`-protected, their stops stand, and if one fires it is booked as a
+stop-loss exactly as before — including a replacement if reconciliation finds one
+of them missing, because a position recorded as protected that nothing watches is
+the one state this mechanism exists to prevent. The switch applies to positions
+opened after it is set. Cancelling six live stops is a real action on a live
+account that buys nothing the switch does not already buy by expiry.
+
+*It is reversible.* Setting `STOP_LOSS_ENABLED=true` restores the stop on the
+next entry, with no migration and no code change. Positions opened while it was
+off have no stop and do not acquire one.
 
 **Overnight, weekend and holiday holding, and gap risk.** Positions are held
 across session boundaries until an exit rule fires. The bot observes prices only
@@ -633,7 +694,7 @@ the order is not sent.
 |---|---|---|
 | Position size on entry | 10% of allocated capital | Every position is the same size, so per-strategy results are directly comparable and no single mistake is expensive. |
 | Total portfolio exposure | 100% of allocated capital | The summed cost of open positions, plus any new order, stays within the allocation. Checked at order time, against holdings the bot did not necessarily open — an adopted position or a lowered allocation is exactly when it binds. Replaces the per-position cap, which could not bind. |
-| Exit rules: stop −5%, target +10%, max age 18 trading days | See *Position lifecycle* | Bound what any single position can lose and how long it can tie up capital. Exits are never blocked by any other limit on this table. The age limit was 3 trading days until v1.15, at which neither price bound was reachable; §9 carries the derivation. |
+| Exit rules: stop −5% *(only while `STOP_LOSS_ENABLED` is true)*, target +10%, max age 18 trading days | See *Position lifecycle* | Bound how long a position can tie up capital, and — while the stop is enabled — what it can lose. Exits are never blocked by any other limit on this table. The age limit was 3 trading days until v1.15, at which neither price bound was reachable; §9 carries the derivation. The stop became optional in v1.16 and is off on this deployment; §9 states what that gives up. |
 | Maximum concurrent open positions | 10 | Bounds total exposure. At 10% per entry this allows the full allocation to be deployed and nothing beyond it. |
 | Re-entry cooldown per instrument | 2 hours after closing | Prevents a strategy from looping on the same ticker. Constrains repetition without capping how much the bot may trade in a day. Since v1.15 most of that work is done by the holding period instead — one position per ticker at a time means a ticker is unavailable for eighteen trading days, and the cooldown binds only in the two hours after it frees up. The cooldown is kept because it is the control that does not depend on how long a position happens to be held. |
 | Daily loss limit | 5% of allocated capital | Trips the kill switch. A bad day this size is more likely a bug or a regime change than noise. |
@@ -655,12 +716,22 @@ truncated by an arbitrary count. The cost of that choice is that a malfunctionin
 strategy is caught by the loss limit rather than by an order counter, which is
 why the cooldown exists.
 
-**How the two loss floors relate.** The stop-loss is the floor under each
-individual holding; the daily loss limit is the floor under the day as a whole.
-They are calibrated to comparable severity: ten positions all stopping out on the
-same day amounts to roughly the daily limit. A halt therefore signals a broad
-adverse move or a systematic fault, rather than one trade going wrong. Full exit
-behaviour is described under *Position lifecycle*.
+**How the two loss floors relate.** With `STOP_LOSS_ENABLED` true the stop-loss
+is the floor under each individual holding and the daily loss limit is the floor
+under the day as a whole, calibrated to comparable severity: ten positions all
+stopping out on the same day amounts to roughly the daily limit, so a halt
+signals a broad adverse move or a systematic fault rather than one trade going
+wrong.
+
+**With the stop off there is one floor, not two (v1.16).** The daily loss limit
+is the only limit that stops the bot on losses, and the floor under an individual
+holding is the position itself: 10% of allocated capital, bounded below by the
+share going to zero and by nothing else, because there is no leverage. The two
+are no longer calibrated to each other — a single position can now contribute
+more to a day's loss than a stopped-out one could, and ten adverse positions can
+exceed the daily limit before the limit is checked rather than arriving at
+roughly it. The limit still halts entries when it trips. Full exit behaviour, and
+what the removal gives up, are in *Position lifecycle*.
 
 **When the daily loss limit is hit.** The bot halts: no new positions are opened,
 and the owner receives an alert naming the loss and the trades that produced it.
@@ -868,8 +939,9 @@ of its own behaviour.
 | `POSITION_SIZE_PCT` | No | `10` | Size of each new position as a percentage of allocated capital. |
 | `CASH_RESERVE_PCT` | No | `1` | Slice of cash held back from every order so fees and rounding cannot make an approved order unaffordable. Bounded 0–50. Not an estimate of commission. |
 | `FILL_SLIPPAGE_ALERT_PCT` | No | `2` | How far an entry fill may land from the signal's reference price before the owner is alerted. Alert only — it never blocks an order and never unwinds a position. |
-| `STOP_LOSS_PCT` | No | `5` | How far below entry price a position is closed automatically. |
-| `TAKE_PROFIT_PCT` | No | `10` | How far above entry price a position is closed automatically. |
+| `STOP_LOSS_ENABLED` | No | `true` | Whether a protective stop is placed at all. `false` means positions exit on target or age only: no stop order is placed at entry and the bot watches no stop level of its own. Positions already protected by the exchange keep their stops (§9). |
+| `STOP_LOSS_PCT` | No | `5` | How far below entry price a position is closed automatically. Must be greater than 0. When `STOP_LOSS_ENABLED` is false it places no order and closes nothing; it is recorded on each position as the level the removed stop would have used, so the weekly report can measure what the removal cost. |
+| `TAKE_PROFIT_PCT` | No | `10` | How far above entry price a position is closed automatically. Must be greater than 0, and greater than `STOP_LOSS_PCT` only while `STOP_LOSS_ENABLED` is true — with no stop there is no risk leg for the target to be twice, which is the constraint v1.16 relaxes. |
 | `MAX_HOLDING_DAYS` | No | `18` | Trading days after which an open position is closed regardless of result. Derived at 1.5% daily volatility (§9); it is a function of assumed volatility, not a constant. |
 | `MAX_OPEN_POSITIONS` | No | `10` | Maximum concurrent open positions. At the default entry size this permits full deployment. |
 | `REENTRY_COOLDOWN_MINUTES` | No | `120` | How long an instrument is blocked from re-entry after a position in it closes. |
@@ -920,8 +992,14 @@ depends on the bot being profitable.
     against the expectation that motivated the strategy.
 12. **No secret appears in any log line**, verified by searching the logs after a
     full run including a failure.
-13. **All three exit triggers have been observed firing** — a stop-loss, a
-    take-profit, and a maximum-age exit. Each closed its position automatically
+13. **Every exit trigger the configuration can produce has been observed
+    firing** (v1.16). With `STOP_LOSS_ENABLED` true that is all three — a
+    stop-loss, a take-profit and a maximum-age exit. With it false the stop-loss
+    is not reachable and is **not** required for this criterion: the take-profit
+    and the maximum-age exit are, and the criterion is met on those two. It is
+    not waived, it is scoped to what the running configuration can do; turning
+    the stop back on restores the third. Each observed exit closed its position
+    automatically
     without intervention, recorded the result and the trigger against the
     strategy that opened it, started the instrument's cooldown, and alerted the
     owner. Under the three-day hold this criterion could not be met at all: the
@@ -936,13 +1014,18 @@ depends on the bot being profitable.
     calendar days — and is not force-closed early. At an eighteen-day hold every
     position crosses at least three weekends, so this is now exercised by
     ordinary operation rather than by a case that had to be waited for.
-16. **The protective stop survives the bot being stopped.** With a position open,
-    the bot is shut down entirely; the stop-loss order is confirmed still live in
-    the broker's own application; and on restart the bot adopts the existing stop
-    rather than placing a second one.
-17. **A bot-initiated exit cancels the standing stop first.** After a take-profit
-    or maximum-age exit, no orphaned stop order remains against the closed
-    position.
+16. **The protective stop survives the bot being stopped**, verified while
+    `STOP_LOSS_ENABLED` is true. With a position open, the bot is shut down
+    entirely; the stop-loss order is confirmed still live in the broker's own
+    application; and on restart the bot adopts the existing stop rather than
+    placing a second one. It remains verifiable against the six positions opened
+    before v1.16, which keep their exchange stops.
+17. **A bot-initiated exit cancels the standing stop first**, verified while a
+    position has a standing stop. After a take-profit or maximum-age exit, no
+    orphaned stop order remains against the closed position. A position opened
+    with `STOP_LOSS_ENABLED` false has no standing stop, and its exit must submit
+    no cancel — which is the same criterion read the other way and is the case
+    that matters on this deployment.
 
 ---
 
@@ -1007,7 +1090,7 @@ record, the following were open during drafting and are now settled:
 | Language | English. |
 | Server | A VPS still to be rented; provisioning is a pre-development step. |
 | Position size on entry | 10% of allocated capital, identical for every trade. |
-| What closes a losing position | A fixed stop-loss 5% below entry, held as a standing order by the exchange. |
+| What closes a losing position | A fixed stop-loss 5% below entry, held as a standing order by the exchange — **reopened and re-resolved in v1.16**: the stop is now optional and is off on this deployment, so a losing position is closed by the maximum-age exit and nothing else. §9 carries the decision, what it gives up, and the measured cost. |
 | Maximum concurrent positions | 10, so the whole allocation can be deployed. |
 | Daily order cap | None. Removed deliberately; a good day should not be truncated by a counter. |
 | Runaway-loop protection | A 2-hour per-instrument re-entry cooldown, replacing the order cap. |

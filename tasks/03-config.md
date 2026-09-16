@@ -90,11 +90,56 @@ Loads and validates every setting once at startup.
   described in no contract until v1.76, which meant a re-run of `01-config` from
   the spec alone would have produced a three-argument constructor and dropped the
   attribute, taking `app.startup`'s alert with it (#166).
+- **Adds `stop_loss_enabled`, a boolean, default `true` (v1.93).** From
+  `STOP_LOSS_ENABLED`. It is the single switch behind the brief's §9 decision:
+  when false, `execution.orders` places no stop order at entry,
+  `lifecycle.exits` never returns `STOP_LOSS`, and `broker.reconcile` never
+  reports `STOP_ADOPTABLE`. It is read at exactly those three sites and nowhere
+  else, and it cannot vary per position — which is what keeps
+  `stop_protection = 'LOCAL'` unambiguous. `LOCAL` has always meant "no stop
+  order stands at the exchange"; its second half, "so the bot polls the level
+  itself", is now conditioned on this flag, and the flag is the only thing that
+  decides it. It is not a risk limit in the sense of the bullet below — it
+  removes a control rather than setting one — so a missing value takes its
+  default, and the default is the protective one.
+- **The take-profit-versus-stop-loss rule is replaced, not deleted (v1.93).**
+  `take_profit <= stop_loss → ConfigError` forced reward to be at least risk,
+  and with no stop there is no risk leg for the target to exceed; it is what
+  made a nearer target unconfigurable and it is the rule the brief's §9 decision
+  needs relaxed. Deleting it outright would leave the pair unconstrained, so two
+  rules take its place and neither is vacuous:
+  - `STOP_LOSS_PCT` must be **greater than 0**, whether or not stops are
+    enabled. `_pct` bounds it to 0–100 and 0 is inside that. With stops enabled
+    a 0 stop posts an order at the entry price; with stops disabled it makes the
+    recorded reference level (below) equal to the entry price, so the weekly
+    report's measurement of what the removal cost measures nothing. Raised with
+    `variable="STOP_LOSS_PCT"`.
+  - `TAKE_PROFIT_PCT` must be **greater than 0** always, and greater than
+    `STOP_LOSS_PCT` **only when `stop_loss_enabled` is true**. A target at or
+    below the entry price closes every position on its first cycle at a loss
+    after commission, which is the failure the original rule was really
+    guarding; that half is kept unconditionally. The cross-field half is what
+    the stop's absence retires. Raised with `variable="TAKE_PROFIT_PCT"` in
+    both cases, and the cross-field message names both variables as before.
+  - `stop_loss_pct` is still loaded, still validated, and still consumed when
+    stops are off: `execution.orders` derives each position's `stop_price` from
+    it, which is then a recorded reference level rather than a trigger — see
+    `execution/orders.py` and `reporter/weekly.py`.
+
+  *Amendment scope (v1.93).* `load()`'s signature does not move and nothing in
+  `interfaces.md` changes, so no signature check will notice this — the re-run
+  has to be named here. **`tasks/03-config.md` is re-run** for the new field,
+  the two replacement checks and the `.env.example` line. The modules that read
+  the new field re-run under their own contracts: `tasks/13-lifecycle-exits.md`,
+  `tasks/26-execution-orders.md`, `tasks/27-broker-reconcile.md`,
+  `tasks/29-telegram-commands.md`, `tasks/30-reporter-weekly.md` and
+  `tasks/32-app-startup.md`.
 - Raises `ConfigError` naming the offending variable when: a required variable is
   missing or empty; a numeric value is out of range;
   `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `CASH_RESERVE_PCT` is
-  outside 0–50;
-  `TAKE_PROFIT_PCT` is not greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty;
+  outside 0–50; `STOP_LOSS_PCT` is not greater than 0; `TAKE_PROFIT_PCT` is not
+  greater than 0; `TAKE_PROFIT_PCT` is not greater than `STOP_LOSS_PCT` **while
+  `stop_loss_enabled` is true**; `WATCHLIST` is empty;
   or `ML_MODEL_PATH` is set but unreadable.
 - Must never substitute a default for a missing **risk** variable.
 - Must never include a token value in an exception message or in `__repr__`.
@@ -140,7 +185,18 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeding 100 raises `ConfigError`
   (proves the allocation cannot be structurally over-committed).
 - `TAKE_PROFIT_PCT` less than or equal to `STOP_LOSS_PCT` raises `ConfigError`
-  (proves a configuration that can never profit is rejected).
+  **while `STOP_LOSS_ENABLED` is true**, and the *same* pair loads without error
+  with `STOP_LOSS_ENABLED=false` (proves the cross-field rule is scoped to the
+  stop rather than deleted, and that the nearer target the brief §9 decision
+  wants is actually configurable — one case without the other proves only half).
+- `STOP_LOSS_PCT` of 0 raises `ConfigError` naming that variable, with the flag
+  true and with it false (proves the replacement floor binds in both modes, so
+  the recorded reference level is never the entry price).
+- `TAKE_PROFIT_PCT` of 0 raises `ConfigError` with `STOP_LOSS_ENABLED=false`
+  (proves that relaxing the cross-field rule did not leave the target
+  unconstrained — the case a bare deletion would pass).
+- `STOP_LOSS_ENABLED` absent loads as `true` (proves the default is the
+  protective one, so an environment written before v1.93 keeps its stops).
 - An empty `WATCHLIST` raises `ConfigError` (proves the bot cannot start with
   nothing to trade).
 - A cross-field failure whose message names two variables sets `variable` to the

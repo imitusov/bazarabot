@@ -1,8 +1,8 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.92
-**Date:** 2026-09-15
-**Implements:** `business-brief.md` v1.15
+**Version:** 1.93
+**Date:** 2026-09-16
+**Implements:** `business-brief.md` v1.16
 
 **Companion document.** Read the brief first. When this spec and the brief
 conflict, **the brief takes precedence**.
@@ -463,7 +463,18 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
 - `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeding 100 raises `ConfigError`
   (proves the allocation cannot be structurally over-committed).
 - `TAKE_PROFIT_PCT` less than or equal to `STOP_LOSS_PCT` raises `ConfigError`
-  (proves a configuration that can never profit is rejected).
+  **while `STOP_LOSS_ENABLED` is true**, and the *same* pair loads without error
+  with `STOP_LOSS_ENABLED=false` (proves the cross-field rule is scoped to the
+  stop rather than deleted, and that the nearer target the brief §9 decision
+  wants is actually configurable — one case without the other proves only half).
+- `STOP_LOSS_PCT` of 0 raises `ConfigError` naming that variable, with the flag
+  true and with it false (proves the replacement floor binds in both modes, so
+  the recorded reference level is never the entry price).
+- `TAKE_PROFIT_PCT` of 0 raises `ConfigError` with `STOP_LOSS_ENABLED=false`
+  (proves that relaxing the cross-field rule did not leave the target
+  unconstrained — the case a bare deletion would pass).
+- `STOP_LOSS_ENABLED` absent loads as `true` (proves the default is the
+  protective one, so an environment written before v1.93 keeps its stops).
 - An empty `WATCHLIST` raises `ConfigError` (proves the bot cannot start with
   nothing to trade).
 - A cross-field failure whose message names two variables sets `variable` to the
@@ -887,6 +898,17 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
 - A holding 40% above its average cost is reported, not adopted, and no exit is
   submitted for it (proves the specific liquidation this policy exists to
   prevent).
+- With `config.stop_loss_enabled` false, a `LOCAL` position carrying a
+  correctly-priced live stop is reported `STOP_ORPHAN` and **not**
+  `STOP_ADOPTABLE`, and the same state with the flag true is reported
+  `STOP_ADOPTABLE` (v1.93 — proves the one finding the flag withholds, and that
+  it routes to cancellation rather than into silence).
+- With the flag false, an `EXCHANGE` position whose stop has vanished is still
+  reported `STOP_MISSING`, a stop at the wrong price is still `STOP_MISPRICED`,
+  a stop at the wrong size is still `STOP_MISSIZED` and two live stops are still
+  `STOP_DUPLICATE` (v1.93 — proves the flag withholds exactly one finding; a
+  reconcile that went quiet on all of them would strand the positions opened
+  before the flag was set, which is the state this module exists to detect).
 - A holding whose ticker has an unresolved `ENTRY` order is adopted rather than
   reported foreign (proves crash recovery still works: the bot bought this, the
   fill landed, and the process died before the row was written).
@@ -1288,6 +1310,18 @@ Additionally, `strategies.ml_model`:
   horizon has already moved once, from 3 to 18 in v1.91).
 - A position at both stop and maximum age returns `STOP_LOSS` (proves the
   documented precedence, so the recorded reason is deterministic).
+- A `LOCAL` position priced **below** its `stop_price` returns `None` when
+  `config.stop_loss_enabled` is false, and `STOP_LOSS` for the identical inputs
+  when it is true (proves the flag gates the trigger, and that `stop_price`
+  being populated is not what arms it).
+- That same position priced at or above its target still returns `TAKE_PROFIT`
+  with the flag false, and returns `MAX_AGE` in the closing window when it is old
+  enough (proves the flag suppresses exactly one trigger and leaves the other two
+  working — the failure this would otherwise hide is a position with no exits at
+  all).
+- An `EXCHANGE` position priced below its stop returns `None` with the flag true
+  and with it false (proves the ownership guard is unchanged by the flag, so the
+  positions carrying an exchange stop from before v1.93 are never sold twice).
 - Age is counted in trading days: a position opened Friday is not aged by the
   weekend (proves calendar-aware ageing).
 - An adopted position ages from its adoption timestamp (proves the reconciliation
@@ -1340,6 +1374,31 @@ Additionally, `strategies.ml_model`:
 **stop-order lifecycle** (`execution.orders`, `broker.reconcile`)
 - Opening a position places exactly one stop order at the computed price
   (happy path).
+- With `config.stop_loss_enabled` false, opening a position places **no** stop:
+  `post_stop_loss` is never called, no `stop_orders` row is written, the position
+  is open and `LOCAL`, `stop_price` is still populated from
+  `config.stop_loss_pct`, and neither `stop_order_placed` nor
+  `stop_protection_degraded` is emitted (proves the brief §9 decision is carried
+  out at the one site that places stops, and that it is a skip rather than a
+  rule 23 degrade — asserting only "no order sent" would pass against a broken
+  placement that alerted).
+- Closing a `LOCAL` position with the flag false submits the sell and **no**
+  cancel (proves brief §19 criterion 17 for a position that never had a stop; a
+  cancel here is a broker call made on a guess).
+- Closing an `EXCHANGE` position with the flag false still cancels before
+  selling (proves the discriminator is `stop_protection` and not the flag —
+  reading the flag here would sell the six pre-v1.93 positions twice).
+- `broker.reconcile` reports `STOP_ADOPTABLE` for a `LOCAL` position with a
+  correctly-priced live stop when the flag is true, and reports `STOP_ORPHAN`
+  for the identical state when it is false, and in neither case does the
+  position's `stop_protection` become `EXCHANGE` inside reconciliation (proves
+  the withholding, and that it routes to cancellation rather than into silence).
+- `broker.reconcile` still reports `STOP_MISSING`, `STOP_MISPRICED`,
+  `STOP_MISSIZED`, `STOP_ORPHAN` and `STOP_DUPLICATE` with the flag false, and
+  `app.startup` step 7 still applies every one of their remedies (proves the
+  flag withholds exactly one finding; a test that only checks adoption would
+  pass against a reconcile that went quiet altogether and stranded the positions
+  that still carry stops).
 - A position is `LOCAL` between its creation and the stop being confirmed, and
   `EXCHANGE` only after (proves there is no window in which neither owner is
   watching — the gap this two-step design exists to close).
@@ -2249,11 +2308,56 @@ Loads and validates every setting once at startup.
   described in no contract until v1.76, which meant a re-run of `01-config` from
   the spec alone would have produced a three-argument constructor and dropped the
   attribute, taking `app.startup`'s alert with it (#166).
+- **Adds `stop_loss_enabled`, a boolean, default `true` (v1.93).** From
+  `STOP_LOSS_ENABLED`. It is the single switch behind the brief's §9 decision:
+  when false, `execution.orders` places no stop order at entry,
+  `lifecycle.exits` never returns `STOP_LOSS`, and `broker.reconcile` never
+  reports `STOP_ADOPTABLE`. It is read at exactly those three sites and nowhere
+  else, and it cannot vary per position — which is what keeps
+  `stop_protection = 'LOCAL'` unambiguous. `LOCAL` has always meant "no stop
+  order stands at the exchange"; its second half, "so the bot polls the level
+  itself", is now conditioned on this flag, and the flag is the only thing that
+  decides it. It is not a risk limit in the sense of the bullet below — it
+  removes a control rather than setting one — so a missing value takes its
+  default, and the default is the protective one.
+- **The take-profit-versus-stop-loss rule is replaced, not deleted (v1.93).**
+  `take_profit <= stop_loss → ConfigError` forced reward to be at least risk,
+  and with no stop there is no risk leg for the target to exceed; it is what
+  made a nearer target unconfigurable and it is the rule the brief's §9 decision
+  needs relaxed. Deleting it outright would leave the pair unconstrained, so two
+  rules take its place and neither is vacuous:
+  - `STOP_LOSS_PCT` must be **greater than 0**, whether or not stops are
+    enabled. `_pct` bounds it to 0–100 and 0 is inside that. With stops enabled
+    a 0 stop posts an order at the entry price; with stops disabled it makes the
+    recorded reference level (below) equal to the entry price, so the weekly
+    report's measurement of what the removal cost measures nothing. Raised with
+    `variable="STOP_LOSS_PCT"`.
+  - `TAKE_PROFIT_PCT` must be **greater than 0** always, and greater than
+    `STOP_LOSS_PCT` **only when `stop_loss_enabled` is true**. A target at or
+    below the entry price closes every position on its first cycle at a loss
+    after commission, which is the failure the original rule was really
+    guarding; that half is kept unconditionally. The cross-field half is what
+    the stop's absence retires. Raised with `variable="TAKE_PROFIT_PCT"` in
+    both cases, and the cross-field message names both variables as before.
+  - `stop_loss_pct` is still loaded, still validated, and still consumed when
+    stops are off: `execution.orders` derives each position's `stop_price` from
+    it, which is then a recorded reference level rather than a trigger — see
+    `execution/orders.py` and `reporter/weekly.py`.
+
+  *Amendment scope (v1.93).* `load()`'s signature does not move and nothing in
+  `interfaces.md` changes, so no signature check will notice this — the re-run
+  has to be named here. **`tasks/03-config.md` is re-run** for the new field,
+  the two replacement checks and the `.env.example` line. The modules that read
+  the new field re-run under their own contracts: `tasks/13-lifecycle-exits.md`,
+  `tasks/26-execution-orders.md`, `tasks/27-broker-reconcile.md`,
+  `tasks/29-telegram-commands.md`, `tasks/30-reporter-weekly.md` and
+  `tasks/32-app-startup.md`.
 - Raises `ConfigError` naming the offending variable when: a required variable is
   missing or empty; a numeric value is out of range;
   `MAX_OPEN_POSITIONS × POSITION_SIZE_PCT` exceeds 100; `CASH_RESERVE_PCT` is
-  outside 0–50;
-  `TAKE_PROFIT_PCT` is not greater than `STOP_LOSS_PCT`; `WATCHLIST` is empty;
+  outside 0–50; `STOP_LOSS_PCT` is not greater than 0; `TAKE_PROFIT_PCT` is not
+  greater than 0; `TAKE_PROFIT_PCT` is not greater than `STOP_LOSS_PCT` **while
+  `stop_loss_enabled` is true**; `WATCHLIST` is empty;
   or `ML_MODEL_PATH` is set but unreadable.
 - Must never substitute a default for a missing **risk** variable.
 - Must never include a token value in an exception message or in `__repr__`.
@@ -3818,6 +3922,30 @@ module's own task never carried it (#177). No other module writes
   account for a look.
 - On restart an existing stop is **adopted** rather than replaced — two stops on
   one position would sell it twice.
+- **`STOP_ADOPTABLE` is not reported at all while `config.stop_loss_enabled` is
+  false (v1.93).** Adoption is the one stop finding that *creates* protection:
+  `app.startup` calls `adopt_existing_stop`, which sets
+  `stop_protection = EXCHANGE`, and a position opened under the brief's §9
+  decision is meant to have no stop. A stop standing against such a position is
+  not the bot's — it is a leftover, or it arrived with a holding — and binding it
+  would hand the exchange a trigger the owner has decided not to arm. It is
+  reported as `STOP_ORPHAN` instead, on the existing rule: a live stop that no
+  open position claims is cancelled by `app.startup` through
+  `execution.orders.cancel_orphaned_stop`. That is deliberate and it is where
+  rule 32's reasoning lands — the bot does not adopt what it did not place.
+  **This withholding is the only one the flag causes.** `STOP_ORPHAN`,
+  `STOP_DUPLICATE`, `STOP_MISSING`, `STOP_MISPRICED` and `STOP_MISSIZED` are
+  reported exactly as before: each of them is about a position that already has
+  or already claims a stop, and the six positions carrying one when the flag was
+  set still need every one of them. A finding suppressed because "stops are off"
+  would leave those six half-managed, which is the state that is worse than
+  either arrangement.
+- **`STOP_MISSING` stays vacuous rather than suppressed.** It is reported only
+  for an open position whose `stop_protection` reads `EXCHANGE`, and no position
+  opened while the flag is false ever reaches `EXCHANGE`, so the finding simply
+  does not arise for them. Nothing conditions it on the flag, and nothing may:
+  the positions it does arise for are precisely the ones that must keep their
+  protection.
 - **A stop is mispriced only when it differs from the position's stop by a full
   price increment or more (v1.55).** The broker snaps a posted stop to the
   instrument's `min_price_increment`, so the price it holds is almost never the
@@ -4559,10 +4687,33 @@ same way risk limits do. There is deliberately no `ML_CONFIDENCE_THRESHOLD`. Abs
 **`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int | None, config: Config) → ExitTrigger | None`**
 - Pure. Returns the trigger that fires, or `None`.
 - `STOP_LOSS` when `price ≤ position.stop_price` **and only when
-  `position.stop_protection == 'LOCAL'`**. When the exchange holds the stop, this
-  module must never return `STOP_LOSS`: the trigger has exactly one owner at a
-  time, and both acting on the same position would sell it twice. Ownership is
-  recorded on the position, not inferred.
+  `position.stop_protection == 'LOCAL'` and `config.stop_loss_enabled` is
+  true** (v1.93). When the exchange holds the stop, this module must never
+  return `STOP_LOSS`: the trigger has exactly one owner at a time, and both
+  acting on the same position would sell it twice. Ownership is recorded on the
+  position, not inferred.
+- **The `stop_loss_enabled` half is the brief's §9 decision, and it is a
+  conjunction rather than a replacement (v1.93).** `LOCAL` means no stop order
+  stands at the exchange. Whether the bot polls the level instead is the flag's
+  to say, and the flag is global: with it false this module returns `STOP_LOSS`
+  for no position at all, including a `LOCAL` one whose price is far under its
+  `stop_price`. The ownership half is kept untouched because the two halves
+  guard different failures — the `LOCAL` half stops a double sell, the flag half
+  stops a sale the owner has decided not to make — and collapsing them into one
+  condition loses whichever is dropped.
+- **Positions protected by the exchange are unaffected by the flag.** An
+  `EXCHANGE` position keeps its standing stop and the exchange keeps firing it;
+  this module declined to return `STOP_LOSS` for such a position before the flag
+  existed and declines for the same reason after. The six positions open when
+  the brief's §9 decision was taken are exactly that case, which is why turning
+  the stop off required no action on a live account.
+- **`position.stop_price` stays populated and stays inert while the flag is
+  false.** It is derived from `config.stop_loss_pct` at entry as it always was,
+  and this module simply never compares against it. It is a recorded reference
+  level, not a dead field: `reporter.weekly` measures against it what the
+  removed stop would have done. This module must not treat a populated
+  `stop_price` as evidence that a stop is armed — the flag is the only evidence
+  of that.
 - `TAKE_PROFIT` when `price ≥ position.target_price`.
 - `MAX_AGE` when `trading_days_open ≥ MAX_HOLDING_DAYS` **and**
   `session.in_closing_window(now)` — the `SessionInfo` method (§4 `models`),
@@ -4679,6 +4830,37 @@ rises from 0.02% to 12.1%, which is a class a classifier can be trained on.
 Neither is a claim about profit. A longer hold makes the exits reachable; it does
 not make them favourable.
 
+**The derivation above assumes a two-sided band, and with the stop off it no
+longer holds (v1.93).** Every figure in this section — the median resolution
+criterion, the table, the `σ⁻²` scaling — is the answer to "when does a walk
+between a −5% floor and a +10% ceiling usually touch one of them". With
+`config.stop_loss_enabled` false there is no floor, so the criterion that chose
+18 is not satisfiable at any horizon: the ceiling alone is reached by 35.0% of
+positions even with unlimited time (the `b / (a + b)` bound above, which the
+floor's presence is what makes it), so fewer than half ever resolve on a price
+and the clock is always the usual answer. **18 is retained unchanged, and it is
+retained as a policy number rather than a derived one.** Nothing re-derives it
+here: a horizon for a one-sided band needs a criterion this document does not
+have, and inventing one to keep the number looking derived would be worse than
+saying it is not.
+
+What the same model does say, run with the lower barrier removed — same walk,
+same eight sub-steps, same barriers otherwise, and it reproduces this section's
+own 12.1% target-first figure at 1.5%/day, which is why it is quotable at all:
+
+| Daily volatility | Target reached inside 18 days | `MAX_AGE` share | Of those age exits, below −5% | below −10% | 1st percentile |
+|---|---|---|---|---|---|
+| 1.5% | 12.1% | 87.9% | 24.0% | 5.6% | −14.1% |
+| 2.0% | 24.1% | 75.9% | 35.6% | 14.1% | −18.4% |
+| 2.5% | 34.6% | 65.4% | 47.0% | 24.4% | −23.1% |
+
+Reproduce approximately, not bit-for-bit. The brief §9 quotes the 1.5% row as
+the measured cost of the decision. **A re-open condition rides on the same
+measurement the horizon already has:** if realised watchlist volatility is
+measured and the age-exit loss distribution comes in materially worse than the
+row above, the horizon is the lever, because with no stop it is the only exit
+that bounds how long a losing position is held.
+
 **What else keys off the horizon (v1.92).** Traced when the number changed, and
 recorded so the next change traces the same list.
 
@@ -4754,10 +4936,28 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   `broker.client.get_max_lots`; a request above it is reduced to the broker's
   maximum and logged, and a maximum of zero cancels the entry with a recorded
   rejection.
+- **When `config.stop_loss_enabled` is false, no stop order is placed and the
+  position stays `LOCAL` (v1.93).** The function stops after the position row is
+  opened: no `db.stop_orders.record_placing`, no `post_stop_loss`, no
+  `set_stop_protection`, no retry, and therefore no `stop_order_placed` or
+  `stop_protection_degraded` event and no rule 23 degrade — rule 23 is about a
+  stop that could not be placed, and this is a stop that was not attempted. The
+  check is made once, before the first attempt, and never mid-sequence: a stop
+  that has begun being placed is finished and promoted, so the flag changing
+  under a running entry cannot leave a `PLACING` row with no owner.
+  `position.stop_price` is still computed from `config.stop_loss_pct` and still
+  written, as the recorded reference level `lifecycle.exits` ignores and
+  `reporter.weekly` measures against.
 - On confirmation that the stop is standing, promotes the position to
   `EXCHANGE` via `db.positions.set_stop_protection`. Until that call the position
   remains `LOCAL` and the bot watches the stop itself, so no window exists in
   which nothing is watching.
+- **That last guarantee is narrowed by the flag, deliberately, and the brief
+  accepts it (v1.93).** With `stop_loss_enabled` false there is no window in
+  which nothing is watching because there is nothing watching at any point in
+  the position's life: it exits on target or age, and while the process is down
+  it does not exit at all. Brief §9 states what that gives up. Nothing here may
+  reintroduce a stop on its own reading of this bullet.
 - If the stop-loss cannot be placed after three attempts, the position is **not**
   unwound. It stays `LOCAL`, the owner is alerted, and
   `lifecycle.exits` enforces that position's stop by polling instead. Force
@@ -4796,7 +4996,19 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   before cancelling leaves a live stop order against a position that no longer
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
-  cancel; submits the market sell directly.
+  cancel; submits the market sell directly. This is the whole of what a position
+  opened with `config.stop_loss_enabled` false needs on exit — it is `LOCAL`,
+  so this branch already covers it and no new branch is owed (v1.93). The
+  function must send **no** cancel for such a position: a cancel for a stop that
+  was never placed is a broker call made on a guess, and brief §19's criterion
+  17 is verified on exactly this.
+- **The `EXCHANGE` branch stays live and unconditional while the flag is false
+  (v1.93).** The six positions open when the stop was turned off are
+  `EXCHANGE`-protected, and their exits must still cancel before selling. The
+  discriminator is `position.stop_protection`, never `config.stop_loss_enabled`:
+  reading the flag here would send a market sell against a live standing stop
+  and sell the position twice, which is the exact failure the cancel-then-sell
+  ordering exists to prevent.
 - **The database-failure halt passes no `daily_loss_pct` (v1.69).**
   `_halt_on_db_failure` runs because a database write just failed, and
   `pnl.daily_loss_pct` reads that same database — calling it there would query
@@ -5208,6 +5420,19 @@ One handler per command in the brief's command table.
   where it is written; this module owes only the seam and the fallback reply,
   and must not acquire a default builder to close the gap on its own.
 - No handler mutates a risk limit.
+- **`/limits` and `/positions` say when the protective stop is off (v1.93).**
+  `/limits` renders `cfg.stop_loss_enabled` alongside `cfg.stop_loss_pct`, and
+  when it is false says in words that no stop order is placed and that positions
+  exit on target or age only. `/positions` prints each open position's
+  `stop_protection`, and for a `LOCAL` position it must distinguish the two
+  meanings the flag now separates: with the flag true, `LOCAL` is the degraded
+  state rule 23 produces and the bot is watching the level; with the flag false,
+  nothing is watching it. Rendering both as the bare word `LOCAL` is the whole
+  defect this bullet exists to prevent — the owner would read "the bot is
+  watching" from a position nothing is watching. An `EXCHANGE` position is
+  rendered as before, flag or no flag, because the exchange really is holding
+  its stop. This is the on-demand half of the obligation `app.startup` step 9
+  owes once per process start.
 - `/halt` and `/resume` delegate to `state.halt` and to nothing else.
 - **`/halt` passes no `daily_loss_pct` (v1.71, reversing v1.69).** It calls
   `state.halt.halt(reason, detail, at)` and nothing else. The reasoning is under
@@ -5248,8 +5473,32 @@ One handler per command in the brief's command table.
   decide on would be invisible in the one document the owner reads weekly.
   `telegram.commands` owns the other half, and the writing half is
   `execution.orders`'.
+- **The intended-versus-actual exit price section measures the removed stop
+  while `config.stop_loss_enabled` is false (v1.93).** `position.stop_price` is
+  still written on every position, derived from `config.stop_loss_pct`, and with
+  the stop off nothing acts on it — which makes it exactly the counterfactual
+  the brief's §9 decision needs measured. For each position closed in the week
+  on `MAX_AGE` or `TAKE_PROFIT` while the flag was false, the section reports
+  how many **exited** at or below their `stop_price` and the summed realised
+  result of those that did. The comparison is `exit_price` against `stop_price`
+  on rows this module already reads; it needs no new column, no new query and no
+  price history the bot does not keep. It therefore under-counts — a position
+  that dipped through the level intraday and recovered before its age exit is
+  not counted — and the report says so in the line, because a number that looks
+  like "how often the stop would have fired" and is not must not be read as one.
+  That is the positive action behind
+  "the removal is an accepted trade": it turns the accepted cost into a weekly
+  number instead of a paragraph. It is a measurement and never a
+  recommendation — this module proposes no change to the flag.
+- **It must not be reported as a stop-loss.** The exit-trigger distribution
+  counts what fired, and `STOP_LOSS` fires for no position opened while the flag
+  is false. A counterfactual breach is reported in its own line, under its own
+  wording; folding it into the trigger distribution would corrupt the one table
+  the holding-period and stop decisions are both re-argued from.
 - Over the length limit, sections are dropped in this order — exit-trigger
-  distribution, cooldown counts, worst trade — and the omission is noted.
+  distribution, cooldown counts, worst trade — and the omission is noted. The
+  counterfactual-stop line is dropped with the exit-trigger distribution, being
+  part of it.
 
 **`async send(now: datetime) → None`** — builds and sends; failure alerts but does not raise.
 - **After `alert` returns, emit `weekly_report_built` (INFO) with
@@ -5546,6 +5795,20 @@ Fixed ordering; each step completes before the next begins:
    the alternative was a fabricated exit price written permanently into the trade
    history.
 
+7aa. **Every stop remedy in this step runs whatever `config.stop_loss_enabled`
+   says (v1.93).** The flag decides whether a *new* position gets a stop; it
+   decides nothing about the positions that already have one. `STOP_MISSING`
+   arises only for an `EXCHANGE`-protected position, and such a position is one
+   the owner's §9 decision deliberately left protected, so its stop is replaced
+   here exactly as before — skipping the replacement because "stops are off"
+   would leave a position whose row reads `EXCHANGE` with nothing watching it,
+   which is #95 reproduced on purpose. `STOP_ORPHAN`, `STOP_DUPLICATE`,
+   `STOP_MISPRICED` and `STOP_MISSIZED` likewise run unchanged. The one branch
+   the flag reaches is `STOP_ADOPTABLE`, and it is reached by the finding never
+   being reported at all — `broker.reconcile` withholds it under its own
+   contract, so this step gains no condition and no branch is removed from it.
+   An unrecognised-type alert is still owed if one arrives.
+
 7b. **Refuse to start on a `FOREIGN_HOLDING` adjustment**, unless
    `config.allow_foreign_holdings` is true. Raise `StartupError` naming every
    ticker reported, after alerting. The account is the bot's alone (brief v1.8),
@@ -5693,6 +5956,22 @@ Fixed ordering; each step completes before the next begins:
    reason to keep it; deleting it left `/report` permanently broken with every
    gate green. The contract is what makes the wiring an obligation rather than
    an accident.
+
+8c. **Name the disabled stop in the ready alert when `config.stop_loss_enabled`
+   is false (v1.93).** The alert of step 9 says, in words, that no protective
+   stop is placed and that open positions exit on target or age only. It also
+   names the count of open positions still carrying an exchange stop from before
+   the flag was set, because those behave differently from every position opened
+   since and the difference is invisible otherwise.
+
+   **Cadence and reset.** Once per process start, in the existing ready alert —
+   no separate message, no latch, and nothing to reset: the condition is a
+   configuration value, it is re-read on every start, and it stops being
+   reported the moment the flag is set back to true. It is deliberately not a
+   repeating alert. A configured state the owner chose is not a fault, and an
+   alert that fires on a cadence for a setting nobody is going to change is
+   failure class 14. The on-demand half is `telegram.commands`' `/limits` and
+   `/positions`, under its own heading.
 
 9. Alert the owner that the bot is running, reporting version, mode, halt state
    and any reconciliation adjustments, **and emit the `startup_ok` log event of
@@ -7469,12 +7748,30 @@ something else.
     polling: `lifecycle.exits` returns `STOP_LOSS` for that position and
     `execution.orders.close_position` sells it. Never unwind a sound position
     because a secondary order failed.
+
+    **This rule covers a stop that failed, never a stop that was not attempted
+    (v1.93).** When `config.stop_loss_enabled` is false no stop is placed, so
+    this rule is not reached: there is no rejection, no retry, no alert and no
+    `stop_protection_degraded`. Its fallback is not reached either —
+    `lifecycle.exits` returns `STOP_LOSS` for no position while the flag is
+    false, which is the brief's §9 decision and not a degrade. The rule stays in
+    force in full whenever the flag is true, including for the positions opened
+    before it was set.
 24. **Stop order found with no matching open position** → cancel it as an orphan
     and alert. A live stop against a position that no longer exists can sell
     stock the account does not hold.
 25. **Open position found with no live stop order** while
     `stop_protection = 'EXCHANGE'` → place a replacement and alert. An
     unprotected position is the state this whole mechanism exists to prevent.
+
+    **The `EXCHANGE` condition is what makes this rule survive v1.93 unchanged.**
+    A position opened while `config.stop_loss_enabled` is false never reaches
+    `EXCHANGE`, so this rule never fires for one and needs no exception; a
+    position that *is* `EXCHANGE` is one the brief's §9 decision left protected
+    on purpose, so the replacement is placed for it whatever the flag says.
+    Conditioning this rule on the flag would strand exactly those positions —
+    row reading protected, nothing watching — which is the state the rule
+    exists for.
     **Who detects, who remedies, and when (v1.73).** The detector is
     `broker.reconcile`, which reports the discrepancy and, by its own contract,
     **must never place or cancel an order**. The remedy is applied by the caller

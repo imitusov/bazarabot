@@ -76,6 +76,19 @@ One handler per command in the brief's command table.
   where it is written; this module owes only the seam and the fallback reply,
   and must not acquire a default builder to close the gap on its own.
 - No handler mutates a risk limit.
+- **`/limits` and `/positions` say when the protective stop is off (v1.93).**
+  `/limits` renders `cfg.stop_loss_enabled` alongside `cfg.stop_loss_pct`, and
+  when it is false says in words that no stop order is placed and that positions
+  exit on target or age only. `/positions` prints each open position's
+  `stop_protection`, and for a `LOCAL` position it must distinguish the two
+  meanings the flag now separates: with the flag true, `LOCAL` is the degraded
+  state rule 23 produces and the bot is watching the level; with the flag false,
+  nothing is watching it. Rendering both as the bare word `LOCAL` is the whole
+  defect this bullet exists to prevent — the owner would read "the bot is
+  watching" from a position nothing is watching. An `EXCHANGE` position is
+  rendered as before, flag or no flag, because the exchange really is holding
+  its stop. This is the on-demand half of the obligation `app.startup` step 9
+  owes once per process start.
 - `/halt` and `/resume` delegate to `state.halt` and to nothing else.
 - **`/halt` passes no `daily_loss_pct` (v1.71, reversing v1.69).** It calls
   `state.halt.halt(reason, detail, at)` and nothing else. The reasoning is under
