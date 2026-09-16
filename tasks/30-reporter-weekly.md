@@ -113,8 +113,32 @@ they are.
   decide on would be invisible in the one document the owner reads weekly.
   `telegram.commands` owns the other half, and the writing half is
   `execution.orders`'.
+- **The intended-versus-actual exit price section measures the removed stop
+  while `config.stop_loss_enabled` is false (v1.93).** `position.stop_price` is
+  still written on every position, derived from `config.stop_loss_pct`, and with
+  the stop off nothing acts on it — which makes it exactly the counterfactual
+  the brief's §9 decision needs measured. For each position closed in the week
+  on `MAX_AGE` or `TAKE_PROFIT` while the flag was false, the section reports
+  how many **exited** at or below their `stop_price` and the summed realised
+  result of those that did. The comparison is `exit_price` against `stop_price`
+  on rows this module already reads; it needs no new column, no new query and no
+  price history the bot does not keep. It therefore under-counts — a position
+  that dipped through the level intraday and recovered before its age exit is
+  not counted — and the report says so in the line, because a number that looks
+  like "how often the stop would have fired" and is not must not be read as one.
+  That is the positive action behind
+  "the removal is an accepted trade": it turns the accepted cost into a weekly
+  number instead of a paragraph. It is a measurement and never a
+  recommendation — this module proposes no change to the flag.
+- **It must not be reported as a stop-loss.** The exit-trigger distribution
+  counts what fired, and `STOP_LOSS` fires for no position opened while the flag
+  is false. A counterfactual breach is reported in its own line, under its own
+  wording; folding it into the trigger distribution would corrupt the one table
+  the holding-period and stop decisions are both re-argued from.
 - Over the length limit, sections are dropped in this order — exit-trigger
-  distribution, cooldown counts, worst trade — and the omission is noted.
+  distribution, cooldown counts, worst trade — and the omission is noted. The
+  counterfactual-stop line is dropped with the exit-trigger distribution, being
+  part of it.
 
 **`async send(now: datetime) → None`** — builds and sends; failure alerts but does not raise.
 - **After `alert` returns, emit `weekly_report_built` (INFO) with

@@ -19,10 +19,33 @@ Module **13** of 43 in `dependency-order.md`. Everything before it is complete a
 **`evaluate(position: Position, price: Decimal, now: datetime, session: SessionInfo, trading_days_open: int | None, config: Config) → ExitTrigger | None`**
 - Pure. Returns the trigger that fires, or `None`.
 - `STOP_LOSS` when `price ≤ position.stop_price` **and only when
-  `position.stop_protection == 'LOCAL'`**. When the exchange holds the stop, this
-  module must never return `STOP_LOSS`: the trigger has exactly one owner at a
-  time, and both acting on the same position would sell it twice. Ownership is
-  recorded on the position, not inferred.
+  `position.stop_protection == 'LOCAL'` and `config.stop_loss_enabled` is
+  true** (v1.93). When the exchange holds the stop, this module must never
+  return `STOP_LOSS`: the trigger has exactly one owner at a time, and both
+  acting on the same position would sell it twice. Ownership is recorded on the
+  position, not inferred.
+- **The `stop_loss_enabled` half is the brief's §9 decision, and it is a
+  conjunction rather than a replacement (v1.93).** `LOCAL` means no stop order
+  stands at the exchange. Whether the bot polls the level instead is the flag's
+  to say, and the flag is global: with it false this module returns `STOP_LOSS`
+  for no position at all, including a `LOCAL` one whose price is far under its
+  `stop_price`. The ownership half is kept untouched because the two halves
+  guard different failures — the `LOCAL` half stops a double sell, the flag half
+  stops a sale the owner has decided not to make — and collapsing them into one
+  condition loses whichever is dropped.
+- **Positions protected by the exchange are unaffected by the flag.** An
+  `EXCHANGE` position keeps its standing stop and the exchange keeps firing it;
+  this module declined to return `STOP_LOSS` for such a position before the flag
+  existed and declines for the same reason after. The six positions open when
+  the brief's §9 decision was taken are exactly that case, which is why turning
+  the stop off required no action on a live account.
+- **`position.stop_price` stays populated and stays inert while the flag is
+  false.** It is derived from `config.stop_loss_pct` at entry as it always was,
+  and this module simply never compares against it. It is a recorded reference
+  level, not a dead field: `reporter.weekly` measures against it what the
+  removed stop would have done. This module must not treat a populated
+  `stop_price` as evidence that a stop is armed — the flag is the only evidence
+  of that.
 - `TAKE_PROFIT` when `price ≥ position.target_price`.
 - `MAX_AGE` when `trading_days_open ≥ MAX_HOLDING_DAYS` **and**
   `session.in_closing_window(now)` — the `SessionInfo` method (§4 `models`),
@@ -139,6 +162,37 @@ rises from 0.02% to 12.1%, which is a class a classifier can be trained on.
 Neither is a claim about profit. A longer hold makes the exits reachable; it does
 not make them favourable.
 
+**The derivation above assumes a two-sided band, and with the stop off it no
+longer holds (v1.93).** Every figure in this section — the median resolution
+criterion, the table, the `σ⁻²` scaling — is the answer to "when does a walk
+between a −5% floor and a +10% ceiling usually touch one of them". With
+`config.stop_loss_enabled` false there is no floor, so the criterion that chose
+18 is not satisfiable at any horizon: the ceiling alone is reached by 35.0% of
+positions even with unlimited time (the `b / (a + b)` bound above, which the
+floor's presence is what makes it), so fewer than half ever resolve on a price
+and the clock is always the usual answer. **18 is retained unchanged, and it is
+retained as a policy number rather than a derived one.** Nothing re-derives it
+here: a horizon for a one-sided band needs a criterion this document does not
+have, and inventing one to keep the number looking derived would be worse than
+saying it is not.
+
+What the same model does say, run with the lower barrier removed — same walk,
+same eight sub-steps, same barriers otherwise, and it reproduces this section's
+own 12.1% target-first figure at 1.5%/day, which is why it is quotable at all:
+
+| Daily volatility | Target reached inside 18 days | `MAX_AGE` share | Of those age exits, below −5% | below −10% | 1st percentile |
+|---|---|---|---|---|---|
+| 1.5% | 12.1% | 87.9% | 24.0% | 5.6% | −14.1% |
+| 2.0% | 24.1% | 75.9% | 35.6% | 14.1% | −18.4% |
+| 2.5% | 34.6% | 65.4% | 47.0% | 24.4% | −23.1% |
+
+Reproduce approximately, not bit-for-bit. The brief §9 quotes the 1.5% row as
+the measured cost of the decision. **A re-open condition rides on the same
+measurement the horizon already has:** if realised watchlist volatility is
+measured and the age-exit loss distribution comes in materially worse than the
+row above, the horizon is the lever, because with no stop it is the only exit
+that bounds how long a losing position is held.
+
 **What else keys off the horizon (v1.92).** Traced when the number changed, and
 recorded so the next change traces the same list.
 
@@ -189,6 +243,18 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   horizon has already moved once, from 3 to 18 in v1.91).
 - A position at both stop and maximum age returns `STOP_LOSS` (proves the
   documented precedence, so the recorded reason is deterministic).
+- A `LOCAL` position priced **below** its `stop_price` returns `None` when
+  `config.stop_loss_enabled` is false, and `STOP_LOSS` for the identical inputs
+  when it is true (proves the flag gates the trigger, and that `stop_price`
+  being populated is not what arms it).
+- That same position priced at or above its target still returns `TAKE_PROFIT`
+  with the flag false, and returns `MAX_AGE` in the closing window when it is old
+  enough (proves the flag suppresses exactly one trigger and leaves the other two
+  working — the failure this would otherwise hide is a position with no exits at
+  all).
+- An `EXCHANGE` position priced below its stop returns `None` with the flag true
+  and with it false (proves the ownership guard is unchanged by the flag, so the
+  positions carrying an exchange stop from before v1.93 are never sold twice).
 - Age is counted in trading days: a position opened Friday is not aged by the
   weekend (proves calendar-aware ageing).
 - An adopted position ages from its adoption timestamp (proves the reconciliation

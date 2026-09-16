@@ -188,10 +188,28 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   `broker.client.get_max_lots`; a request above it is reduced to the broker's
   maximum and logged, and a maximum of zero cancels the entry with a recorded
   rejection.
+- **When `config.stop_loss_enabled` is false, no stop order is placed and the
+  position stays `LOCAL` (v1.93).** The function stops after the position row is
+  opened: no `db.stop_orders.record_placing`, no `post_stop_loss`, no
+  `set_stop_protection`, no retry, and therefore no `stop_order_placed` or
+  `stop_protection_degraded` event and no rule 23 degrade — rule 23 is about a
+  stop that could not be placed, and this is a stop that was not attempted. The
+  check is made once, before the first attempt, and never mid-sequence: a stop
+  that has begun being placed is finished and promoted, so the flag changing
+  under a running entry cannot leave a `PLACING` row with no owner.
+  `position.stop_price` is still computed from `config.stop_loss_pct` and still
+  written, as the recorded reference level `lifecycle.exits` ignores and
+  `reporter.weekly` measures against.
 - On confirmation that the stop is standing, promotes the position to
   `EXCHANGE` via `db.positions.set_stop_protection`. Until that call the position
   remains `LOCAL` and the bot watches the stop itself, so no window exists in
   which nothing is watching.
+- **That last guarantee is narrowed by the flag, deliberately, and the brief
+  accepts it (v1.93).** With `stop_loss_enabled` false there is no window in
+  which nothing is watching because there is nothing watching at any point in
+  the position's life: it exits on target or age, and while the process is down
+  it does not exit at all. Brief §9 states what that gives up. Nothing here may
+  reintroduce a stop on its own reading of this bullet.
 - If the stop-loss cannot be placed after three attempts, the position is **not**
   unwound. It stays `LOCAL`, the owner is alerted, and
   `lifecycle.exits` enforces that position's stop by polling instead. Force
@@ -230,7 +248,19 @@ not emit `stop_order_executed` / `stop_order_orphaned` (those are
   before cancelling leaves a live stop order against a position that no longer
   exists, which can sell a quantity the account does not hold.
 - When `position.stop_protection == 'LOCAL'`: there is no standing stop to
-  cancel; submits the market sell directly.
+  cancel; submits the market sell directly. This is the whole of what a position
+  opened with `config.stop_loss_enabled` false needs on exit — it is `LOCAL`,
+  so this branch already covers it and no new branch is owed (v1.93). The
+  function must send **no** cancel for such a position: a cancel for a stop that
+  was never placed is a broker call made on a guess, and brief §19's criterion
+  17 is verified on exactly this.
+- **The `EXCHANGE` branch stays live and unconditional while the flag is false
+  (v1.93).** The six positions open when the stop was turned off are
+  `EXCHANGE`-protected, and their exits must still cancel before selling. The
+  discriminator is `position.stop_protection`, never `config.stop_loss_enabled`:
+  reading the flag here would send a market sell against a live standing stop
+  and sell the position twice, which is the exact failure the cancel-then-sell
+  ordering exists to prevent.
 - **The database-failure halt passes no `daily_loss_pct` (v1.69).**
   `_halt_on_db_failure` runs because a database write just failed, and
   `pnl.daily_loss_pct` reads that same database — calling it there would query
@@ -498,6 +528,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
     `execution.orders.close_position` sells it. Never unwind a sound position
     because a secondary order failed.
 
+    **This rule covers a stop that failed, never a stop that was not attempted
+    (v1.93).** When `config.stop_loss_enabled` is false no stop is placed, so
+    this rule is not reached: there is no rejection, no retry, no alert and no
+    `stop_protection_degraded`. Its fallback is not reached either —
+    `lifecycle.exits` returns `STOP_LOSS` for no position while the flag is
+    false, which is the brief's §9 decision and not a degrade. The rule stays in
+    force in full whenever the flag is true, including for the positions opened
+    before it was set.
+
 26. **Stop order executed by the exchange** → not an error. Close the position
     from the fill with `exit_trigger = STOP_LOSS`, start the cooldown, alert.
 
@@ -617,6 +656,31 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 **stop-order lifecycle** (`execution.orders`, `broker.reconcile`)
 - Opening a position places exactly one stop order at the computed price
   (happy path).
+- With `config.stop_loss_enabled` false, opening a position places **no** stop:
+  `post_stop_loss` is never called, no `stop_orders` row is written, the position
+  is open and `LOCAL`, `stop_price` is still populated from
+  `config.stop_loss_pct`, and neither `stop_order_placed` nor
+  `stop_protection_degraded` is emitted (proves the brief §9 decision is carried
+  out at the one site that places stops, and that it is a skip rather than a
+  rule 23 degrade — asserting only "no order sent" would pass against a broken
+  placement that alerted).
+- Closing a `LOCAL` position with the flag false submits the sell and **no**
+  cancel (proves brief §19 criterion 17 for a position that never had a stop; a
+  cancel here is a broker call made on a guess).
+- Closing an `EXCHANGE` position with the flag false still cancels before
+  selling (proves the discriminator is `stop_protection` and not the flag —
+  reading the flag here would sell the six pre-v1.93 positions twice).
+- `broker.reconcile` reports `STOP_ADOPTABLE` for a `LOCAL` position with a
+  correctly-priced live stop when the flag is true, and reports `STOP_ORPHAN`
+  for the identical state when it is false, and in neither case does the
+  position's `stop_protection` become `EXCHANGE` inside reconciliation (proves
+  the withholding, and that it routes to cancellation rather than into silence).
+- `broker.reconcile` still reports `STOP_MISSING`, `STOP_MISPRICED`,
+  `STOP_MISSIZED`, `STOP_ORPHAN` and `STOP_DUPLICATE` with the flag false, and
+  `app.startup` step 7 still applies every one of their remedies (proves the
+  flag withholds exactly one finding; a test that only checks adoption would
+  pass against a reconcile that went quiet altogether and stranded the positions
+  that still carry stops).
 - A position is `LOCAL` between its creation and the stop being confirmed, and
   `EXCHANGE` only after (proves there is no window in which neither owner is
   watching — the gap this two-step design exists to close).

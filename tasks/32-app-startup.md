@@ -297,6 +297,20 @@ Fixed ordering; each step completes before the next begins:
    the alternative was a fabricated exit price written permanently into the trade
    history.
 
+7aa. **Every stop remedy in this step runs whatever `config.stop_loss_enabled`
+   says (v1.93).** The flag decides whether a *new* position gets a stop; it
+   decides nothing about the positions that already have one. `STOP_MISSING`
+   arises only for an `EXCHANGE`-protected position, and such a position is one
+   the owner's §9 decision deliberately left protected, so its stop is replaced
+   here exactly as before — skipping the replacement because "stops are off"
+   would leave a position whose row reads `EXCHANGE` with nothing watching it,
+   which is #95 reproduced on purpose. `STOP_ORPHAN`, `STOP_DUPLICATE`,
+   `STOP_MISPRICED` and `STOP_MISSIZED` likewise run unchanged. The one branch
+   the flag reaches is `STOP_ADOPTABLE`, and it is reached by the finding never
+   being reported at all — `broker.reconcile` withholds it under its own
+   contract, so this step gains no condition and no branch is removed from it.
+   An unrecognised-type alert is still owed if one arrives.
+
 7b. **Refuse to start on a `FOREIGN_HOLDING` adjustment**, unless
    `config.allow_foreign_holdings` is true. Raise `StartupError` naming every
    ticker reported, after alerting. The account is the bot's alone (brief v1.8),
@@ -444,6 +458,22 @@ Fixed ordering; each step completes before the next begins:
    reason to keep it; deleting it left `/report` permanently broken with every
    gate green. The contract is what makes the wiring an obligation rather than
    an accident.
+
+8c. **Name the disabled stop in the ready alert when `config.stop_loss_enabled`
+   is false (v1.93).** The alert of step 9 says, in words, that no protective
+   stop is placed and that open positions exit on target or age only. It also
+   names the count of open positions still carrying an exchange stop from before
+   the flag was set, because those behave differently from every position opened
+   since and the difference is invisible otherwise.
+
+   **Cadence and reset.** Once per process start, in the existing ready alert —
+   no separate message, no latch, and nothing to reset: the condition is a
+   configuration value, it is re-read on every start, and it stops being
+   reported the moment the flag is set back to true. It is deliberately not a
+   repeating alert. A configured state the owner chose is not a fault, and an
+   alert that fires on a cadence for a setting nobody is going to change is
+   failure class 14. The on-demand half is `telegram.commands`' `/limits` and
+   `/positions`, under its own heading.
 
 9. Alert the owner that the bot is running, reporting version, mode, halt state
    and any reconciliation adjustments, **and emit the `startup_ok` log event of

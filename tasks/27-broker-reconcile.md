@@ -370,6 +370,30 @@ module's own task never carried it (#177). No other module writes
   account for a look.
 - On restart an existing stop is **adopted** rather than replaced — two stops on
   one position would sell it twice.
+- **`STOP_ADOPTABLE` is not reported at all while `config.stop_loss_enabled` is
+  false (v1.93).** Adoption is the one stop finding that *creates* protection:
+  `app.startup` calls `adopt_existing_stop`, which sets
+  `stop_protection = EXCHANGE`, and a position opened under the brief's §9
+  decision is meant to have no stop. A stop standing against such a position is
+  not the bot's — it is a leftover, or it arrived with a holding — and binding it
+  would hand the exchange a trigger the owner has decided not to arm. It is
+  reported as `STOP_ORPHAN` instead, on the existing rule: a live stop that no
+  open position claims is cancelled by `app.startup` through
+  `execution.orders.cancel_orphaned_stop`. That is deliberate and it is where
+  rule 32's reasoning lands — the bot does not adopt what it did not place.
+  **This withholding is the only one the flag causes.** `STOP_ORPHAN`,
+  `STOP_DUPLICATE`, `STOP_MISSING`, `STOP_MISPRICED` and `STOP_MISSIZED` are
+  reported exactly as before: each of them is about a position that already has
+  or already claims a stop, and the six positions carrying one when the flag was
+  set still need every one of them. A finding suppressed because "stops are off"
+  would leave those six half-managed, which is the state that is worse than
+  either arrangement.
+- **`STOP_MISSING` stays vacuous rather than suppressed.** It is reported only
+  for an open position whose `stop_protection` reads `EXCHANGE`, and no position
+  opened while the flag is false ever reaches `EXCHANGE`, so the finding simply
+  does not arise for them. Nothing conditions it on the flag, and nothing may:
+  the positions it does arise for are precisely the ones that must keep their
+  protection.
 - **A stop is mispriced only when it differs from the position's stop by a full
   price increment or more (v1.55).** The broker snaps a posted stop to the
   instrument's `min_price_increment`, so the price it holds is almost never the
@@ -603,6 +627,15 @@ From `technical-spec.md` §8. Handle each exactly as written.
 25. **Open position found with no live stop order** while
     `stop_protection = 'EXCHANGE'` → place a replacement and alert. An
     unprotected position is the state this whole mechanism exists to prevent.
+
+    **The `EXCHANGE` condition is what makes this rule survive v1.93 unchanged.**
+    A position opened while `config.stop_loss_enabled` is false never reaches
+    `EXCHANGE`, so this rule never fires for one and needs no exception; a
+    position that *is* `EXCHANGE` is one the brief's §9 decision left protected
+    on purpose, so the replacement is placed for it whatever the flag says.
+    Conditioning this rule on the flag would strand exactly those positions —
+    row reading protected, nothing watching — which is the state the rule
+    exists for.
     **Who detects, who remedies, and when (v1.73).** The detector is
     `broker.reconcile`, which reports the discrepancy and, by its own contract,
     **must never place or cancel an order**. The remedy is applied by the caller
@@ -717,6 +750,17 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A holding 40% above its average cost is reported, not adopted, and no exit is
   submitted for it (proves the specific liquidation this policy exists to
   prevent).
+- With `config.stop_loss_enabled` false, a `LOCAL` position carrying a
+  correctly-priced live stop is reported `STOP_ORPHAN` and **not**
+  `STOP_ADOPTABLE`, and the same state with the flag true is reported
+  `STOP_ADOPTABLE` (v1.93 — proves the one finding the flag withholds, and that
+  it routes to cancellation rather than into silence).
+- With the flag false, an `EXCHANGE` position whose stop has vanished is still
+  reported `STOP_MISSING`, a stop at the wrong price is still `STOP_MISPRICED`,
+  a stop at the wrong size is still `STOP_MISSIZED` and two live stops are still
+  `STOP_DUPLICATE` (v1.93 — proves the flag withholds exactly one finding; a
+  reconcile that went quiet on all of them would strand the positions opened
+  before the flag was set, which is the state this module exists to detect).
 - A holding whose ticker has an unresolved `ENTRY` order is adopted rather than
   reported foreign (proves crash recovery still works: the bot bought this, the
   fill landed, and the process died before the row was written).
