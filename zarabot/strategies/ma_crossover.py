@@ -1,4 +1,9 @@
-"""Moving-average crossover: buy when the fast SMA crosses above the slow SMA."""
+"""Moving-average crossover: buy when the fast SMA crosses above the slow SMA.
+
+The fast window is 40 closes and the slow window is 80 (spec v1.94; they were
+10 and 30). `lookback` is the slow window plus one bar, because a crossover is
+a comparison between two consecutive bars and not a state of one.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +12,8 @@ from decimal import Decimal
 
 from zarabot.models import Candle, Side, Signal
 
-_FAST = 10
-_SLOW = 30
+_FAST = 40
+_SLOW = 80
 
 
 def _sma(closes: list[Decimal], period: int) -> Decimal:

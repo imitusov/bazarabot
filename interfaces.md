@@ -616,9 +616,9 @@ series is degenerate. Deterministic. Runtime-checkable.
 
 ## `zarabot.strategies.ma_crossover`
 
-Pure. Fast SMA 10 vs slow SMA 30. `lookback` is 31.
+Pure. Fast SMA 40 vs slow SMA 80. `lookback` is 81 (`_SLOW + 1`).
 
-**`MovingAverageCrossover`** — `name = "ma_crossover"`, `lookback = 31`
+**`MovingAverageCrossover`** — `name = "ma_crossover"`, `lookback = 81`
 
 **`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
 `BUY` when the fast SMA crosses above the slow SMA on the latest bar. `None`
