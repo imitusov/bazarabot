@@ -675,6 +675,20 @@ is local — the module never calls `setcontext`.
 short, flat, or above the band. The flat guard is load-bearing: zero deviation
 puts the band on the close and the bound is inclusive. Never `SELL`.
 
+## `zarabot.strategies.macd_trend`
+
+Pure. MACD 12/26/9: the fast-minus-slow EMA line crossing above the 9-period
+EMA of itself. `lookback` is 35 (`_SLOW + _SIGNAL`) — 26 closes seed the slow
+EMA and 9 MACD values seed the signal EMA, leaving the two signal values a
+crossing needs. Each EMA is seeded with the SMA of its first `period` values.
+
+**`MACDTrend`** — `name = "macd_trend"`, `lookback = 35`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when the MACD line was at or below the signal line one bar ago and is
+strictly above it on the latest bar. The crossing, not the ordering. `None`
+when short, flat, or when no crossing occurred. Never `SELL`.
+
 ## `zarabot.strategies.ml_model`
 
 Load at startup (I/O); `evaluate` is pure. Absent from the registry when
