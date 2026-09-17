@@ -644,6 +644,21 @@ Pure. Breakout above the prior 20-bar high. `lookback` is 21.
 `BUY` when the latest close exceeds the high of the prior 20 bars. `None` when
 short, flat, or not a breakout. Never `SELL`.
 
+## `zarabot.strategies.volume_breakout`
+
+Pure. Breakout above the prior 20-bar high, confirmed by volume at or above
+1.5x the mean volume of the same 20 bars. `lookback` is 21
+(`max(_BREAKOUT_BARS, _VOLUME_BARS) + 1`). The only strategy that reads
+`Candle.volume`.
+
+**`VolumeBreakout`** — `name = "volume_breakout"`, `lookback = 21`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when the latest close exceeds the prior 20-bar high **and** the latest
+volume is at or above `1.5 x` the mean of the prior 20 volumes. `None` when
+short, flat, not a breakout, on thin volume, or when the prior window traded
+nothing at all. Volume is compared in `Decimal`. Never `SELL`.
+
 ## `zarabot.strategies.ml_model`
 
 Load at startup (I/O); `evaluate` is pure. Absent from the registry when

@@ -49,9 +49,7 @@ def _candles(
 
 def _breakout(volume: int) -> list[Candle]:
     """The same price breakout every time; only the breakout bar's volume moves."""
-    return _candles(
-        [*_PRIOR_CLOSES, _BREAKOUT_CLOSE], [*_PRIOR_VOLUMES, volume]
-    )
+    return _candles([*_PRIOR_CLOSES, _BREAKOUT_CLOSE], [*_PRIOR_VOLUMES, volume])
 
 
 def test_entry_series_returns_signal() -> None:
@@ -138,7 +136,7 @@ def test_lookback_is_derived_from_the_two_windows() -> None:
     # literal, so the two windows and the lookback cannot drift apart.
     assert STRATEGY.lookback == max(_BREAKOUT_BARS, _VOLUME_BARS) + 1
     assert (_BREAKOUT_BARS, _VOLUME_BARS) == (20, 20)
-    assert _VOLUME_MULTIPLE == Decimal("1.5")
+    assert str(_VOLUME_MULTIPLE) == "1.5"
     assert STRATEGY.lookback == 21
 
 

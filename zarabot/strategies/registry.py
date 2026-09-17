@@ -10,11 +10,13 @@ from zarabot.strategies.ma_crossover import MovingAverageCrossover
 from zarabot.strategies.ml_model import load
 from zarabot.strategies.momentum import MomentumBreakout
 from zarabot.strategies.rsi_reversion import RSIReversion
+from zarabot.strategies.volume_breakout import VolumeBreakout
 
 _RULE_BASED: dict[str, type] = {
     "ma_crossover": MovingAverageCrossover,
     "rsi_reversion": RSIReversion,
     "momentum": MomentumBreakout,
+    "volume_breakout": VolumeBreakout,
 }
 
 
