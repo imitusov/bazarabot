@@ -19,12 +19,14 @@ Module **15** of 43 in `dependency-order.md`. Everything before it is complete a
 Implements the `Strategy` protocol specified under `zarabot/strategies/base.py`,
 which applies here unchanged — pure, no I/O and no clock beyond `now`, entry-only,
 `BUY` or `None`, never `SELL`, deterministic. `name` is `"ma_crossover"` and
-`lookback` is **31**: the slow window plus one bar, because a crossover is a
-comparison between two consecutive bars and not a state of one.
+`lookback` is **81**: the slow window plus one bar, because a crossover is a
+comparison between two consecutive bars and not a state of one. `lookback` is
+**derived** from the slow window in code, not written as a literal, so the two
+cannot drift apart.
 
 **`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
-- Parameters: a simple moving average of the last **10** closes (fast) against one
-  of the last **30** (slow). Both are module constants rather than configuration,
+- Parameters: a simple moving average of the last **40** closes (fast) against one
+  of the last **80** (slow). Both are module constants rather than configuration,
   on the same reasoning as `ml_model`'s confidence threshold: changing one changes
   what the strategy means, so it travels with the code and a redeploy.
 - Returns a `BUY` when the fast average was **at or below** the slow average one
@@ -36,6 +38,27 @@ comparison between two consecutive bars and not a state of one.
 - Returns `None` when fewer than `lookback` candles are supplied, and `None` when
   every supplied close is identical — a flat series is the degenerate input the
   protocol requires be answered with `None` rather than an exception.
+
+**The windows are 40/80 as of v1.94; they were 10/30.** The change is the owner's,
+and the cost is signal frequency: measured against the live broker over 608
+complete daily bars per ticker across the ten-ticker watchlist (~2.4 years),
+**10/30 produced 110 crossovers and 40/80 produced 31** — about 3.5× fewer, or
+roughly 13 entries a year across the whole watchlist. That number is recorded here
+so the next reader knows what the slower pair cost without re-measuring it. Data
+depth is not a constraint: §2.1 records 456 daily candles available against a
+floor of 250, `app.loops` sizes its fetch from `max(strategy.lookback)` and
+`market.data` converts that to calendar days, so 81 bars is requested
+automatically. `ma_crossover` was the longest lookback at 31 and remains the
+longest at 81, so no other strategy's fetch depth changes.
+
+**Test fixtures must exceed the lookback, and that is not a style note.** A
+candle series shorter than 81 returns `None` at the length guard, which is the
+first branch in the function — so a flat-series fixture of 40 bars, or a
+no-setup fixture of 31, returns `None` for a reason that has nothing to do with
+flatness or with the absence of a crossing, and the test passes while proving
+nothing. That is failure class 9, a fixture production cannot produce. Every
+fixture in this module's tests other than the deliberately-short-series case is
+longer than `lookback`.
 
 ## Test cases
 
