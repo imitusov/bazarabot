@@ -136,7 +136,9 @@ zarabot/          models, clock, config, logging_setup, pnl, __main__
                   cooldowns, signals, snapshots, job_runs, trading_days
   broker/         client, reconcile
   market/         session, data
-  strategies/     base, ma_crossover, rsi_reversion, momentum, ml_model, registry
+  strategies/     base, ma_crossover, rsi_reversion, momentum,
+                  volume_breakout, bollinger_reversion, macd_trend,
+                  ml_model, registry
   risk/           sizing, gate
   lifecycle/      exits
   execution/      orders

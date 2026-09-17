@@ -1,4 +1,4 @@
-# Task 14/43: Implement `zarabot/strategies/base.py`
+# Task 14/46: Implement `zarabot/strategies/base.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The Strategy protocol. Pure, entry-only, deterministic - the properties that let
 
 ## Build order position
 
-Module **14** of 43 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **14** of 46 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
@@ -26,10 +26,14 @@ Module **14** of 43 in `dependency-order.md`. Everything before it is complete a
 - Returns `None` rather than raising on degenerate input such as a flat series.
 - Deterministic: identical inputs produce identical outputs.
 
-`ma_crossover`, `rsi_reversion`, `momentum` and `ml_model` each implement this
-protocol and each has its own contract below, naming its parameters, its lookback
-and its entry condition. `registry` builds the active set, also below, under its
-own heading.
+`ma_crossover`, `rsi_reversion`, `momentum`, `volume_breakout`,
+`bollinger_reversion`, `macd_trend` and `ml_model` each implement this protocol
+and each has its own contract below, naming its parameters, its lookback and its
+entry condition. `registry` builds the active set, also below, under its own
+heading. The first four rule-based contracts became separate headings in v1.82;
+`volume_breakout`, `bollinger_reversion` and `macd_trend` arrived in v1.95 and
+were written with their own headings from the start, for the reason the paragraph
+below records.
 
 **Those four contracts are separate headings as of v1.82.** Until v1.82 this
 section was the only specification the three rule-based strategies had: no entry

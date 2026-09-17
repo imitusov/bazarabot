@@ -1,4 +1,4 @@
-# Task 8c/43: Implement `zarabot/db/trading_days.py`
+# Task 8c/46: Implement `zarabot/db/trading_days.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of trading_days. The cached exchange calendar, including days that la
 
 ## Build order position
 
-Module **8c** of 43 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **8c** of 46 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 

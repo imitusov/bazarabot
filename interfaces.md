@@ -644,6 +644,51 @@ Pure. Breakout above the prior 20-bar high. `lookback` is 21.
 `BUY` when the latest close exceeds the high of the prior 20 bars. `None` when
 short, flat, or not a breakout. Never `SELL`.
 
+## `zarabot.strategies.volume_breakout`
+
+Pure. Breakout above the prior 20-bar high, confirmed by volume at or above
+1.5x the mean volume of the same 20 bars. `lookback` is 21
+(`max(_BREAKOUT_BARS, _VOLUME_BARS) + 1`). The only strategy that reads
+`Candle.volume`.
+
+**`VolumeBreakout`** — `name = "volume_breakout"`, `lookback = 21`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when the latest close exceeds the prior 20-bar high **and** the latest
+volume is at or above `1.5 x` the mean of the prior 20 volumes. `None` when
+short, flat, not a breakout, on thin volume, or when the prior window traded
+nothing at all. Volume is compared in `Decimal`. Never `SELL`.
+
+## `zarabot.strategies.bollinger_reversion`
+
+Pure. Lower Bollinger band: SMA of 20 closes minus 2 **population** standard
+deviations of the same 20. `lookback` is 20 (`_PERIOD`) — the band is a
+property of one window, so no extra bar. Volatility-scaled, where
+`rsi_reversion`'s threshold is fixed. The standard deviation is rooted with
+`decimal.Context(prec=40).sqrt()`; `math.sqrt` is never used, and the context
+is local — the module never calls `setcontext`.
+
+**`BollingerReversion`** — `name = "bollinger_reversion"`, `lookback = 20`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when the latest close is **at or below** the lower band. `None` when
+short, flat, or above the band. The flat guard is load-bearing: zero deviation
+puts the band on the close and the bound is inclusive. Never `SELL`.
+
+## `zarabot.strategies.macd_trend`
+
+Pure. MACD 12/26/9: the fast-minus-slow EMA line crossing above the 9-period
+EMA of itself. `lookback` is 35 (`_SLOW + _SIGNAL`) — 26 closes seed the slow
+EMA and 9 MACD values seed the signal EMA, leaving the two signal values a
+crossing needs. Each EMA is seeded with the SMA of its first `period` values.
+
+**`MACDTrend`** — `name = "macd_trend"`, `lookback = 35`
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+`BUY` when the MACD line was at or below the signal line one bar ago and is
+strictly above it on the latest bar. The crossing, not the ordering. `None`
+when short, flat, or when no crossing occurred. Never `SELL`.
+
 ## `zarabot.strategies.ml_model`
 
 Load at startup (I/O); `evaluate` is pure. Absent from the registry when

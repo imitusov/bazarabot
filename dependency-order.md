@@ -58,6 +58,9 @@ were opening their own.
 15. **strategies.ma_crossover** — depends on: models, strategies.base
 16. **strategies.rsi_reversion** — depends on: models, strategies.base
 17. **strategies.momentum** — depends on: models, strategies.base
+17b. **strategies.volume_breakout** — depends on: models, strategies.base
+17c. **strategies.bollinger_reversion** — depends on: models, strategies.base
+17d. **strategies.macd_trend** — depends on: models, strategies.base
 18. **strategies.ml_model** — depends on: models, strategies.base, config
 19. **strategies.registry** — depends on: config, strategies.*
 20. **risk.gate** — depends on: models, risk.sizing

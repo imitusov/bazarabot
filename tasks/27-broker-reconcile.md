@@ -1,4 +1,4 @@
-# Task 27/43: Implement `zarabot/broker/reconcile.py`
+# Task 27/46: Implement `zarabot/broker/reconcile.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ Sole owner of the reconciliations table, which it writes itself - there is no db
 
 ## Build order position
 
-Module **27** of 43 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **27** of 46 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
