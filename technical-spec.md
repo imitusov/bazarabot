@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.94
+**Version:** 1.95
 **Date:** 2026-09-17
 **Implements:** `business-brief.md` v1.16
 
@@ -301,7 +301,7 @@ that inspection could not have falsified.
 | SDK | 1.49.1, wheel sha256 `b18ea2da…7eba` | V10's regression baseline |
 | Lot sizes | SBER 1, **GAZP 10**, LKOH 1, MGNT 1 | Sizing is in lots; a wrong lot size is a wrong position size |
 | Price steps | SBER/GAZP 0.01, **LKOH/MGNT 0.50** | A stop price off-step is rejected by the exchange |
-| Candle depth | 456 daily candles available | Floor is 250; the longest lookback plus a margin. The longest lookback is `ma_crossover`'s, **81** as of v1.94 (it was 31); 250 still clears it with room for a backtest window, so the floor is unchanged |
+| Candle depth | 456 daily candles available | Floor is 250; the longest lookback plus a margin. The longest lookback is `ma_crossover`'s, **81** as of v1.94 (it was 31); the three strategies added in v1.95 are 21, 20 and 35, all shorter, so the maximum is unchanged. 250 still clears it with room for a backtest window, so the floor is unchanged |
 | `LastPrice` fields | Exactly `figi`, `price`, `time`, `instrument_uid`, `last_price_type`. **No `timestamp`** | Measured 2026-08-28. `_quote_time` probed for a `timestamp` that has never existed; the probe could only ever mask a rename of `time` as a rejected quote (#33) |
 | Trading status, live read | `market_data.get_trading_status` exists on 1.49.1, resolves every watchlist FIGI, and derives the **same string** as `share_by` for the same instrument in the same minute | Measured 2026-09-13 by V13, 10 of 10 tickers. The instruments cache serves every field from the table except this one; the carve-out is only sound if the two sources agree, since the row's other fields come from `share_by` (#46) |
 | Trading status **varies by session** | `DEALER_NORMAL_TRADING` at 20:00 MSK, after the main session closed; `NORMAL_TRADING` during it | Measured 2026-09-13 by V13 across all ten tickers, cross-checked against the live `signals` table: **0 of 4,626 signals** were ever rejected `INSTRUMENT_NOT_TRADING`, so the value the gate sees in session is the bare form. `risk.gate:19` compares against `NORMAL_TRADING` exactly, and that is correct for the session the bot trades in — but it means the field is **session-dependent, not instrument-dependent**, which is the strongest argument for never caching it (#46): a row refreshed in the evening would serve `DEALER_NORMAL_TRADING` into the next morning's gate and reject every ticker silently |
@@ -4417,10 +4417,14 @@ is the failure this cadence exists to prevent.
 - Returns `None` rather than raising on degenerate input such as a flat series.
 - Deterministic: identical inputs produce identical outputs.
 
-`ma_crossover`, `rsi_reversion`, `momentum` and `ml_model` each implement this
-protocol and each has its own contract below, naming its parameters, its lookback
-and its entry condition. `registry` builds the active set, also below, under its
-own heading.
+`ma_crossover`, `rsi_reversion`, `momentum`, `volume_breakout`,
+`bollinger_reversion`, `macd_trend` and `ml_model` each implement this protocol
+and each has its own contract below, naming its parameters, its lookback and its
+entry condition. `registry` builds the active set, also below, under its own
+heading. The first four rule-based contracts became separate headings in v1.82;
+`volume_breakout`, `bollinger_reversion` and `macd_trend` arrived in v1.95 and
+were written with their own headings from the start, for the reason the paragraph
+below records.
 
 **Those four contracts are separate headings as of v1.82.** Until v1.82 this
 section was the only specification the three rule-based strategies had: no entry
@@ -4517,6 +4521,155 @@ bars the breakout is measured against, plus the bar that breaks out.
   on a move that had already been rejected intraday.
 - Returns `None` when fewer than `lookback` candles are supplied, when the close
   does not exceed that high, and on a flat series.
+
+### `zarabot/strategies/volume_breakout.py`
+
+Implements the `Strategy` protocol under `zarabot/strategies/base.py`, unchanged
+and in full — pure, no I/O and no clock beyond `now`, entry-only, `BUY` or
+`None`, never `SELL`, deterministic. `name` is `"volume_breakout"` and
+`lookback` is **21**: the twenty prior bars both the breakout level and the
+average volume are measured over, plus the bar that breaks out. `lookback` is
+**derived** in code as `max(_BREAKOUT_BARS, _VOLUME_BARS) + 1`, not written as a
+literal, so it cannot drift from the two windows it depends on.
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+- Parameters: a **20**-bar prior window for the breakout level, a **20**-bar
+  prior window for the average volume, and a volume multiple of **1.5**. All
+  three are module constants rather than configuration, on the same reasoning
+  `ma_crossover`, `rsi_reversion` and `momentum` give: changing one changes what
+  the strategy means, so it travels with the code and a redeploy.
+- Returns a `BUY` when **both** conditions hold on the latest bar: its **close**
+  is strictly above the highest **high** of the twenty bars before it, and its
+  **volume** is at or above 1.5× the mean volume of those same twenty bars.
+- The price half is `momentum`'s condition and is deliberately identical, high
+  and not close, for the reason stated there. This strategy exists for the
+  second half. `Candle.volume` is populated by `broker.client` on every fetch
+  and, before v1.95, was read by **no** strategy: a breakout on thin volume is
+  the textbook false breakout, and until now nothing in the bot could tell one
+  from a breakout the market actually participated in.
+- The threshold is **at or above** (`≥`), not strictly above. 1.5× is a
+  conventional participation filter rather than a measured optimum, and the
+  inclusive bound is the one a test can pin exactly: a bar at exactly 1.5× is
+  confirmation, not a near miss.
+- The volume comparison is done in `Decimal`. `Candle.volume` is an `int` and is
+  not money, but the mean of twenty integers is not an integer, and `float`
+  would make the boundary case above non-deterministic in its last bits.
+- Returns `None` when fewer than `lookback` candles are supplied, when the close
+  does not exceed the prior high, when it does but the volume filter fails, and
+  on a flat series.
+
+**Test fixtures must be at least `lookback` long.** The length guard is the first
+branch in the function, so a fixture shorter than 21 returns `None` for a reason
+that has nothing to do with the breakout or the volume — failure class 9, and
+the trap #252 found twice in this package. Every fixture in this module's tests
+other than the deliberately-short-series case is at least `lookback` long.
+
+**§3.2, additionally for this module:** the same price breakout evaluated twice,
+once with the breakout bar's volume below the multiple and once at or above it,
+returns `None` in the first case and a `BUY` in the second. That pair is the
+whole of what distinguishes this strategy from `momentum`; without it the volume
+filter could be deleted and the suite would stay green. A test also pins
+`lookback` against `max(_BREAKOUT_BARS, _VOLUME_BARS) + 1` so a future literal
+cannot drift, and a test asserts the happy-path fixture is at least `lookback`
+long.
+
+### `zarabot/strategies/bollinger_reversion.py`
+
+Implements the `Strategy` protocol under `zarabot/strategies/base.py`, unchanged
+and in full. `name` is `"bollinger_reversion"` and `lookback` is **20**: the
+band is a property of one window of closes, so no extra bar is needed — unlike
+`ma_crossover`, nothing here is a comparison between two consecutive bars.
+`lookback` is **derived** in code as `_PERIOD`, not written as a literal.
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+- Parameters: a **20**-close window and **2** standard deviations. Module
+  constants rather than configuration, for the reason the other strategies give.
+- The lower band is the simple moving average of the last 20 closes minus 2
+  **population** standard deviations of those same 20 closes. Population and not
+  sample: the twenty closes are the window, not a draw from a larger one, and
+  `N` rather than `N − 1` is the convention every published Bollinger band uses.
+- Returns a `BUY` when the latest close is **at or below** that lower band.
+  Inclusive, so the band edge is an entry: the band is already a
+  two-deviation buffer and a strictly-below bound would make the exact-edge case
+  untestable in `Decimal` arithmetic.
+- This is mean-reversion like `rsi_reversion`, but **volatility-scaled**. RSI's
+  threshold is a fixed 30 regardless of how the instrument has been behaving;
+  this band widens as realised volatility rises and narrows as it falls, so the
+  same percentage move is an entry in a quiet instrument and not in a violent
+  one.
+- **Precision.** The standard deviation needs a square root, and `Decimal` has
+  one: the variance is accumulated in `Decimal` and rooted with
+  `decimal.Context(prec=…).sqrt()`. `math.sqrt` is not used, because it would
+  round a price through `float` — the rule is `Decimal` end to end, and a band
+  edge computed in binary floating point is a comparison against money whose
+  last bits depend on the platform. The context is local to the function, so the
+  module never mutates the process-wide decimal context: a module-level
+  `setcontext` would be a side effect, which this package forbids.
+- Returns `None` when fewer than `lookback` candles are supplied, when the close
+  is above the lower band, and on a flat series. **The flat-series guard is
+  load-bearing here and not boilerplate:** a flat window has zero standard
+  deviation, so the lower band equals the average, equals the close, and the
+  inclusive bound would return a `BUY` on a series with no volatility at all.
+  That is the degenerate input the protocol requires be answered with `None`.
+
+**Test fixtures must be at least `lookback` long**, for the reason given under
+`volume_breakout` — the length guard runs first.
+
+**§3.2, additionally for this module:** a test pins `lookback` against `_PERIOD`
+so a future literal cannot drift, a test asserts the happy-path fixture is at
+least `lookback` long, and a test asserts a flat window of at least `lookback`
+closes returns `None` rather than the `BUY` the inclusive bound would otherwise
+produce.
+
+### `zarabot/strategies/macd_trend.py`
+
+Implements the `Strategy` protocol under `zarabot/strategies/base.py`, unchanged
+and in full. `name` is `"macd_trend"` and `lookback` is **35**, derived in code
+as `_SLOW + _SIGNAL`: 26 closes to seed the slow EMA, after which each further
+close yields one MACD value, and 9 MACD values to seed the signal EMA — leaving
+exactly two signal values, which is the minimum a crossing can be read from. It
+is **derived**, not a literal, so none of the three periods can drift from it.
+
+**`evaluate(self, ticker: str, candles: list[Candle], now: datetime) → Signal | None`**
+- Parameters: fast EMA **12**, slow EMA **26**, signal EMA **9** — the
+  conventional MACD triple. Module constants rather than configuration, for the
+  reason the other strategies give.
+- Each EMA is seeded with the simple average of its first `period` values and
+  then advanced with the standard `2 / (period + 1)` smoothing factor, in
+  `Decimal`. Seeding with an SMA rather than with the first value is what makes
+  the result a function of the window rather than of how much history happened
+  to be fetched.
+- The MACD line is the fast EMA minus the slow EMA, evaluated at every bar from
+  the 26th onward. The signal line is the 9-period EMA of the MACD line.
+- Returns a `BUY` when the MACD line was **at or below** the signal line one bar
+  ago and is **strictly above** it on the latest bar. The condition is the
+  crossing, not the ordering — `ma_crossover`'s rule exactly, and for the same
+  reason: a series that has been above for weeks crosses nothing and returns
+  `None`.
+- This is a trend strategy like `ma_crossover`, but it is
+  **momentum-of-momentum** rather than a level comparison: `ma_crossover`
+  compares two averages of price, while this compares the *rate of change of the
+  gap between them* against its own average, so it turns earlier in a move and
+  costs more false starts.
+- `reference_price` on the returned `Signal` is the latest close and
+  `generated_at` is the `now` it was given, as for every strategy.
+- Returns `None` when fewer than `lookback` candles are supplied, when no
+  crossing occurred on the latest bar, and on a flat series.
+
+**Test fixtures must be at least `lookback` long**, for the reason given under
+`volume_breakout`.
+
+**§3.2, additionally for this module:** a test pins `lookback` against
+`_SLOW + _SIGNAL` so a future literal cannot drift, a test asserts the
+happy-path fixture is at least `lookback` long, and a test asserts a series
+already trending upward throughout — MACD above signal on both of the last two
+bars — returns `None`, which is what distinguishes a crossing from an ordering.
+
+**The three strategies above are new in v1.95, and none of them lengthens the
+candle fetch.** Their lookbacks are 21, 20 and 35 against `ma_crossover`'s 81,
+so `max(strategy.lookback)` in `app.loops` is unchanged and §2.1's 250-candle
+floor is untouched. None of them is added to `ENABLED_STRATEGIES`'s default:
+`registry` knows the names, and which of them trades is the owner's setting.
 
 ### `zarabot/strategies/ml_model.py`
 

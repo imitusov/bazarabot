@@ -1,4 +1,4 @@
-# Task 36b/43: Implement `sandbox/exchange.py`
+# Task 36b/46: Implement `sandbox/exchange.py`
 
 ## Product context
 
@@ -6,7 +6,7 @@ The simulated broker the backtester runs against. A double for every broker.clie
 
 ## Build order position
 
-Module **36b** of 43 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
+Module **36b** of 46 in `dependency-order.md`. Everything before it is complete and tested — **do not modify any of it**.
 
 ## Already-implemented interfaces
 
