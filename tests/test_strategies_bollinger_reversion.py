@@ -25,11 +25,11 @@ _ENTRY: list[int | str] = [100] * 19 + [50]
 # latest close of 95; only the realised volatility of the nineteen bars before
 # it differs, and that alone decides the signal. This is the property that
 # distinguishes the strategy from `rsi_reversion`'s fixed threshold of 30.
-_QUIET = "100 100.1 99.9 100 100.1 99.9 100 100.1 99.9 100 100.1 99.9 100 100.1 99.9 100 100.1 99.9 100 95"
-_VOLATILE = "100 120 80 100 120 80 100 120 80 100 120 80 100 120 80 100 120 80 100 95"
+_QUIET: list[int | str] = ["100", "100.1", "99.9"] * 6 + ["100", "95"]
+_VOLATILE: list[int | str] = ["100", "120", "80"] * 6 + ["100", "95"]
 # Mean 99.85, sd 3.9278, lower band 91.9944: the close of 97 is below the mean
 # but above the band, so a dip alone is not an entry.
-_NEAR_MISS = "100 105 95 100 105 95 100 105 95 100 105 95 100 105 95 100 105 95 100 97"
+_NEAR_MISS: list[int | str] = ["100", "105", "95"] * 6 + ["100", "97"]
 
 
 def _candles(closes: Sequence[int | str]) -> list[Candle]:
@@ -69,13 +69,13 @@ def test_no_setup_returns_none() -> None:
 def test_dip_above_the_lower_band_returns_none() -> None:
     # Below the mean is not below the band. This is the case a fixed-threshold
     # rule would get wrong.
-    assert STRATEGY.evaluate("SBER", _candles(_NEAR_MISS.split()), NOW) is None
+    assert STRATEGY.evaluate("SBER", _candles(_NEAR_MISS), NOW) is None
 
 
 def test_the_same_dip_is_an_entry_in_a_quiet_series() -> None:
     # Volatility scaling, half one: the band is narrow, so a close of 95
     # against a mean of 99.75 is outside it.
-    signal = STRATEGY.evaluate("SBER", _candles(_QUIET.split()), NOW)
+    signal = STRATEGY.evaluate("SBER", _candles(_QUIET), NOW)
     assert signal is not None
     assert signal.side is Side.BUY
     assert signal.reference_price == Decimal(95)
@@ -84,7 +84,7 @@ def test_the_same_dip_is_an_entry_in_a_quiet_series() -> None:
 def test_the_same_dip_is_not_an_entry_in_a_volatile_series() -> None:
     # Volatility scaling, half two: identical mean and identical latest close,
     # wider band, no signal. A fixed threshold cannot tell these two apart.
-    assert STRATEGY.evaluate("SBER", _candles(_VOLATILE.split()), NOW) is None
+    assert STRATEGY.evaluate("SBER", _candles(_VOLATILE), NOW) is None
 
 
 def test_short_series_returns_none() -> None:
@@ -110,9 +110,9 @@ def test_never_returns_sell() -> None:
     for series in (
         _ENTRY,
         list(range(100, 120)),
-        _NEAR_MISS.split(),
-        _QUIET.split(),
-        _VOLATILE.split(),
+        _NEAR_MISS,
+        _QUIET,
+        _VOLATILE,
         [100] * 25,
         [100],
     ):
@@ -137,9 +137,9 @@ def test_fixtures_are_at_least_lookback_long() -> None:
     for series in (
         _ENTRY,
         list(range(100, 120)),
-        _NEAR_MISS.split(),
-        _QUIET.split(),
-        _VOLATILE.split(),
+        _NEAR_MISS,
+        _QUIET,
+        _VOLATILE,
         [100] * 25,
     ):
         assert len(_candles(series)) >= STRATEGY.lookback

@@ -6,6 +6,7 @@ from typing import cast
 
 from zarabot.config import Config, ConfigError
 from zarabot.strategies.base import Strategy
+from zarabot.strategies.bollinger_reversion import BollingerReversion
 from zarabot.strategies.ma_crossover import MovingAverageCrossover
 from zarabot.strategies.ml_model import load
 from zarabot.strategies.momentum import MomentumBreakout
@@ -17,6 +18,7 @@ _RULE_BASED: dict[str, type] = {
     "rsi_reversion": RSIReversion,
     "momentum": MomentumBreakout,
     "volume_breakout": VolumeBreakout,
+    "bollinger_reversion": BollingerReversion,
 }
 
 
