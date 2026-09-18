@@ -11,9 +11,12 @@ Five assumptions were written from the SDK's type stubs and have never been
 measured. Each one is a check below, and each fails quietly in production if
 wrong:
 
-  1. `quantity` - lots or instrument units? `_resolve_sale` computes a
-     weighted average (`gross / units`), which is unit-invariant, so this is
-     recorded rather than asserted. Read the note, do not "fix" the parse.
+  1. `quantity` - **instrument units, not lots** (measured 2026-09-18, §2.1).
+     A sale of AFLT at 6 lots with a lot size of 10 reported `quantity=60`,
+     cross-checked against the closed position that produced it. Still printed
+     rather than asserted, because `_resolve_sale` computes `gross / units` and
+     is unit-invariant either way - but the question is settled, so do not
+     "fix" the parse toward lots.
   2. `parent_operation_id` - fee rows point at their trade. If a fee's parent
      is outside the queried window, `sum(... if item.parent_operation_id in
      sale_ids)` sums an empty set to Decimal(0) - a commission of zero that
@@ -27,13 +30,13 @@ wrong:
 
 Read-only. It calls `get_operations` and nothing else.
 
-Not in `run_all.sh`, and deliberately. The SELL check FAILS today: the account
-has never sold, so `_resolve_sale` - the whole reason this script exists - has
-no data to run against. That is the finding, not a defect in the script, and a
-suite that stops at the first failure would be stopped by it forever. Run this
-on demand, and expect 6/6 only once a real sale has settled. Do not place a
-trade to make it green, and do not soften the check to a warning: the FAIL is
-the record that the reconcile path is still unmeasured (#44).
+Not in `run_all.sh`, and deliberately - it gates nothing the suite gates, and
+for most of its life it failed by design. From the day it was written until
+2026-09-18 the SELL check FAILED because the account had never sold, so
+`_resolve_sale` - the whole reason this script exists - had no data to run
+against. That failure was the finding, and it was not softened to a warning:
+a loud unmeasured is worth more than a quiet one. It now reaches **6/6** on 9
+sell rows. Run it on demand after any change to the parse.
 """
 
 import datetime as dt
