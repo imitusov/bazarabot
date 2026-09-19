@@ -32,23 +32,34 @@ def api(method, params=None):
 
 try:
     me = api("getMe")
-    v.check("bot token authenticates", me.get("ok"),
-            "@{}".format(me.get("result", {}).get("username", "?")))
+    v.check(
+        "bot token authenticates",
+        me.get("ok"),
+        "@{}".format(me.get("result", {}).get("username", "?")),
+    )
 
-    sent = api("sendMessage", {"chat_id": CHAT_ID,
-                               "text": "zarabot V8: transport check"})
+    sent = api(
+        "sendMessage", {"chat_id": CHAT_ID, "text": "zarabot V8: transport check"}
+    )
     v.check("message delivered to the configured chat", sent.get("ok"))
 
     long_text = "x" * 4096
     long_sent = api("sendMessage", {"chat_id": CHAT_ID, "text": long_text})
-    v.check("4096-character message is accepted", long_sent.get("ok"),
-            "the truncation contract assumes this is the ceiling")
+    v.check(
+        "4096-character message is accepted",
+        long_sent.get("ok"),
+        "the truncation contract assumes this is the ceiling",
+    )
 
-    api("sendMessage", {"chat_id": CHAT_ID,
-                        "text": "V8 is listening now — reply /status within {}s. "
-                                "A command sent before this message may already "
-                                "have been consumed by another poller.".format(
-                                    WAIT_SECONDS)})
+    api(
+        "sendMessage",
+        {
+            "chat_id": CHAT_ID,
+            "text": "V8 is listening now — reply /status within {}s. "
+            "A command sent before this message may already "
+            "have been consumed by another poller.".format(WAIT_SECONDS),
+        },
+    )
     v.note("waiting up to {}s for a command from chat {}".format(WAIT_SECONDS, CHAT_ID))
 
     deadline = time.time() + WAIT_SECONDS
@@ -65,10 +76,13 @@ try:
         if received is None:
             time.sleep(1)
 
-    v.check("an incoming command was received from the authorised chat",
-            received is not None,
-            "received: {}".format(received) if received
-            else "nothing arrived within {}s".format(WAIT_SECONDS))
+    v.check(
+        "an incoming command was received from the authorised chat",
+        received is not None,
+        "received: {}".format(received)
+        if received
+        else "nothing arrived within {}s".format(WAIT_SECONDS),
+    )
 except Exception as exc:  # noqa: BLE001
     v.crashed(exc)
 

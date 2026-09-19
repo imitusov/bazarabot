@@ -21,17 +21,24 @@ async def body():
         accounts = list(response.accounts)
         ids = [a.id for a in accounts]
         found = ACCOUNT_ID in ids
-        v.check("configured account is visible to this token", found,
-                "{} account(s) visible".format(len(ids)))
+        v.check(
+            "configured account is visible to this token",
+            found,
+            "{} account(s) visible".format(len(ids)),
+        )
 
         if found:
             account = next(a for a in accounts if a.id == ACCOUNT_ID)
             level = getattr(account.access_level, "name", str(account.access_level))
-            v.check("account grants full access (not read-only)",
-                    "FULL_ACCESS" in level, level)
+            v.check(
+                "account grants full access (not read-only)",
+                "FULL_ACCESS" in level,
+                level,
+            )
             v.note("account name: {}".format(account.name))
-            v.note("account type: {}".format(
-                getattr(account.type, "name", account.type)))
+            v.note(
+                "account type: {}".format(getattr(account.type, "name", account.type))
+            )
 
 
 run(v, body)

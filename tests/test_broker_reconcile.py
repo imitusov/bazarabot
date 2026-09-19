@@ -280,9 +280,7 @@ async def test_agreement_produces_no_adjustments_and_no_alert(
     assert "post_market_order" not in env.calls
     assert "cancel_stop_order" not in env.calls
     events = [
-        rec
-        for rec in caplog.records
-        if getattr(rec, "event", None) == "reconciliation"
+        rec for rec in caplog.records if getattr(rec, "event", None) == "reconciliation"
     ]
     assert len(events) == 1
     assert events[0].levelno == logging.INFO
@@ -1123,9 +1121,7 @@ async def test_exchange_stop_close_emits_stop_order_executed(
 
 def _reconciliation_events(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [
-        rec
-        for rec in caplog.records
-        if getattr(rec, "event", None) == "reconciliation"
+        rec for rec in caplog.records if getattr(rec, "event", None) == "reconciliation"
     ]
 
 

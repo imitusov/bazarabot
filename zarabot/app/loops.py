@@ -645,9 +645,7 @@ async def trading_cycle(ctx: AppContext) -> None:
         await resolve_unfinished(moment)
         positions = await list_open()
         prices = await _prices_for(positions)
-        executed = await _close_executed(
-            positions, ctx.config.reentry_cooldown_minutes
-        )
+        executed = await _close_executed(positions, ctx.config.reentry_cooldown_minutes)
         await _submit_exits(positions, prices, executed, moment, ctx)
         if not await _measure_daily_loss(ctx, moment, positions, prices):
             return

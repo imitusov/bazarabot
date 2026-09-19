@@ -2466,6 +2466,7 @@ async def test_heartbeat_emits_heartbeat_event(
     import zarabot.app.loops as loops
 
     loops._started_at = NOW
+
     async def _sleep(_seconds: float) -> None:
         raise asyncio.CancelledError
 

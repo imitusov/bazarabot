@@ -68,15 +68,19 @@ class Verifier:
     def crashed(self, exc):
         """Record an unexpected exception as a failed check, never a traceback."""
         self.results.append(("unexpected error", False))
-        print("  [FAIL] unexpected error — {}: {}".format(
-            type(exc).__name__, mask(exc)))
+        print(
+            "  [FAIL] unexpected error — {}: {}".format(type(exc).__name__, mask(exc))
+        )
 
     def finish(self):
         total = len(self.results)
         passed = sum(1 for _, ok in self.results if ok)
         ok = total > 0 and passed == total
-        print("{} {} — {} ({}/{} checks passed)".format(
-            "PASS" if ok else "FAIL", self.code, self.title, passed, total))
+        print(
+            "{} {} — {} ({}/{} checks passed)".format(
+                "PASS" if ok else "FAIL", self.code, self.title, passed, total
+            )
+        )
         sys.exit(0 if ok else 1)
 
 

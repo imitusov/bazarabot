@@ -302,9 +302,7 @@ def _halt_events(
     caplog: pytest.LogCaptureFixture, event: str
 ) -> list[logging.LogRecord]:
     return [
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == event
+        record for record in caplog.records if getattr(record, "event", None) == event
     ]
 
 

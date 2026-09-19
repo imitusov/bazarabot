@@ -72,9 +72,7 @@ async def _print_account(account: object, sandbox: bool) -> None:
     if tradeable and "OPEN" in _name(account.status):
         try:
             async with _connect(sandbox) as client:
-                portfolio = await client.operations.get_portfolio(
-                    account_id=account.id
-                )
+                portfolio = await client.operations.get_portfolio(account_id=account.id)
             total = money_to_decimal(portfolio.total_amount_portfolio)
             cash = money_to_decimal(portfolio.total_amount_currencies)
             print(

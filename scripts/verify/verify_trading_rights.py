@@ -46,26 +46,38 @@ async def body():
         try:
             await c.sandbox.sandbox_pay_in(
                 account_id=account_id,
-                amount=MoneyValue(currency="rub", units=500000, nano=0))
+                amount=MoneyValue(currency="rub", units=500000, nano=0),
+            )
             v.note("sandbox account funded")
         except Exception as exc:  # noqa: BLE001
             v.note("sandbox pay-in skipped ({})".format(type(exc).__name__))
 
         ticker = WATCHLIST[0]
-        share = (await c.instruments.share_by(
-            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-            class_code=CLASS_CODE, id=ticker)).instrument
+        share = (
+            await c.instruments.share_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                class_code=CLASS_CODE,
+                id=ticker,
+            )
+        ).instrument
 
-        last = (await c.market_data.get_last_prices(
-            instrument_id=[share.uid])).last_prices[0]
+        last = (
+            await c.market_data.get_last_prices(instrument_id=[share.uid])
+        ).last_prices[0]
         market_price = quotation_to_decimal(last.price)
         safe_price = (market_price * Decimal("0.5")).quantize(Decimal("0.01"))
-        v.note("{} market {} - placing unfillable limit at {}".format(
-            ticker, market_price, safe_price))
+        v.note(
+            "{} market {} - placing unfillable limit at {}".format(
+                ticker, market_price, safe_price
+            )
+        )
 
         key = str(uuid.uuid4())
-        v.check("idempotency key fits the 36-character limit", len(key) <= 36,
-                "{} chars".format(len(key)))
+        v.check(
+            "idempotency key fits the 36-character limit",
+            len(key) <= 36,
+            "{} chars".format(len(key)),
+        )
 
         posted = await c.orders.post_order(
             instrument_id=share.uid,
@@ -77,17 +89,24 @@ async def body():
             order_id=key,
             confirm_margin_trade=False,
         )
-        v.check("order accepted by the broker", bool(posted.order_id),
-                "exchange id {}".format(posted.order_id))
+        v.check(
+            "order accepted by the broker",
+            bool(posted.order_id),
+            "exchange id {}".format(posted.order_id),
+        )
 
         await c.orders.cancel_order(account_id=account_id, order_id=posted.order_id)
         state = await c.orders.get_order_state(
-            account_id=account_id, order_id=posted.order_id)
-        status = getattr(state.execution_report_status, "name",
-                         str(state.execution_report_status))
-        v.check("order reaches a cancelled terminal state",
-                "CANCELLED" in status.upper() or "REJECTED" in status.upper(),
-                status)
+            account_id=account_id, order_id=posted.order_id
+        )
+        status = getattr(
+            state.execution_report_status, "name", str(state.execution_report_status)
+        )
+        v.check(
+            "order reaches a cancelled terminal state",
+            "CANCELLED" in status.upper() or "REJECTED" in status.upper(),
+            status,
+        )
 
 
 run(v, body)

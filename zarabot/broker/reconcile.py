@@ -196,9 +196,7 @@ async def _adopt_holding(
     holding: Position, moment: datetime, open_order_key: str
 ) -> dict[str, object]:
     instrument = await get_instrument(holding.ticker)
-    await adopt(
-        instrument, holding.lots, holding.entry_price, moment, open_order_key
-    )
+    await adopt(instrument, holding.lots, holding.entry_price, moment, open_order_key)
     await alert(
         f"adopted {holding.ticker} lots={holding.lots} "
         f"average_price={holding.entry_price}"

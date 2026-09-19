@@ -55,7 +55,7 @@ def _derive(raw):
     """`broker.client._trading_status`, reproduced exactly (client.py:317)."""
     name = _name(raw)
     if name.startswith(_STATUS_PREFIX):
-        return name[len(_STATUS_PREFIX):]
+        return name[len(_STATUS_PREFIX) :]
     return str(name)
 
 
@@ -68,16 +68,21 @@ async def body():
             "the market-data service exposes get_trading_status on SDK 1.49.1",
             callable(service),
             "absent - the cache's live-status read has no source"
-            if not callable(service) else "present",
+            if not callable(service)
+            else "present",
         )
         if not callable(service):
             return
 
         shares = {}
         for ticker in WATCHLIST:
-            share = (await c.instruments.share_by(
-                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                class_code=CLASS_CODE, id=ticker)).instrument
+            share = (
+                await c.instruments.share_by(
+                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                    class_code=CLASS_CODE,
+                    id=ticker,
+                )
+            ).instrument
             shares[ticker] = share
 
         v.check(
@@ -94,8 +99,7 @@ async def body():
             cached = _derive(share.trading_status)
             if live:
                 resolved += 1
-            v.note("{:6} share_by={:24} market_data={}".format(
-                ticker, cached, live))
+            v.note("{:6} share_by={:24} market_data={}".format(ticker, cached, live))
             if live != cached:
                 disagreements.append((ticker, cached, live))
 
@@ -107,7 +111,8 @@ async def body():
         v.check(
             "both sources derive the same string for the same instrument",
             not disagreements,
-            "disagree: {}".format(disagreements) if disagreements
+            "disagree: {}".format(disagreements)
+            if disagreements
             else "all {} agree".format(len(shares)),
         )
 
@@ -124,13 +129,20 @@ async def body():
         required_rpm = len(WATCHLIST) * (60.0 / POLL_INTERVAL)
         headroom = observed_rpm / required_rpm if required_rpm else 0
 
-        v.note("{} calls in {:.1f}s = {:.0f} req/min observed".format(
-            calls, elapsed, observed_rpm))
-        v.note("{} tickers every {}s = {:.1f} req/min required".format(
-            len(WATCHLIST), POLL_INTERVAL, required_rpm))
+        v.note(
+            "{} calls in {:.1f}s = {:.0f} req/min observed".format(
+                calls, elapsed, observed_rpm
+            )
+        )
+        v.note(
+            "{} tickers every {}s = {:.1f} req/min required".format(
+                len(WATCHLIST), POLL_INTERVAL, required_rpm
+            )
+        )
         v.check(
-            "at least {}x headroom over one status read per ticker per poll"
-            .format(REQUIRED_HEADROOM),
+            "at least {}x headroom over one status read per ticker per poll".format(
+                REQUIRED_HEADROOM
+            ),
             headroom >= REQUIRED_HEADROOM,
             "{:.0f}x".format(headroom),
         )

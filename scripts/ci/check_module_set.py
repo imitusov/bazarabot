@@ -194,9 +194,7 @@ def _check_keys(spec: str, table: list[tuple], lines: list[str]) -> None:
         lines.append("PASS allowlisted unclaimed §4 headings: " + ", ".join(waived))
 
 
-def _check_dependency_order(
-    dep: str, table: list[tuple], lines: list[str]
-) -> None:
+def _check_dependency_order(dep: str, table: list[tuple], lines: list[str]) -> None:
     dep_modules = dependency_modules(dep)
     m_modules = {entry[1] for entry in table}
     waived: list[str] = []
@@ -206,8 +204,7 @@ def _check_dependency_order(
             waived.append(f"{name} ({issue})")
             continue
         lines.append(
-            f"FAIL M has module {name!r} with no numbered entry in "
-            "dependency-order.md"
+            f"FAIL M has module {name!r} with no numbered entry in dependency-order.md"
         )
     for name in sorted(dep_modules - m_modules):
         issue = KNOWN_MODULE_SET_DRIFT.get(name)

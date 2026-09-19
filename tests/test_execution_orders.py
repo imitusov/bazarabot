@@ -1543,9 +1543,7 @@ def _order_events(
 
 def _event_names(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
-        str(record.event)
-        for record in caplog.records
-        if getattr(record, "event", None)
+        str(record.event) for record in caplog.records if getattr(record, "event", None)
     ]
 
 

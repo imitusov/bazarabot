@@ -122,9 +122,9 @@ def test_none_key_with_existing_block_fails(tmp_path: Path) -> None:
     )
     code, lines = check.evaluate(_tree(tmp_path, spec=spec), unreached=_ALLOW)
     assert code == 1
-    assert any(
-        "db.stop_orders" in line and "None" in line for line in _fails(lines)
-    ), lines
+    assert any("db.stop_orders" in line and "None" in line for line in _fails(lines)), (
+        lines
+    )
 
 
 def test_key_naming_a_missing_block_fails(tmp_path: Path) -> None:

@@ -36,9 +36,13 @@ async def body():
     async with client(TOKEN) as c:
         for ticker in WATCHLIST:
             try:
-                share = (await c.instruments.share_by(
-                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                    class_code=CLASS_CODE, id=ticker)).instrument
+                share = (
+                    await c.instruments.share_by(
+                        id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                        class_code=CLASS_CODE,
+                        id=ticker,
+                    )
+                ).instrument
                 response = await c.market_data.get_candles(
                     instrument_id=share.uid,
                     from_=since,
@@ -46,8 +50,11 @@ async def body():
                     interval=CandleInterval.CANDLE_INTERVAL_DAY,
                 )
             except Exception as exc:  # noqa: BLE001
-                v.check("{}: candles retrieved".format(ticker), False,
-                        "{}: {}".format(type(exc).__name__, exc))
+                v.check(
+                    "{}: candles retrieved".format(ticker),
+                    False,
+                    "{}: {}".format(type(exc).__name__, exc),
+                )
                 continue
 
             candles = list(response.candles)
@@ -60,15 +67,21 @@ async def body():
                 default=0,
             )
 
-            ok = (len(candles) >= REQUIRED_DAYS and aware and ordered
-                  and gap <= MAX_GAP_CALENDAR_DAYS)
+            ok = (
+                len(candles) >= REQUIRED_DAYS
+                and aware
+                and ordered
+                and gap <= MAX_GAP_CALENDAR_DAYS
+            )
             v.check(
                 "{}: {} candles, oldest-first={}, tz-aware={}, largest gap={}d".format(
-                    ticker, len(candles), ordered, aware, gap),
+                    ticker, len(candles), ordered, aware, gap
+                ),
                 ok,
                 "need >= {} candles and gaps <= {}d (largest gap is reported "
                 "above; check its dates before raising this)".format(
-                    REQUIRED_DAYS, MAX_GAP_CALENDAR_DAYS),
+                    REQUIRED_DAYS, MAX_GAP_CALENDAR_DAYS
+                ),
             )
 
 

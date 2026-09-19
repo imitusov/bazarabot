@@ -154,6 +154,7 @@ on fixes the next order and does nothing for the 22 already on disk.
    ```python
    from datetime import UTC, datetime
    from zarabot.ops.commissions import backfill
+
    await backfill(datetime(2026, 3, 1, tzinfo=UTC), now())
    ```
 
