@@ -248,6 +248,62 @@ module's own task never carried it (#177). No other module writes
   remedy of the shape `execution.orders` has. That is a money-path decision, it
   is the owner's, and it is bound to rule 25's: whoever settles rule 25 settles
   this. No agent may add a halt path here on its own reading.
+
+  **This close settles the position's standing `stop_orders` row `EXECUTED`,
+  and that is a write this contract now admits (v1.96, #250).** When the
+  position being closed is `EXCHANGE`-protected, the shares left the account
+  because the stop the exchange held fired. The row that recorded that stop is
+  the only local record of it, and until v1.96 nothing on this path moved it out
+  of `ACTIVE`: `db.stop_orders.settle` was reached from `execution.orders`
+  alone, on the `app.loops` path where the bot detects its own stop fill. The
+  reconcile path — the one that runs when the fill is discovered at startup
+  instead — booked the position, started the cooldown, emitted
+  `stop_order_executed`, and left the row claiming a stop that no longer exists
+  anywhere (#250).
+
+  The row has no other route to a terminal state. Every check that would notice
+  is scoped to **open** positions: `STOP_MISSING` looks for an open position
+  with no live stop, `STOP_MISSIZED` compares a retained live stop's lots
+  against its open position's, and `STOP_ORPHAN` is the opposite direction, a
+  broker-side stop with no local row. A closed position is examined by none of
+  them, so one such row accumulates per stop execution and `db.stop_orders.
+  list_active` overstates what stands at the exchange for good. No money is at
+  risk from it; what is at risk is every count or comparison of live stops an
+  operator runs before a restart, which is the only reason this was ever seen.
+
+  Mechanically: `db.stop_orders.active_for_position(position.id)`, and if it
+  returns a row, `db.stop_orders.settle(row.key, StopOrderStatus.EXECUTED,
+  sale.occurred_at)` — the instant of the *sale*, for the same reason the exit
+  price and the cooldown come from the operations feed rather than from the
+  moment of detection. A `None` means no standing row to settle and nothing is
+  written. The condition is `stop_protection is EXCHANGE`, exactly the condition
+  that gates the `stop_order_executed` emission below, and never the trigger or
+  the price: a `LOCAL` position's row is already terminal, and marking a row
+  `EXECUTED` on any wider condition would erase a genuine `STOP_MISSING` before
+  anything could report it.
+
+  **This is a status write, not an order operation.** It places nothing and
+  cancels nothing — the exchange already executed the stop and there is nothing
+  left at the broker to act on — so the never-place-or-cancel line below is
+  untouched, and the remedy split that sends every *order* operation through
+  `app.startup` step 7 and `execution.orders` is untouched with it. The write
+  goes through `db.stop_orders`, which owns the table, exactly as this module's
+  close goes through `db.positions` and its cooldown through `db.cooldowns`.
+
+  **`execution.orders.close_executed_stop` is not the mechanism for this path**,
+  though it performs the same settle. It submits nothing but it *records* an
+  order row, and this module records none — it did not submit one — and it books
+  a close this module has already booked from the operations feed. The settle is
+  the only part of it this path needs, and `db.stop_orders` is where that lives.
+
+  **A failed settle propagates, on exactly the terms the cooldown write states
+  above.** `aiosqlite.Error` leaves `reconcile` and `app.startup` refuses to
+  start. So does the `OrderStateError` `active_for_position` raises for more than
+  one standing row on one position: that is two local records of a stop where the
+  exchange can hold at most one, this module may not guess which of them the
+  exchange executed, and a refusal to start is the report the operator needs.
+  Both are bookkeeping states that only the owner can resolve, and neither is
+  reachable from a database this module wrote.
 - **A sale that cannot be resolved is reported, not booked.** When the feed
   returns no covering sale, or is unavailable, the position **stays open** and
   the report carries
@@ -773,6 +829,23 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
 - A holding whose entry order has already reached a terminal status is reported
   foreign (proves the recognition rule is the narrow one, and cannot be widened
   into adopting what the owner bought).
+- **An `EXCHANGE`-protected position gone from the book, whose feed shows the
+  sale, leaves its `stop_orders` row `EXECUTED` and `db.stop_orders.list_active`
+  empty (v1.96, #250).** The row is set up as production has it — `record_placing`
+  then `activate`, with the position's `stop_order_key` pointing at it — and the
+  assertion is on the row's status after reconcile, not on the
+  `stop_order_executed` event. The event assertion passes against the code that
+  left the row `ACTIVE` through the first real stop execution on the live
+  account, which is failure class 3: it pins which log line was written and
+  nothing about the state an operator counting live stops reads.
+- **A still-live stop on a position still held at the broker is `ACTIVE` after
+  reconcile (v1.96, #250).** The direction that must not regress: a settle on a
+  wider condition than `stop_protection is EXCHANGE` *and* absent at the broker
+  would mark a standing stop executed and erase the `STOP_MISSING` that is the
+  only thing standing between an unprotected position and nobody noticing.
+- **A `LOCAL` position closed externally settles no stop row (v1.96, #250).**
+  Its row is already terminal and the exchange held no stop for it, so the
+  condition is the protection mode and not the mere fact of an external close.
 - An externally-closed position is closed with `order = None` and **no row is
   written to `orders`** (proves reconciliation records only what the bot actually
   submitted).

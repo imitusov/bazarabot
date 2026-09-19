@@ -21,12 +21,15 @@ from zarabot.db.connection import transaction
 from zarabot.db.cooldowns import start as start_cooldown
 from zarabot.db.orders import list_unresolved
 from zarabot.db.positions import adopt, close, list_open, update_lots
+from zarabot.db.stop_orders import active_for_position
+from zarabot.db.stop_orders import settle as settle_stop
 from zarabot.models import (
     ExitTrigger,
     OperationRecord,
     Position,
     ReconciliationReport,
     StopOrderRecord,
+    StopOrderStatus,
     StopProtection,
 )
 from zarabot.telegram.notifier import alert
@@ -148,6 +151,15 @@ async def _close_externally(position: Position, moment: datetime) -> dict[str, o
         f"on {sale.occurred_at.isoformat()} (id={position.id})"
     )
     if position.stop_protection is StopProtection.EXCHANGE:
+        # The exchange held the stop and it fired, so the local row records a
+        # stop that no longer exists anywhere. Nothing else can move it out of
+        # `ACTIVE`: every stop check is scoped to open positions, and this
+        # position is now closed (#250). A status write is not an order
+        # operation — there is nothing left at the broker to place or cancel —
+        # and it goes through `db.stop_orders`, which owns the table.
+        standing = await active_for_position(position.id)
+        if standing is not None:
+            await settle_stop(standing.key, StopOrderStatus.EXECUTED, sale.occurred_at)
         _LOG.info(
             "stop_order_executed",
             extra={
