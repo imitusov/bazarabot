@@ -2033,6 +2033,11 @@ Additionally, on exits booked from an exchange stop:
   (proves absence of look-ahead bias).
 - Commission and a configured slippage assumption are applied to every simulated
   fill (proves the results are not idealised).
+- A buy at 100 with `slippage` of `0.2` fills at **100.20**, and a sell at
+  **99.80** (proves slippage is a percent, the same unit as `commission.pct`).
+  Assert the fill **price**: a test asserting the value reached the exchange
+  passes under either unit and pins nothing, which is why the fraction survived
+  (#249).
 
 ---
 
@@ -7057,6 +7062,14 @@ the path where the bot owns the stop itself.
 **Commission is the broker's tariff, not a flat fee** — a percentage of turnover
 with a minimum, applied per fill. The old flat figure was also applied twice to
 one round trip.
+
+**Both cost parameters are percents, and the unit is part of the contract
+(v1.96).** `commission.pct` is a percent of turnover and `slippage` is a percent
+of the fill price: `Decimal("0.2")` means 0.2% in both, so a buy priced at 100
+fills at 100.20. The unit was stated nowhere, and the two were implemented in
+opposite units — `slippage` as a fraction — so the same `0.2` moved a fill by
+20%, a hundredfold error in the one number a cost-sensitivity study exists to
+vary (#249). An unstated unit is how that happened, so it is stated here.
 
 **`async backtest.run(bars, config, strategies, commission, slippage) → BacktestResult`**
 - **Drives `app.loops.trading_cycle` itself, four times per bar**, against a

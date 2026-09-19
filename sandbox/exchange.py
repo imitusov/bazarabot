@@ -87,6 +87,8 @@ class SimulatedExchange:
     bars: dict[str, list[Candle]]
     instruments: dict[str, Instrument]
     cash: Decimal
+    # A **percent** of the fill price, the same unit as `Commission.pct`: 0.2
+    # moves a fill by 0.2%, never by 20% (#249).
     slippage: Decimal
     commission: Commission
 
@@ -246,9 +248,15 @@ class SimulatedExchange:
         self._stops_checked |= entered
 
     def _slipped(self, price: Decimal, side: Side) -> Decimal:
+        """The fill price, moved against the trader by `slippage` **percent**.
+
+        A percent, in the same unit as `Commission.pct`, because the two sit
+        beside each other in every call and in the CLI: read as a fraction, the
+        `0.2` someone typed meaning 0.2% moved a fill by 20% (#249).
+        """
         if side is Side.BUY:
-            return price * (_ONE + self.slippage)
-        return price * (_ONE - self.slippage)
+            return price * (_ONE + self.slippage / _HUNDRED)
+        return price * (_ONE - self.slippage / _HUNDRED)
 
     # --------------------------------------------------- broker.client surface
 

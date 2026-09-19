@@ -26,6 +26,10 @@ The tariff is an argument rather than a default guess: commission is never
 estimated by the trading path, and a backtest that invented one would be
 reporting a fee the broker does not charge. `--slippage` is the assumption named
 in the spec's fill model, stated per run and recorded with the result.
+
+Both cost arguments are **percents**: `--commission-pct 0.04` is 0.04% of
+turnover and `--slippage 0.2` moves every fill by 0.2%. They read as opposite
+units until #249, where the same `0.2` meant 20% of the price.
 """
 
 from __future__ import annotations
@@ -97,13 +101,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--slippage",
         type=_decimal,
         default=Decimal("0"),
-        help="percent applied to every simulated fill",
+        help="percent of the fill price, against the trader (0.2 means 0.2%%)",
     )
     parser.add_argument(
         "--commission-pct",
         type=_decimal,
         default=Decimal(_DEFAULT_COMMISSION_PCT),
-        help="percent of turnover, per fill",
+        help="percent of turnover, per fill (0.04 means 0.04%%)",
     )
     parser.add_argument(
         "--commission-min",
