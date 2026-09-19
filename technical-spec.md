@@ -1,6 +1,6 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.96
+**Version:** 1.97
 **Date:** 2026-09-19
 **Implements:** `business-brief.md` v1.16
 
@@ -7064,7 +7064,7 @@ with a minimum, applied per fill. The old flat figure was also applied twice to
 one round trip.
 
 **Both cost parameters are percents, and the unit is part of the contract
-(v1.96).** `commission.pct` is a percent of turnover and `slippage` is a percent
+(v1.97).** `commission.pct` is a percent of turnover and `slippage` is a percent
 of the fill price: `Decimal("0.2")` means 0.2% in both, so a buy priced at 100
 fills at 100.20. The unit was stated nowhere, and the two were implemented in
 opposite units — `slippage` as a fraction — so the same `0.2` moved a fill by
