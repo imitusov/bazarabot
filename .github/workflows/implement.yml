@@ -100,6 +100,7 @@ jobs:
         if: steps.pick.outputs.task != ''
         run: |
           ruff check .
+          ruff format --check .
           mypy zarabot
           pytest --cov --cov-report=json -q
           python scripts/ci/check_coverage.py

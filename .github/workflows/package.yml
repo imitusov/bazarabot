@@ -33,6 +33,7 @@ jobs:
           pip install -q vendor/t_tech_investments-1.49.1-py3-none-any.whl
           pip install -q -r requirements.lock
           ruff check .
+          ruff format --check .
           mypy zarabot
           pytest --cov --cov-report=json -q
           python scripts/ci/check_coverage.py
