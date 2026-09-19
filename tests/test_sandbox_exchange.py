@@ -184,6 +184,53 @@ async def test_commission_is_a_percentage_with_a_minimum() -> None:
     assert settled2.commission == Decimal("10")
 
 
+async def test_slippage_is_a_percent_of_the_fill_price_like_commission() -> None:
+    """A buy at 100 with slippage 0.2 fills at 100.20, not 120 (#249).
+
+    This asserts the fill **price**, not that the number reached the exchange.
+    The two tests that pinned the plumbing passed identically whether the value
+    was read as a percent or as a fraction — failure class 3 — which is how
+    `slippage` came to mean a fraction while the adjacent `Commission.pct`, the
+    CLI help and this contract all said percent. A 100x error in the cost
+    assumption a cost-sensitivity study exists to vary.
+    """
+    bars = [_bar(0, "100", "101", "99", "100"), _bar(1, "100", "101", "99", "100")]
+    ex = _exchange(bars, slippage=Decimal("0.2"))
+    await ex.advance(bars[0].timestamp)
+    bought = await ex.post_market_order("k1", FIGI, Side.BUY, 10)
+    assert bought.filled_price == Decimal("100.20"), "0.2 percent above the open"
+
+
+async def test_slippage_moves_a_sell_down_by_the_same_percent() -> None:
+    """Slippage is always against the trader: a sell fills below the open."""
+    bars = [_bar(0, "100", "101", "99", "100"), _bar(1, "100", "101", "99", "100")]
+    ex = _exchange(bars, slippage=Decimal("0.2"))
+    ex.hold(FIGI, 10, Decimal("100"))
+    await ex.advance(bars[0].timestamp)
+    sold = await ex.post_market_order("k1", FIGI, Side.SELL, 10)
+    assert sold.filled_price == Decimal("99.80"), "0.2 percent below the open"
+
+
+async def test_the_same_number_costs_the_same_in_both_units() -> None:
+    """The unit is shared: `1` means one percent to commission and to slippage.
+
+    Turnover 1000 at 1% commission is 10; slippage of 1 on a 100 open is one
+    price point, 101. Under the old fraction reading the same `1` doubled the
+    price. This is the invariant the two parameters must keep.
+    """
+    bars = [_bar(0, "100", "101", "99", "100"), _bar(1, "100", "101", "99", "100")]
+    ex = _exchange(
+        bars,
+        slippage=Decimal("1"),
+        commission=Commission(pct=Decimal("1"), minimum=Decimal("0.01")),
+    )
+    await ex.advance(bars[0].timestamp)
+    settled = await ex.post_market_order("k1", FIGI, Side.BUY, 10)
+    assert settled.filled_price == Decimal("101")
+    # Turnover 1010 x 1% = 10.10.
+    assert settled.commission == Decimal("10.10")
+
+
 async def test_a_buy_beyond_the_balance_is_rejected() -> None:
     """The broker refuses it and get_max_lots exists to make it avoidable. The
     simulator debited unconditionally, so cash went negative and the next
