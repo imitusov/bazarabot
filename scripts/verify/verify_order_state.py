@@ -52,31 +52,50 @@ async def phase_one():
     ticker = WATCHLIST_RAW.split(",")[0].strip().upper()
     async with client(TOKEN, sandbox=True) as c:
         account_id = await sandbox_account(c)
-        share = (await c.instruments.share_by(
-            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-            class_code=CLASS_CODE, id=ticker)).instrument
-        last = (await c.market_data.get_last_prices(
-            instrument_id=[share.uid])).last_prices[0]
+        share = (
+            await c.instruments.share_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                class_code=CLASS_CODE,
+                id=ticker,
+            )
+        ).instrument
+        last = (
+            await c.market_data.get_last_prices(instrument_id=[share.uid])
+        ).last_prices[0]
         price = (quotation_to_decimal(last.price) * Decimal("0.5")).quantize(
-            Decimal("0.01"))
+            Decimal("0.01")
+        )
 
         key = str(uuid.uuid4())
         # The order of these two operations is the entire point: in the real
         # system the key is durably recorded BEFORE the broker is called.
-        STATE.write_text(json.dumps({
-            "key": key, "account_id": account_id,
-            "uid": share.uid, "price": str(price), "ticker": ticker,
-        }))
+        STATE.write_text(
+            json.dumps(
+                {
+                    "key": key,
+                    "account_id": account_id,
+                    "uid": share.uid,
+                    "price": str(price),
+                    "ticker": ticker,
+                }
+            )
+        )
 
         posted = await c.orders.post_order(
-            instrument_id=share.uid, quantity=1,
+            instrument_id=share.uid,
+            quantity=1,
             price=decimal_to_quotation(price),
             direction=OrderDirection.ORDER_DIRECTION_BUY,
-            account_id=account_id, order_type=OrderType.ORDER_TYPE_LIMIT,
-            order_id=key, confirm_margin_trade=False,
+            account_id=account_id,
+            order_type=OrderType.ORDER_TYPE_LIMIT,
+            order_id=key,
+            confirm_margin_trade=False,
         )
-        print("   .   placed {} with key {} (exchange id {})".format(
-            ticker, key, posted.order_id))
+        print(
+            "   .   placed {} with key {} (exchange id {})".format(
+                ticker, key, posted.order_id
+            )
+        )
     return 0
 
 
@@ -97,13 +116,18 @@ async def phase_two():
     async with client(TOKEN, sandbox=True) as c:
         try:
             found = await c.orders.get_order_state(
-                account_id=account_id, order_id=key,
-                order_id_type=OrderIdType.ORDER_ID_TYPE_REQUEST)
+                account_id=account_id,
+                order_id=key,
+                order_id_type=OrderIdType.ORDER_ID_TYPE_REQUEST,
+            )
             exchange_id = found.order_id
             results["lookup_ok"] = bool(exchange_id)
             results["lookup_detail"] = "resolved to exchange id {}, status {}".format(
-                exchange_id, getattr(found.execution_report_status, "name",
-                                     found.execution_report_status))
+                exchange_id,
+                getattr(
+                    found.execution_report_status, "name", found.execution_report_status
+                ),
+            )
         except Exception as exc:  # noqa: BLE001
             results["lookup_ok"] = False
             results["lookup_detail"] = "{}: {}".format(type(exc).__name__, exc)
@@ -111,18 +135,24 @@ async def phase_two():
 
         try:
             again = await c.orders.post_order(
-                instrument_id=state["uid"], quantity=1,
+                instrument_id=state["uid"],
+                quantity=1,
                 price=decimal_to_quotation(Decimal(state["price"])),
                 direction=OrderDirection.ORDER_DIRECTION_BUY,
-                account_id=account_id, order_type=OrderType.ORDER_TYPE_LIMIT,
-                order_id=key, confirm_margin_trade=False,
+                account_id=account_id,
+                order_type=OrderType.ORDER_TYPE_LIMIT,
+                order_id=key,
+                confirm_margin_trade=False,
             )
             same = exchange_id is not None and again.order_id == exchange_id
             results["idempotent_ok"] = same
             results["idempotent_detail"] = (
-                "resubmit returned the same order" if same
+                "resubmit returned the same order"
+                if same
                 else "resubmit returned {}, expected {}".format(
-                    again.order_id, exchange_id))
+                    again.order_id, exchange_id
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             # Measured: the broker REFUSES a duplicate key rather than echoing
             # the existing order — INVALID_ARGUMENT/30057, "The order is a
@@ -135,12 +165,13 @@ async def phase_two():
             results["idempotent_ok"] = refused
             results["idempotent_detail"] = (
                 "broker refused the duplicate key (no second order created)"
-                if refused else detail)
+                if refused
+                else detail
+            )
 
         if exchange_id:
             try:
-                await c.orders.cancel_order(
-                    account_id=account_id, order_id=exchange_id)
+                await c.orders.cancel_order(account_id=account_id, order_id=exchange_id)
                 results["cleanup_ok"] = True
                 results["cleanup_detail"] = "test order cancelled"
             except Exception as exc:  # noqa: BLE001
@@ -153,8 +184,11 @@ async def phase_two():
     STATE.write_text(json.dumps(dict(state, results=results)))
     for label in ("lookup", "idempotent", "cleanup"):
         print("   .   {}: {}".format(label, results.get(label + "_detail")))
-    return 0 if all(results.get(k) for k in
-                    ("lookup_ok", "idempotent_ok", "cleanup_ok")) else 1
+    return (
+        0
+        if all(results.get(k) for k in ("lookup_ok", "idempotent_ok", "cleanup_ok"))
+        else 1
+    )
 
 
 def orchestrate():
@@ -169,13 +203,22 @@ def orchestrate():
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     results = state.get("results", {})
 
-    v.check("process B recovered the order using only the client key",
-            results.get("lookup_ok"), results.get("lookup_detail", ""))
-    v.check("re-submitting the same key cannot create a second order "
-            "(the broker returns the existing one or refuses the duplicate)",
-            results.get("idempotent_ok"), results.get("idempotent_detail", ""))
-    v.check("test order cleaned up", results.get("cleanup_ok"),
-            results.get("cleanup_detail", ""))
+    v.check(
+        "process B recovered the order using only the client key",
+        results.get("lookup_ok"),
+        results.get("lookup_detail", ""),
+    )
+    v.check(
+        "re-submitting the same key cannot create a second order "
+        "(the broker returns the existing one or refuses the duplicate)",
+        results.get("idempotent_ok"),
+        results.get("idempotent_detail", ""),
+    )
+    v.check(
+        "test order cleaned up",
+        results.get("cleanup_ok"),
+        results.get("cleanup_detail", ""),
+    )
     v.check("process B exited cleanly", two.returncode == 0)
     v.finish()
 

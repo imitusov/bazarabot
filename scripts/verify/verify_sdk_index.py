@@ -36,6 +36,7 @@ try:
         OrderIdType,
         OrderType,
     )
+
     imported = True
 except Exception as exc:  # noqa: BLE001
     imported = False
@@ -43,10 +44,15 @@ except Exception as exc:  # noqa: BLE001
 
 if imported:
     v.check("import root is t_tech (not tinkoff)", True)
-    v.check("OrderIdType.ORDER_ID_TYPE_REQUEST exists",
-            hasattr(OrderIdType, "ORDER_ID_TYPE_REQUEST"))
-    v.check("sandbox endpoint constant exists", bool(INVEST_GRPC_API_SANDBOX),
-            INVEST_GRPC_API_SANDBOX)
+    v.check(
+        "OrderIdType.ORDER_ID_TYPE_REQUEST exists",
+        hasattr(OrderIdType, "ORDER_ID_TYPE_REQUEST"),
+    )
+    v.check(
+        "sandbox endpoint constant exists",
+        bool(INVEST_GRPC_API_SANDBOX),
+        INVEST_GRPC_API_SANDBOX,
+    )
 
     from t_tech.invest.async_services import OrdersService
 
@@ -55,12 +61,15 @@ if imported:
 
     v.check("post_order accepts order_id (idempotency key)", "order_id" in post)
     v.check("post_order accepts confirm_margin_trade", "confirm_margin_trade" in post)
-    v.check("confirm_margin_trade defaults to False",
-            post.get("confirm_margin_trade") is not None
-            and post["confirm_margin_trade"].default is False)
+    v.check(
+        "confirm_margin_trade defaults to False",
+        post.get("confirm_margin_trade") is not None
+        and post["confirm_margin_trade"].default is False,
+    )
     v.check("get_order_state accepts order_id_type", "order_id_type" in state)
 
     import t_tech.invest.constants as consts
+
     v.note("SDK version {}".format(getattr(consts, "APP_VERSION", "unknown")))
 
 v.finish()

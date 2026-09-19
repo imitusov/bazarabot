@@ -148,7 +148,9 @@ async def body():
     # 1. Does a filled order carry execution stages at all? This is the first
     #    thing that can be false, and everything else rests on it.
     with_stages = [
-        (key, found) for key, found in states if list(getattr(found, "stages", []) or [])
+        (key, found)
+        for key, found in states
+        if list(getattr(found, "stages", []) or [])
     ]
     v.check(
         "a filled order state carries `stages`",

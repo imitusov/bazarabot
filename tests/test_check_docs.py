@@ -280,10 +280,6 @@ def test_shared_heading_function_in_neither_section_fails() -> None:
 
 def test_sandbox_heading_is_skipped_by_check_2() -> None:
     check = _load()
-    spec = (
-        "### `sandbox/data.py`\n"
-        "\n"
-        "**`async download() → None`**\n"
-    )
+    spec = "### `sandbox/data.py`\n\n**`async download() → None`**\n"
     missing = check.unimplemented_specified_functions(spec, {"sandbox.data": ""})
     assert missing == []

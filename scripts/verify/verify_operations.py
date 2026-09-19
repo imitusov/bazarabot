@@ -123,9 +123,7 @@ async def body():
     ids = {o.id for o in executed}
     fees = [o for o in executed if _name(o.operation_type) in FEE_TYPES]
     orphan_fees = [
-        o
-        for o in fees
-        if o.parent_operation_id and o.parent_operation_id not in ids
+        o for o in fees if o.parent_operation_id and o.parent_operation_id not in ids
     ]
     parentless = [o for o in fees if not o.parent_operation_id]
     v.note("{} fee rows; {} carry no parent id".format(len(fees), len(parentless)))

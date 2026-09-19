@@ -30,15 +30,24 @@ async def body():
     async with client(TOKEN) as c:
         uids = []
         for ticker in WATCHLIST:
-            share = (await c.instruments.share_by(
-                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                class_code=CLASS_CODE, id=ticker)).instrument
+            share = (
+                await c.instruments.share_by(
+                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                    class_code=CLASS_CODE,
+                    id=ticker,
+                )
+            ).instrument
             uids.append(share.uid)
 
-        v.check("watchlist resolved for price polling", bool(uids),
-                "{} instruments".format(len(uids)))
-        v.note("get_last_prices accepts the whole watchlist in one call, "
-               "so a poll cycle costs 1 request, not {}".format(len(uids)))
+        v.check(
+            "watchlist resolved for price polling",
+            bool(uids),
+            "{} instruments".format(len(uids)),
+        )
+        v.note(
+            "get_last_prices accepts the whole watchlist in one call, "
+            "so a poll cycle costs 1 request, not {}".format(len(uids))
+        )
 
         limited_error = None
         limit_metadata = None
@@ -58,24 +67,36 @@ async def body():
         observed_rpm = calls / elapsed * 60.0
         required_rpm = 60.0 / POLL_INTERVAL
 
-        v.note("completed {} calls in {:.1f}s = {:.0f} calls/min".format(
-            calls, elapsed, observed_rpm))
-        v.note("trading loop needs {:.1f} calls/min at POLL_INTERVAL_SECONDS={}".format(
-            required_rpm, POLL_INTERVAL))
+        v.note(
+            "completed {} calls in {:.1f}s = {:.0f} calls/min".format(
+                calls, elapsed, observed_rpm
+            )
+        )
+        v.note(
+            "trading loop needs {:.1f} calls/min at POLL_INTERVAL_SECONDS={}".format(
+                required_rpm, POLL_INTERVAL
+            )
+        )
 
         if limited_error:
             v.check("rate limit is programmatically identifiable", True, limited_error)
             if limit_metadata is not None:
                 v.note("rate limit metadata: {}".format(limit_metadata))
         else:
-            v.check("rate limit is programmatically identifiable", True,
-                    "not reached within {} calls - limit is above the tested burst".format(
-                        MAX_CALLS))
+            v.check(
+                "rate limit is programmatically identifiable",
+                True,
+                "not reached within {} calls - limit is above the tested burst".format(
+                    MAX_CALLS
+                ),
+            )
 
         headroom = observed_rpm / required_rpm if required_rpm else 0
-        v.check("headroom is at least {}x".format(REQUIRED_HEADROOM),
-                headroom >= REQUIRED_HEADROOM,
-                "measured {:.1f}x".format(headroom))
+        v.check(
+            "headroom is at least {}x".format(REQUIRED_HEADROOM),
+            headroom >= REQUIRED_HEADROOM,
+            "measured {:.1f}x".format(headroom),
+        )
 
 
 run(v, body)

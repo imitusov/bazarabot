@@ -58,9 +58,7 @@ M = [
 ]
 '''
 
-_PROSE = {
-    "How these blocks are delivered (v1.80).": "#118 — §3.2's own delivery note"
-}
+_PROSE = {"How these blocks are delivered (v1.80).": "#118 — §3.2's own delivery note"}
 
 _SUBGROUP = """\
 **partial fills** (`execution.orders`)
@@ -243,9 +241,7 @@ def test_empty_32_section_fails(tmp_path: Path) -> None:
     """Zero parsed bold lines is a broken parse, never a clean bill of health."""
     check = _load()
     spec = "### 3.2 Test contracts\n\nProse only.\n\n## 4. Module contracts\n"
-    code, lines = check.evaluate(
-        _tree(tmp_path, spec=spec), prose={}, undelivered={}
-    )
+    code, lines = check.evaluate(_tree(tmp_path, spec=spec), prose={}, undelivered={})
     assert code == 1
     assert any("no bold" in line.lower() for line in _fails(lines))
 
@@ -301,9 +297,7 @@ def test_stale_prose_entry_that_now_names_a_module_fails(tmp_path: Path) -> None
         _tree(tmp_path, spec=spec), prose=_PROSE, undelivered={}
     )
     assert code == 1
-    assert any(
-        "stale" in line.lower() and "How these blocks" in line for line in lines
-    )
+    assert any("stale" in line.lower() and "How these blocks" in line for line in lines)
 
 
 def test_allowlisted_undelivered_subgroup_passes_with_a_pass_line(
@@ -318,9 +312,7 @@ def test_allowlisted_undelivered_subgroup_passes_with_a_pass_line(
     tree = _tree(tmp_path, spec=spec, tasks=_TWO_OWNER_TASKS)
     code, lines = check.evaluate(tree, prose=_PROSE, undelivered=allow)
     assert code == 0, lines
-    assert any(
-        "allowlisted" in line and "broker.reconcile" in line for line in lines
-    )
+    assert any("allowlisted" in line and "broker.reconcile" in line for line in lines)
 
 
 def test_stale_undelivered_entry_now_delivered_fails(tmp_path: Path) -> None:
@@ -328,9 +320,7 @@ def test_stale_undelivered_entry_now_delivered_fails(tmp_path: Path) -> None:
     allow = {"partial fills::execution.orders": "#999"}
     code, lines = check.evaluate(_tree(tmp_path), prose=_PROSE, undelivered=allow)
     assert code == 1
-    assert any(
-        "stale" in line.lower() and "execution.orders" in line for line in lines
-    )
+    assert any("stale" in line.lower() and "execution.orders" in line for line in lines)
 
 
 def test_stale_undelivered_entry_for_absent_subgroup_fails(tmp_path: Path) -> None:
@@ -347,9 +337,7 @@ def test_stale_undelivered_entry_for_unnamed_module_fails(tmp_path: Path) -> Non
     allow = {"partial fills::broker.reconcile": "#999"}
     code, lines = check.evaluate(_tree(tmp_path), prose=_PROSE, undelivered=allow)
     assert code == 1
-    assert any(
-        "stale" in line.lower() and "broker.reconcile" in line for line in lines
-    )
+    assert any("stale" in line.lower() and "broker.reconcile" in line for line in lines)
 
 
 def test_malformed_undelivered_key_fails(tmp_path: Path) -> None:

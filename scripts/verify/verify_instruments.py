@@ -32,8 +32,11 @@ async def body():
                     id=ticker,
                 )
             except Exception as exc:  # noqa: BLE001
-                v.check("{}: resolves".format(ticker), False,
-                        "{}: {}".format(type(exc).__name__, exc))
+                v.check(
+                    "{}: resolves".format(ticker),
+                    False,
+                    "{}: {}".format(type(exc).__name__, exc),
+                )
                 continue
 
             share = response.instrument
@@ -47,8 +50,12 @@ async def body():
             )
             v.check(
                 "{}: lot={} currency={} api_trade={} step={}".format(
-                    ticker, share.lot, share.currency,
-                    share.api_trade_available_flag, increment),
+                    ticker,
+                    share.lot,
+                    share.currency,
+                    share.api_trade_available_flag,
+                    increment,
+                ),
                 ok,
                 "figi {}".format(share.figi),
             )

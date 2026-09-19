@@ -92,9 +92,7 @@ async def _resolve(
         return None
     parents = {item.id for item in trades}
     fees = [
-        item.commission
-        for item in operations
-        if item.parent_operation_id in parents
+        item.commission for item in operations if item.parent_operation_id in parents
     ]
     if fees:
         return sum(fees, Decimal(0))

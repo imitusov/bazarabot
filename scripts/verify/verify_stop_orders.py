@@ -41,33 +41,50 @@ async def body():
 
     async with client(TOKEN, sandbox=True) as c:
         accounts = list((await c.sandbox.get_sandbox_accounts()).accounts)
-        account_id = (accounts[0].id if accounts
-                      else (await c.sandbox.open_sandbox_account()).account_id)
+        account_id = (
+            accounts[0].id
+            if accounts
+            else (await c.sandbox.open_sandbox_account()).account_id
+        )
         try:
             await c.sandbox.sandbox_pay_in(
                 account_id=account_id,
-                amount=MoneyValue(currency="rub", units=500000, nano=0))
+                amount=MoneyValue(currency="rub", units=500000, nano=0),
+            )
         except Exception as exc:  # noqa: BLE001
             v.note("sandbox pay-in skipped ({})".format(type(exc).__name__))
 
         ticker = WATCHLIST[0]
-        share = (await c.instruments.share_by(
-            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-            class_code=CLASS_CODE, id=ticker)).instrument
-        last = (await c.market_data.get_last_prices(
-            instrument_id=[share.uid])).last_prices[0]
+        share = (
+            await c.instruments.share_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                class_code=CLASS_CODE,
+                id=ticker,
+            )
+        ).instrument
+        last = (
+            await c.market_data.get_last_prices(instrument_id=[share.uid])
+        ).last_prices[0]
         price = quotation_to_decimal(last.price)
 
         buy = await c.orders.post_order(
-            instrument_id=share.uid, quantity=1,
+            instrument_id=share.uid,
+            quantity=1,
             direction=OrderDirection.ORDER_DIRECTION_BUY,
-            account_id=account_id, order_type=OrderType.ORDER_TYPE_MARKET,
-            order_id=str(uuid.uuid4()), confirm_margin_trade=False)
-        v.check("opened a one-lot position to protect", bool(buy.order_id),
-                "{} at ~{}".format(ticker, price))
+            account_id=account_id,
+            order_type=OrderType.ORDER_TYPE_MARKET,
+            order_id=str(uuid.uuid4()),
+            confirm_margin_trade=False,
+        )
+        v.check(
+            "opened a one-lot position to protect",
+            bool(buy.order_id),
+            "{} at ~{}".format(ticker, price),
+        )
 
-        stop_price = (price * (Decimal(100) - STOP_LOSS_PCT) / Decimal(100)
-                      ).quantize(Decimal("0.01"))
+        stop_price = (price * (Decimal(100) - STOP_LOSS_PCT) / Decimal(100)).quantize(
+            Decimal("0.01")
+        )
         placed = await c.stop_orders.post_stop_order(
             instrument_id=share.uid,
             quantity=1,
@@ -76,21 +93,33 @@ async def body():
             account_id=account_id,
             stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
             expiration_type=(
-                StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL),
+                StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL
+            ),
             exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_MARKET,
             order_id=str(uuid.uuid4()),
             confirm_margin_trade=False,
         )
         stop_id = placed.stop_order_id
-        v.check("stop-loss accepted by the exchange", bool(stop_id),
-                "stop at {} ({}% below {})".format(stop_price, STOP_LOSS_PCT, price))
+        v.check(
+            "stop-loss accepted by the exchange",
+            bool(stop_id),
+            "stop at {} ({}% below {})".format(stop_price, STOP_LOSS_PCT, price),
+        )
 
-        active = list((await c.stop_orders.get_stop_orders(
-            account_id=account_id,
-            status=StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE)).stop_orders)
+        active = list(
+            (
+                await c.stop_orders.get_stop_orders(
+                    account_id=account_id,
+                    status=StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE,
+                )
+            ).stop_orders
+        )
         ours = [o for o in active if o.stop_order_id == stop_id]
-        v.check("exchange reports the stop as standing", bool(ours),
-                "{} active stop order(s) on the account".format(len(active)))
+        v.check(
+            "exchange reports the stop as standing",
+            bool(ours),
+            "{} active stop order(s) on the account".format(len(active)),
+        )
 
         if ours:
             held = ours[0]
@@ -101,24 +130,38 @@ async def body():
             # The same epoch sentinel appears in the trading calendar (#43).
             expiry = getattr(held, "expiration_time", None)
             unset = expiry is None or expiry.year <= 1970
-            v.check("good-till-cancel, not day-expiring",
-                    unset or expiry.year > 2100,
-                    "expiration_time={} ({})".format(
-                        expiry, "unset - good till cancel" if unset else "set"))
+            v.check(
+                "good-till-cancel, not day-expiring",
+                unset or expiry.year > 2100,
+                "expiration_time={} ({})".format(
+                    expiry, "unset - good till cancel" if unset else "set"
+                ),
+            )
 
         await c.stop_orders.cancel_stop_order(
-            account_id=account_id, stop_order_id=stop_id)
-        after = list((await c.stop_orders.get_stop_orders(
-            account_id=account_id,
-            status=StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE)).stop_orders)
-        v.check("stop-loss cancels cleanly",
-                all(o.stop_order_id != stop_id for o in after))
+            account_id=account_id, stop_order_id=stop_id
+        )
+        after = list(
+            (
+                await c.stop_orders.get_stop_orders(
+                    account_id=account_id,
+                    status=StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE,
+                )
+            ).stop_orders
+        )
+        v.check(
+            "stop-loss cancels cleanly", all(o.stop_order_id != stop_id for o in after)
+        )
 
         await c.orders.post_order(
-            instrument_id=share.uid, quantity=1,
+            instrument_id=share.uid,
+            quantity=1,
             direction=OrderDirection.ORDER_DIRECTION_SELL,
-            account_id=account_id, order_type=OrderType.ORDER_TYPE_MARKET,
-            order_id=str(uuid.uuid4()), confirm_margin_trade=False)
+            account_id=account_id,
+            order_type=OrderType.ORDER_TYPE_MARKET,
+            order_id=str(uuid.uuid4()),
+            confirm_margin_trade=False,
+        )
         v.check("test position flattened", True, "sandbox left clean")
 
 

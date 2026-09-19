@@ -775,4 +775,3 @@ async def start() -> AppContext:
             stage=stage,
             reason=type(exc).__name__,
         )
-

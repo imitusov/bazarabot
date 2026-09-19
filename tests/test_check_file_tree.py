@@ -106,9 +106,7 @@ def test_unlisted_new_top_level_file_fails(tmp_path: Path) -> None:
 def test_allowlisted_file_passes(tmp_path: Path) -> None:
     check = _load()
     root = _tree(tmp_path, files=(*_FILES, "sandbox/exchange.py"))
-    code, lines = check.evaluate(
-        root, allowlist={"sandbox/exchange.py": "#117 item 9"}
-    )
+    code, lines = check.evaluate(root, allowlist={"sandbox/exchange.py": "#117 item 9"})
     assert code == 0, lines
     assert any("allowlisted" in line for line in lines)
 

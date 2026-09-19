@@ -205,8 +205,7 @@ def evaluate(
             waived.append(f"{rel} ({issue})")
             continue
         lines.append(
-            f"FAIL {rel} exists but is not named in the AGENTS.md File "
-            "structure sketch"
+            f"FAIL {rel} exists but is not named in the AGENTS.md File structure sketch"
         )
     for rel in sorted(sketched_paths - actual_paths):
         lines.append(

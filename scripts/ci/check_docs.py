@@ -143,9 +143,7 @@ def version_gate_failures(documents: dict[str, str]) -> list[str]:
             lines.append(f"FAIL {name} has no **Version:** header")
             continue
         if declared < highest:
-            lines.append(
-                f"FAIL {name} header is older than the amendments it cites"
-            )
+            lines.append(f"FAIL {name} header is older than the amendments it cites")
             lines.append(f"  header **Version:** {declared[0]}.{declared[1]}")
             lines.append(f"  cites  v{highest[0]}.{highest[1]}")
     return lines

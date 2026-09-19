@@ -367,9 +367,7 @@ class _Services:
             lots_requested=requested,
             lots_executed=executed,
             executed_order_price=decimal_to_money(Decimal("100"), "rub"),
-            executed_commission=decimal_to_money(
-                self._capture.order_commission, "rub"
-            ),
+            executed_commission=decimal_to_money(self._capture.order_commission, "rub"),
             message=self._capture.order_message,
             figi=kwargs.get("instrument_id", "BBG000000001"),
             direction=kwargs.get("direction"),
@@ -444,9 +442,7 @@ class _Services:
             lots_requested=1,
             lots_executed=1,
             executed_order_price=decimal_to_money(Decimal("100"), "rub"),
-            executed_commission=decimal_to_money(
-                self._capture.order_commission, "rub"
-            ),
+            executed_commission=decimal_to_money(self._capture.order_commission, "rub"),
             figi="BBG000000001",
             direction=OrderDirection.ORDER_DIRECTION_BUY,
             order_date=NOW,
