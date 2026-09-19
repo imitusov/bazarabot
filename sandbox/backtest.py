@@ -244,7 +244,11 @@ async def run(
     slippage: Decimal,
     reject_stops: bool = False,
 ) -> BacktestResult:
-    """Replay `bars` through the live trading cycle. Returns what it did."""
+    """Replay `bars` through the live trading cycle. Returns what it did.
+
+    `slippage` is a **percent** of each fill price, the same unit as
+    `commission.pct`: 0.2 means 0.2%, never 20% (#249).
+    """
     from zarabot.app.loops import trading_cycle
     from zarabot.app.startup import AppContext
     from zarabot.db.connection import connect, disconnect

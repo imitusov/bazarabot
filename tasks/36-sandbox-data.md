@@ -161,6 +161,14 @@ the path where the bot owns the stop itself.
 with a minimum, applied per fill. The old flat figure was also applied twice to
 one round trip.
 
+**Both cost parameters are percents, and the unit is part of the contract
+(v1.97).** `commission.pct` is a percent of turnover and `slippage` is a percent
+of the fill price: `Decimal("0.2")` means 0.2% in both, so a buy priced at 100
+fills at 100.20. The unit was stated nowhere, and the two were implemented in
+opposite units — `slippage` as a fraction — so the same `0.2` moved a fill by
+20%, a hundredfold error in the one number a cost-sensitivity study exists to
+vary (#249). An unstated unit is how that happened, so it is stated here.
+
 **`async backtest.run(bars, config, strategies, commission, slippage) → BacktestResult`**
 - **Drives `app.loops.trading_cycle` itself, four times per bar**, against a
   temporary database with the migrations applied and a `SimulatedExchange` in

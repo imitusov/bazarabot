@@ -215,6 +215,73 @@ async def test_run_gets_cached_bars_instruments_and_the_cli_tariff(
     assert kwargs["commission"].minimum == Decimal("2")
 
 
+async def test_the_cli_slippage_reaches_the_exchange_as_a_percent() -> None:
+    """`--slippage 0.2` must move a fill by 0.2 percent, not by 20 (#249).
+
+    A CALLER test: it builds the value the way the CLI builds it and asserts its
+    **effect** on a real `SimulatedExchange` fill. The assertions above pin only
+    that the number arrives, which was true under either unit — so the CLI help
+    promised percent while the exchange read a fraction for as long as nobody
+    passed a non-zero value.
+    """
+    from sandbox.exchange import Commission as RealCommission
+    from sandbox.exchange import SimulatedExchange
+    from zarabot.models import Side
+
+    mod = _mod()
+    args = mod.parse_args(
+        ["--start", "2026-03-01", "--end", "2026-03-31", "--slippage", "0.2"]
+    )
+    bars = _candles(2)
+    exchange = SimulatedExchange(
+        bars={"SBER": bars},
+        instruments={"SBER": _instrument("SBER")},
+        cash=Decimal("100000"),
+        slippage=args.slippage,
+        commission=RealCommission(pct=Decimal("0"), minimum=Decimal("0")),
+    )
+    await exchange.advance(bars[0].timestamp)
+    order = await exchange.post_market_order("k1", "BBG-SBER", Side.BUY, 1)
+    assert order.filled_price == bars[1].open * Decimal("1.002")
+
+
+def test_both_cost_options_document_the_same_unit() -> None:
+    """Commission and slippage are adjacent and were stated in opposite units.
+
+    The unit lives in the contract now; this keeps the help from drifting off it
+    again, in either direction.
+    """
+    mod = _mod()
+    parser_help = _option_help(mod)
+    assert "percent" in parser_help["--slippage"]
+    assert "percent" in parser_help["--commission-pct"]
+    assert "fraction" not in parser_help["--slippage"]
+
+
+def _option_help(mod: ModuleType) -> dict[str, str]:
+    import argparse
+    import contextlib
+
+    captured: dict[str, str] = {}
+    original = argparse.ArgumentParser.add_argument
+
+    def _record(
+        self: argparse.ArgumentParser, *names: Any, **kwargs: Any
+    ) -> argparse.Action:
+        for name in names:
+            if isinstance(name, str) and name.startswith("--"):
+                captured[name] = str(kwargs.get("help", ""))
+        return original(self, *names, **kwargs)
+
+    argparse.ArgumentParser.add_argument = _record  # type: ignore[method-assign]
+    try:
+        with contextlib.suppress(SystemExit):
+            mod.parse_args(["--start", "2026-03-01", "--end", "2026-03-31"])
+    finally:
+        argparse.ArgumentParser.add_argument = original  # type: ignore[method-assign]
+    return captured
+
+
 async def test_a_ticker_with_no_candles_is_not_passed_as_an_empty_series(
     wired: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

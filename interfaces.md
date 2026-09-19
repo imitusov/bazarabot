@@ -1511,6 +1511,10 @@ degrade path where a position stays `LOCAL`. `hold(figi, lots, average_price)` s
 A buy whose turnover plus fee exceeds simulated cash raises `OrderRejected`,
 leaving cash and holdings untouched, as the broker would (#47).
 
+`slippage` is a **percent** of the fill price, moved against the trader — the
+same unit as `Commission.pct`, so `Decimal("0.2")` means 0.2% and a buy at 100
+fills at 100.20. It was a fraction until #249, while the CLI help said percent.
+
 Fill model: a market order is priced at the **next** bar's open and returned on
 the submitting call; stops read the bar **low** and take-profits the **high**; a
 bar gapping through a stop fills at its open; a bar touching both books the
