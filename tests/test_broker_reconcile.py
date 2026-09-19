@@ -25,6 +25,7 @@ from zarabot.db.connection import (
 from zarabot.db.migrations import apply
 from zarabot.db.positions import get, list_open, set_stop_protection, update_lots
 from zarabot.db.positions import open as open_position
+from zarabot.db.stop_orders import activate, list_active, record_placing
 from zarabot.models import (
     ExitTrigger,
     Instrument,
@@ -1117,6 +1118,120 @@ async def test_exchange_stop_close_emits_stop_order_executed(
     assert events[0].ticker == "SBER"
     assert events[0].fill_price == Decimal("94.00")
     assert events[0].gap_vs_stop == Decimal("94.00") - Decimal("95")
+
+
+async def _standing_stop_row(
+    position: Position,
+    key: str = "stop-key",
+    stop_order_id: str = "ex-stop",
+    lots: int = 2,
+    price: Decimal = Decimal("95"),
+) -> str:
+    """A local `stop_orders` row in the state production leaves it in.
+
+    `record_placing` then `activate` is the sequence `execution.orders` runs, so
+    the row is `ACTIVE` with the broker identifier recorded — not a row invented
+    at the status the assertion wants to see.
+    """
+    await record_placing(key, position.id, position.ticker, lots, price)
+    await activate(key, stop_order_id)
+    return key
+
+
+async def _stop_row_status(key: str) -> StopOrderStatus:
+    cursor = await shared().execute(
+        "SELECT status FROM stop_orders WHERE key = ?", (key,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    return StopOrderStatus(row[0])
+
+
+async def test_exchange_stop_close_settles_the_stop_row_executed(
+    env: _Broker,
+) -> None:
+    """v1.96/#250: the row an executed stop leaves behind reaches a terminal state.
+
+    The `stop_order_executed` assertion above passes against the code that left
+    this row `ACTIVE` through the first real stop execution on the live account.
+    This asserts the state an operator counting live stops actually reads.
+    """
+
+    position = await _open_local()
+    key = await _standing_stop_row(position)
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, key)
+    env.holdings = ()
+    env.operations = [_sold_at(Decimal("94.00"))]
+    assert len(await list_active()) == 1
+
+    await reconcile(NOW)
+
+    assert await _stop_row_status(key) is StopOrderStatus.EXECUTED
+    # The broker holds no stop for a position it no longer holds, so a local
+    # count of live stops must agree with the broker's zero.
+    assert await list_active() == []
+    assert len(env.stops) == 0
+
+
+async def test_executed_stop_row_is_settled_at_the_sale_instant(
+    env: _Broker,
+) -> None:
+    """The instant of the sale, not the instant of detection (v1.96, #250)."""
+
+    sold_at = NOW - timedelta(hours=5)
+    position = await _open_local()
+    key = await _standing_stop_row(position)
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, key)
+    env.holdings = ()
+    env.operations = [_sold_at(Decimal("94.00"), occurred_at=sold_at)]
+
+    await reconcile(NOW)
+
+    cursor = await shared().execute(
+        "SELECT settled_at FROM stop_orders WHERE key = ?", (key,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert datetime.fromisoformat(row[0]) == sold_at
+
+
+async def test_a_still_live_stop_on_a_held_position_stays_active(
+    env: _Broker,
+) -> None:
+    """The direction that must not regress (v1.96, #250).
+
+    A settle on any wider condition would mark a standing stop executed and
+    erase the `STOP_MISSING` that is the only thing between an unprotected
+    position and nobody noticing.
+    """
+
+    position = await _open_local()
+    key = await _standing_stop_row(position)
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, key)
+    env.holdings = (_broker_position(),)
+    env.stops = [_stop()]
+
+    report = await reconcile(NOW)
+
+    assert await _stop_row_status(key) is StopOrderStatus.ACTIVE
+    assert len(await list_active()) == 1
+    assert [str(item["type"]) for item in report.adjustments] == []
+
+
+async def test_a_local_position_closed_externally_settles_no_stop_row(
+    env: _Broker,
+) -> None:
+    """The condition is the protection mode, not the fact of an external close."""
+
+    position = await _open_local()
+    key = await _standing_stop_row(position)
+    assert position.stop_protection is StopProtection.LOCAL
+    env.holdings = ()
+    env.operations = [_sold_at(Decimal("94.00"))]
+
+    await reconcile(NOW)
+
+    assert await _stop_row_status(key) is StopOrderStatus.ACTIVE
 
 
 def _reconciliation_events(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
