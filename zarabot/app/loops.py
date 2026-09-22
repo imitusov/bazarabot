@@ -223,7 +223,14 @@ async def _close_executed(positions: list[Position], minutes: int) -> set[int]:
         return closed
 
     moment = now()
-    fills = await get_executed_stop_fills(_moscow_day_start(moment), moment)
+    # The broker bounds this query by when each stop was PLACED, not when it
+    # fired (§2.1, v1.98, #259). Keyed to today's midnight it could only see a
+    # stop placed and filled on the same day, so the account's first real stop
+    # execution went unseen for a whole session. Every stop is posted after its
+    # position row is written, so the earliest entry's Moscow day reaches all of
+    # them, with the day's margin absorbing any host clock skew.
+    since = _moscow_day_start(min(position.entry_at for position in exchange))
+    fills = await get_executed_stop_fills(since, moment)
     standing = await list_stop_orders()
     live: set[str] = {stop.key for stop in standing}
     live.update(stop.stop_order_id for stop in standing if stop.stop_order_id)
