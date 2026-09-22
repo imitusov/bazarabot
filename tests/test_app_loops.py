@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -1789,6 +1789,124 @@ async def test_two_absences_alone_do_not_close_a_position(
 
     assert booked == []
     assert any("stop" in text.lower() for text in alerts)
+
+
+def _broker_filtering_on_creation(
+    created: datetime,
+    fills: dict[str, OrderRecord],
+    asked: list[tuple[datetime, datetime]],
+) -> Callable[[datetime, datetime], Awaitable[dict[str, OrderRecord]]]:
+    """`get_executed_stop_fills` as §2.1 measured the broker (v1.98, #259).
+
+    `GetStopOrders` bounds `from`/`to` by when each stop was **placed**, so the
+    stop comes back only when its creation lies inside the window. Every fake
+    before v1.98 ignored `since`, which is how a window that could never reach a
+    stop placed on an earlier day stayed green.
+    """
+
+    async def _fills(since: datetime, until: datetime) -> dict[str, OrderRecord]:
+        asked.append((since, until))
+        return dict(fills) if since <= created <= until else {}
+
+    return _fills
+
+
+async def test_a_stop_placed_on_an_earlier_day_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#259: the 09-16 MTSS stop was placed on 09-14 and never seen in-session."""
+    import zarabot.app.loops as loops
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    booked: list[object] = []
+    alerts: list[str] = []
+    asked: list[tuple[datetime, datetime]] = []
+    _patch_defaults(monkeypatch, calls)
+    entered = NOW - timedelta(days=3)
+    _arrange_stop_detection(
+        monkeypatch, _exchange_position(entry_at=entered), [], {}, booked, alerts
+    )
+    monkeypatch.setattr(
+        loops,
+        "get_executed_stop_fills",
+        _broker_filtering_on_creation(
+            entered + timedelta(seconds=1),
+            {"broker-stop": _broker_fill(Decimal("95.00"))},
+            asked,
+        ),
+    )
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+
+    assert booked == [(1, Decimal("95.00"))]
+    assert not any("no confirmed execution" in text for text in alerts)
+
+
+async def test_a_stop_filled_after_the_last_cycle_is_confirmed_next_morning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Placed and fired on Friday, 20:00 MSK; the next cycle is Monday."""
+    import zarabot.app.loops as loops
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    booked: list[object] = []
+    alerts: list[str] = []
+    asked: list[tuple[datetime, datetime]] = []
+    _patch_defaults(monkeypatch, calls)
+    friday_entry = datetime(2026, 3, 13, 9, 0, tzinfo=UTC)  # 12:00 MSK
+    _arrange_stop_detection(
+        monkeypatch, _exchange_position(entry_at=friday_entry), [], {}, booked, alerts
+    )
+    monkeypatch.setattr(
+        loops,
+        "get_executed_stop_fills",
+        _broker_filtering_on_creation(
+            friday_entry + timedelta(seconds=1),
+            {"broker-stop": _broker_fill(Decimal("94.10"))},
+            asked,
+        ),
+    )
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))  # Monday 13:00 MSK
+
+    assert booked == [(1, Decimal("94.10"))]
+
+
+async def test_the_stop_fill_window_starts_at_the_earliest_exchange_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[Moscow midnight of the earliest EXCHANGE entry, now]; LOCAL adds nothing."""
+    import zarabot.app.loops as loops
+    from zarabot.app.loops import trading_cycle
+
+    calls: list[str] = []
+    booked: list[object] = []
+    alerts: list[str] = []
+    asked: list[tuple[datetime, datetime]] = []
+    _patch_defaults(monkeypatch, calls)
+    recent = _exchange_position(id=1, entry_at=NOW - timedelta(days=1))
+    earliest = _exchange_position(
+        id=2, ticker="GAZP", entry_at=NOW - timedelta(days=3)
+    )  # 2026-03-13 13:00 MSK
+    local = _position(id=3, ticker="LKOH", entry_at=NOW - timedelta(days=10))
+    _arrange_stop_detection(monkeypatch, recent, [], {}, booked, alerts)
+
+    async def _open() -> list[Position]:
+        return [recent, earliest, local]
+
+    monkeypatch.setattr(loops, "list_open", _open)
+    monkeypatch.setattr(
+        loops,
+        "get_executed_stop_fills",
+        _broker_filtering_on_creation(NOW, {}, asked),
+    )
+
+    await trading_cycle(_ctx(strategies=(_QuietStrategy(),)))
+
+    # Moscow midnight of 2026-03-13 is 21:00 UTC on the 12th.
+    assert asked == [(datetime(2026, 3, 12, 21, 0, tzinfo=UTC), NOW)]
 
 
 async def test_confirmed_execution_closes_at_the_brokers_price(
