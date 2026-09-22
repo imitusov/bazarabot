@@ -22,8 +22,9 @@ Module **33** of 46 in `dependency-order.md`. Everything before it is complete a
    execution. A stop filled by the exchange closes its position here.
 
    **Execution is confirmed, never inferred.** The cycle calls
-   `broker.client.get_executed_stop_fills` once, over the window from the start
-   of the current Moscow trading day to now, and closes a position **only** when
+   `broker.client.get_executed_stop_fills` once, over the window from Moscow
+   midnight of the earliest `entry_at` among the `EXCHANGE`-protected positions
+   to now, and closes a position **only** when
    that result contains the `stop_order_id` recorded in its own `stop_orders`
    row. Matching is on that persisted broker identifier, never on the UUID we
    generated: `list_stop_orders` builds its key from `order_request_id` when the
@@ -37,6 +38,29 @@ Module **33** of 46 in `dependency-order.md`. Everything before it is complete a
    invented price, started a cooldown on an instrument the bot still held, and
    left the shares to be re-adopted as a fresh position at a new cost basis: one
    phantom round trip in the P&L from two reads that merely lagged (#5).
+
+   **The window reaches back to the earliest entry, not to today's midnight
+   (v1.98, #259).** The broker bounds that query by the date each stop was
+   *placed* (§2.1), and every stop is placed at entry and held for up to
+   `max_holding_days` trading days. The window this step used until v1.98 began
+   at the current Moscow midnight, so it could only ever return a stop placed and
+   filled on the same day: on 2026-09-16 the MTSS stop placed on 09-14 filled at
+   10:02 MSK, one process ran every cycle of the rest of the session, and not one
+   of them saw it. The position was booked fifteen hours later by startup
+   reconciliation, as `EXTERNAL`, only because the process restarted. The same
+   window also meant a fill not confirmed by the day's last cycle — an evening
+   session, or an order state that was not yet resolvable at 18:54 — could never
+   be confirmed in-session at all.
+
+   `entry_at` is the lower bound because every stop this bot places is posted
+   after its position row is written, and midnight of that day rather than the
+   instant itself leaves the host clock's skew against the broker's no room to
+   matter. A `LOCAL` position is not in the set: the exchange holds no stop for
+   it. A wider window re-resolves, every cycle, any stop in it that fired for a
+   position already closed — one `get_order_state` each, for a count bounded by
+   the stops that fired inside one holding period, which is small; the result is
+   matched against open positions' own `stop_order_id` exactly as before, so a
+   stale fill closes nothing.
 
    **An absence is a discrepancy, not an exit.** A position whose stop is no
    longer live and for which no execution is confirmed stays open, and is
@@ -526,6 +550,20 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   matched (proves the key mismatch that made a live stop look dead cannot recur).
 - Re-running the cycle after a position has been closed this way does not
   reconsider it (proves the re-queried window is idempotent).
+- **A stop placed on an earlier Moscow day than the cycle is confirmed, and its
+  position closed from the fill (v1.98, #259).** `get_executed_stop_fills` is
+  faked the way §2.1 measured the broker: it returns a stop only when the stop's
+  **creation** falls inside `[since, until]`. A fake that ignores `since` — which
+  every fake did until v1.98 — passes against a window that can never reach the
+  stop, and so did the code that left the account's first stop execution unbooked
+  for fifteen hours.
+- **A stop that filled after the last cycle of one Moscow day is confirmed by the
+  first cycle of the next (v1.98, #259)**, the stop having been placed the day it
+  fired: the window may not begin at the moment the calendar turned over.
+- **The window passed is `[` Moscow midnight of the earliest `entry_at` among the
+  `EXCHANGE`-protected positions `, now]`, and a `LOCAL` position does not widen
+  it (v1.98, #259)** — the exchange holds no stop for it, so there is nothing to
+  confirm.
 - One position's price raising `PriceRejected` leaves the other positions
   evaluated normally, submits no exit for the rejected one, and does not
   increment the outage counter (proves one bad quote cannot abort a cycle or
