@@ -434,6 +434,9 @@ class _Services:
 
     async def get_order_state(self, **kwargs: Any) -> SimpleNamespace:
         self._record("get_order_state", kwargs)
+        # Shaped as §2.1 measured an OrderState (v1.98, #258): the per-share
+        # price is `average_position_price`, and `executed_order_price` is the
+        # order's rouble total — here 1 lot of a lot-10 instrument at 100.
         return SimpleNamespace(
             order_id="exch-1",
             execution_report_status=(
@@ -441,7 +444,8 @@ class _Services:
             ),
             lots_requested=1,
             lots_executed=1,
-            executed_order_price=decimal_to_money(Decimal("100"), "rub"),
+            executed_order_price=decimal_to_money(Decimal("1000"), "rub"),
+            average_position_price=decimal_to_money(Decimal("100"), "rub"),
             executed_commission=decimal_to_money(self._capture.order_commission, "rub"),
             figi="BBG000000001",
             direction=OrderDirection.ORDER_DIRECTION_BUY,
@@ -1493,7 +1497,16 @@ def _executed_stop(stop_id: str, exchange_id: str | None) -> SimpleNamespace:
     )
 
 
-def _fill(price: Decimal, lots: int, commission: Decimal) -> SimpleNamespace:
+def _fill(
+    price: Decimal, lots: int, commission: Decimal, lot: int = 10
+) -> SimpleNamespace:
+    """An executed stop's OrderState, shaped as §2.1 measured it (v1.98, #258).
+
+    `price` is per share and lives in `average_position_price` and the stage;
+    `executed_order_price` is the order's rouble total. Until v1.98 this fixture
+    put the per-share price in `executed_order_price`, so it pinned the one
+    reading the broker does not use.
+    """
     return SimpleNamespace(
         order_id="exch-1",
         execution_report_status=(
@@ -1501,7 +1514,13 @@ def _fill(price: Decimal, lots: int, commission: Decimal) -> SimpleNamespace:
         ),
         lots_requested=lots,
         lots_executed=lots,
-        executed_order_price=decimal_to_money(price, "rub"),
+        executed_order_price=decimal_to_money(price * lots * lot, "rub"),
+        average_position_price=decimal_to_money(price, "rub"),
+        stages=[
+            SimpleNamespace(
+                price=decimal_to_money(price, "rub"), quantity=lots, trade_id="t-1"
+            )
+        ],
         executed_commission=decimal_to_money(commission, "rub"),
         figi="BBG000000001",
         direction=OrderDirection.ORDER_DIRECTION_SELL,
@@ -1569,6 +1588,78 @@ async def test_unresolvable_exchange_id_is_omitted_not_guessed(
         seen,
     )
     assert await get_executed_stop_fills(NOW - timedelta(hours=8), NOW) == {}
+
+
+async def test_order_state_is_priced_per_share_not_by_the_order_total(
+    capture: _Capture,
+) -> None:
+    """#258: on an OrderState `executed_order_price` is the rouble total."""
+    record = await get_order_state("key-1")
+    assert record.filled_price == Decimal("100")
+
+
+async def test_order_state_by_broker_id_is_priced_per_share(
+    capture: _Capture,
+) -> None:
+    record = await get_order_state_by_broker_id("exch-77")
+    assert record.filled_price == Decimal("100")
+
+
+async def test_executed_stop_fill_is_priced_as_the_live_mts_stop_was(
+    capture: _Capture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-09-16 MTSS stop, as §2.1 read it back: 1 lot x lot 10.
+
+    `executed_order_price` 1867.50, `average_position_price` 186.75. Booked
+    from the first, a position entered at 196.60 that lost 100 would have
+    recorded a realised profit of about 16,700.
+    """
+    seen: list[dict[str, Any]] = []
+    _arrange_stops(
+        monkeypatch,
+        [_executed_stop("50498e5d", "84452039139")],
+        {"84452039139": _fill(Decimal("186.75"), 1, Decimal("0.75"))},
+        seen,
+    )
+    fills = await get_executed_stop_fills(NOW - timedelta(days=3), NOW)
+    assert fills["50498e5d"].filled_price == Decimal("186.75")
+
+
+async def test_every_omitted_stop_is_logged_with_its_id_and_cause(
+    capture: _Capture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#259: the one real stop on the account was missed for a session and
+    nothing on the record could say which of these it was."""
+    unfilled = _fill(Decimal("95.00"), 2, Decimal("0"))
+    unfilled.lots_executed = 0
+    seen: list[dict[str, Any]] = []
+    _arrange_stops(
+        monkeypatch,
+        [
+            _executed_stop("stop-unresolved", "missing"),
+            _executed_stop("stop-no-exchange-id", None),
+            _executed_stop("stop-unfilled", "exch-unfilled"),
+        ],
+        {"exch-unfilled": unfilled},
+        seen,
+    )
+    with caplog.at_level(logging.WARNING, logger="zarabot.broker.client"):
+        assert await get_executed_stop_fills(NOW - timedelta(hours=8), NOW) == {}
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+
+    def logged(stop_id: str, cause: str) -> bool:
+        return any(stop_id in text and cause in text for text in warnings)
+
+    assert logged("stop-unresolved", "NOT_FOUND")
+    assert logged("stop-no-exchange-id", "exchange_order_id")
+    assert logged("stop-unfilled", "executed lots")
 
 
 async def test_nothing_executed_returns_an_empty_dict(

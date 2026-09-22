@@ -1141,16 +1141,29 @@ async def list_stop_orders() -> list[StopOrderRecord]:
     return records
 
 
+def _omit_stop(stop_id: str, cause: str) -> None:
+    """Name a stop left out of `get_executed_stop_fills`, and why (v1.98, #259).
+
+    A plain log line rather than a §7.1 event: it has no catalogue row, and an
+    unknown `event` makes `scripts/deploy/export_health.py` exit non-zero.
+    """
+    _log.warning("executed stop %s omitted: %s", stop_id, cause)
+
+
 async def get_executed_stop_fills(
     since: datetime, until: datetime
 ) -> dict[str, OrderRecord]:
-    """The broker's own record of every stop that fired in the window.
+    """The broker's own record of every stop placed in the window that has fired.
 
     Keyed by `stop_order_id`. Two SDK calls composed here because this is the
     only module permitted to talk to the broker: executed stops, then each
     one's `exchange_order_id` resolved to the actual fill. A stop whose
-    exchange order does not resolve is omitted — the caller retries rather than
-    booking a price nobody reported (rule 33).
+    exchange order does not resolve is omitted, and logged — the caller retries
+    rather than booking a price nobody reported (rule 33).
+
+    `since` and `until` bound when each stop was **placed**, not when it fired:
+    the broker filters `from`/`to` on creation (§2.1, v1.98, #259). A caller
+    after a stop's fill passes a `since` at or before that stop was posted.
     """
     _reject_naive(since)
     _reject_naive(until)
@@ -1174,7 +1187,10 @@ async def get_executed_stop_fills(
     for raw in response.stop_orders:
         stop_id = getattr(raw, "stop_order_id", "") or ""
         exchange_id = getattr(raw, "exchange_order_id", "") or ""
-        if not stop_id or not exchange_id:
+        if not stop_id:
+            continue
+        if not exchange_id:
+            _omit_stop(stop_id, "no exchange_order_id")
             continue
         try:
             state = await conn.services.orders.get_order_state(
@@ -1182,12 +1198,20 @@ async def get_executed_stop_fills(
                 order_id=exchange_id,
                 order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE,
             )
-        except AioRequestError:
+        except AioRequestError as exc:
             # Not yet settled, or not resolvable. Omit it: the position stays
-            # open and the caller asks again next cycle.
+            # open and the caller asks again next cycle. Said out loud, because
+            # a silent omission is what left the 09-16 stop undiagnosable (#259).
+            code = getattr(exc.code, "name", str(exc.code))
+            detail = _redact(exc.details or "", conn.config.tinvest_token)
+            _omit_stop(
+                stop_id,
+                f"exchange order {exchange_id} did not resolve ({code}: {detail})",
+            )
             continue
         filled = state.lots_executed or None
         if not filled:
+            _omit_stop(stop_id, f"exchange order {exchange_id} has no executed lots")
             continue
         fills[stop_id] = _order_record(
             key=exchange_id,
@@ -1196,7 +1220,9 @@ async def get_executed_stop_fills(
             lots=int(state.lots_requested),
             status=_order_status(state.execution_report_status),
             filled_lots=int(filled),
-            filled_price=_decimal_money(state.executed_order_price),
+            # Per share. `executed_order_price` on an OrderState is the order's
+            # rouble total (§2.1, v1.98, #258).
+            filled_price=_decimal_money(state.average_position_price),
             commission=_executed_commission(
                 getattr(state, "executed_commission", None)
             ),
@@ -1333,7 +1359,11 @@ def _state_to_record(key: str, response: Any) -> OrderRecord:
         lots=response.lots_requested,
         status=status,
         filled_lots=filled,
-        filled_price=_decimal_money(response.executed_order_price) if filled else None,
+        # Per share. On an OrderState `executed_order_price` is the order's
+        # rouble total; only PostOrderResponse carries it per share (§2.1, #258).
+        filled_price=(
+            _decimal_money(response.average_position_price) if filled else None
+        ),
         commission=(
             _executed_commission(getattr(response, "executed_commission", None))
             if filled

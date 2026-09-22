@@ -864,9 +864,13 @@ The broker's own record of every stop order that fired in the window, keyed by
 `stop_order_id`. Composes `get_stop_orders(status=EXECUTED)` with a
 `get_order_state` on each result's `exchange_order_id`
 (`ORDER_ID_TYPE_EXCHANGE`), so the returned `OrderRecord` carries
-`executed_order_price`, `lots_executed` and `executed_commission` — never a
-quote. A stop whose exchange order does not resolve, or that reports no executed
-lots, is **omitted** rather than priced by guess: the caller leaves the position
+`average_position_price` as `filled_price`, `lots_executed` and
+`executed_commission` — never a quote, and never `executed_order_price`, which on
+an `OrderState` is the order's rouble total (v1.98, #258). `since`/`until` bound
+each stop's **creation**, not its execution: pass a `since` at or before the stop
+was placed (v1.98, #259). A stop whose exchange order does not resolve, or that
+reports no executed lots, is **omitted** rather than priced by guess, and logged
+at WARNING with its `stop_order_id` and cause: the caller leaves the position
 open and retries (rule 33). Empty dict when nothing fired. Raises `ValueError` on
 naive datetimes.
 
@@ -883,6 +887,9 @@ operations identified by type, never by a substring of a name. Returns only
 quantity remains forbidden.
 **`async get_order_state(key: str) → OrderRecord`**
 Lookup by `order_id_type=ORDER_ID_TYPE_REQUEST`. Raises `OrderNotFound`.
+`filled_price` is `average_position_price`, never `executed_order_price` — on an
+`OrderState` that is the order's rouble total (v1.98, #258); the same holds for
+`get_order_state_by_broker_id`.
 `commission` is `executed_commission`, `None` until filled and `None` when the
 broker reports zero on a fill (v1.91, #246). `trade_ids` carries the state's
 `stages[].trade_id`, `()` where there are none. Same partial-fill mapping as

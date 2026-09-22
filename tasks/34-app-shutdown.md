@@ -74,6 +74,20 @@ From `technical-spec.md` §3.2. Each becomes a real test, written FIRST.
   matched (proves the key mismatch that made a live stop look dead cannot recur).
 - Re-running the cycle after a position has been closed this way does not
   reconsider it (proves the re-queried window is idempotent).
+- **A stop placed on an earlier Moscow day than the cycle is confirmed, and its
+  position closed from the fill (v1.98, #259).** `get_executed_stop_fills` is
+  faked the way §2.1 measured the broker: it returns a stop only when the stop's
+  **creation** falls inside `[since, until]`. A fake that ignores `since` — which
+  every fake did until v1.98 — passes against a window that can never reach the
+  stop, and so did the code that left the account's first stop execution unbooked
+  for fifteen hours.
+- **A stop that filled after the last cycle of one Moscow day is confirmed by the
+  first cycle of the next (v1.98, #259)**, the stop having been placed the day it
+  fired: the window may not begin at the moment the calendar turned over.
+- **The window passed is `[` Moscow midnight of the earliest `entry_at` among the
+  `EXCHANGE`-protected positions `, now]`, and a `LOCAL` position does not widen
+  it (v1.98, #259)** — the exchange holds no stop for it, so there is nothing to
+  confirm.
 - One position's price raising `PriceRejected` leaves the other positions
   evaluated normally, submits no exit for the rejected one, and does not
   increment the outage counter (proves one bad quote cannot abort a cycle or

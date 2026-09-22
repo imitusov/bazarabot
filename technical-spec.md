@@ -1,7 +1,7 @@
 # Zarabot — Technical Specification
 
-**Version:** 1.97
-**Date:** 2026-09-19
+**Version:** 1.98
+**Date:** 2026-09-22
 **Implements:** `business-brief.md` v1.16
 
 **Companion document.** Read the brief first. When this spec and the brief
@@ -327,6 +327,8 @@ that inspection could not have falsified.
 | Exchange name | `MOEX`, main board, 10:00–18:54:59 MSK, weekends closed | 53 of the 147 returned exchanges contain "MOEX"; one of them trades weekends (#43) |
 | Duplicate idempotency key | **Refused** — `INVALID_ARGUMENT`/`30057` | It does *not* return the existing order. Recovery is `get_order_state` by key, confirmed working across processes |
 | Stop-order expiry | `GOOD_TILL_CANCEL` accepted; `expiration_time` returns epoch zero, meaning **unset** | The stop survives a restart — brief acceptance criterion 16, previously untested |
+| `OrderState` price fields | `executed_order_price` is the order's **rouble total** — price × lots × lot size. `average_position_price` and `stages[].price` are **per share**. On `PostOrderResponse`, by contrast, `executed_order_price` is per share | Measured 2026-09-22 against the live account, read-only (v1.98, #258): SBER 7 lots × lot 1 → 1959.23 against 279.89; AFLT 6 × 10 → 1947.00 against 32.45; the MTSS stop fill 1 × 10 → 1867.50 against 186.75. Every fill the bot had recorded came through `PostOrderResponse`, which is why the history was right and why no test could see it: every fixture set the `OrderState` field to the per-share price |
+| `GetStopOrders` `from` / `to` | Bound the stop's **creation** date, not its execution | Measured 2026-09-22, read-only (v1.98, #259): the MTSS stop created 09-14 and filled 09-16 at 10:02:44 MSK is absent from every window that starts on 09-16 — including 10:00–10:05 around the fill itself — and present in any window reaching back to 09-14. A window keyed to the day of the fill therefore returns nothing for a stop placed on an earlier day, which is nearly every stop |
 | Telegram | 4096-character ceiling accepted | The truncation contract assumes exactly this |
 
 **Two protobuf sentinels appear repeatedly and both have bitten:** an unset
@@ -802,6 +804,20 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
 - A stop whose `exchange_order_id` does not resolve is **omitted** from the
   result rather than returned with a substituted price (proves the caller is left
   to retry rather than handed a guess).
+- **`get_order_state`, `get_order_state_by_broker_id` and `get_executed_stop_fills`
+  price a fill from `average_position_price`, never from `executed_order_price`
+  (v1.98, #258).** The fixture carries both fields the way §2.1 measured them —
+  the per-share price and the order's rouble total, which differ — and the
+  record's `filled_price` is the per-share one. A fixture in which the two are
+  equal cannot tell the fields apart, and that is how this stayed green: until
+  v1.98 every `OrderState` fixture set `executed_order_price` to the per-share
+  price, so the suite pinned the one reading the broker does not use.
+- **A stop left out of `get_executed_stop_fills` is logged at WARNING naming its
+  `stop_order_id` and the cause (v1.98, #259)** — no `exchange_order_id`, an
+  exchange order that does not resolve, or no executed lots. The omission is
+  unchanged; its silence is what is not. On 2026-09-16 the one real stop
+  execution on the account was missed for the rest of the session and nothing
+  on the record could say which of four causes it was.
 - Nothing fired in the window → empty dict, not `None`.
 - Two successive calls reuse one `AsyncClient`, and `close()` then releases it
   (proves the channel is per process rather than per request, #18).
@@ -1823,6 +1839,20 @@ Additionally, on exits booked from an exchange stop:
   matched (proves the key mismatch that made a live stop look dead cannot recur).
 - Re-running the cycle after a position has been closed this way does not
   reconsider it (proves the re-queried window is idempotent).
+- **A stop placed on an earlier Moscow day than the cycle is confirmed, and its
+  position closed from the fill (v1.98, #259).** `get_executed_stop_fills` is
+  faked the way §2.1 measured the broker: it returns a stop only when the stop's
+  **creation** falls inside `[since, until]`. A fake that ignores `since` — which
+  every fake did until v1.98 — passes against a window that can never reach the
+  stop, and so did the code that left the account's first stop execution unbooked
+  for fifteen hours.
+- **A stop that filled after the last cycle of one Moscow day is confirmed by the
+  first cycle of the next (v1.98, #259)**, the stop having been placed the day it
+  fired: the window may not begin at the moment the calendar turned over.
+- **The window passed is `[` Moscow midnight of the earliest `entry_at` among the
+  `EXCHANGE`-protected positions `, now]`, and a `LOCAL` position does not widen
+  it (v1.98, #259)** — the exchange holds no stop for it, so there is nothing to
+  confirm.
 - One position's price raising `PriceRejected` leaves the other positions
   evaluated normally, submits no exit for the rejected one, and does not
   increment the outage counter (proves one bad quote cannot abort a cycle or
@@ -3593,9 +3623,29 @@ consecutive-failure alert and is retried as though waiting would help.
   `exchange_order_id` resolved through `get_order_state` with
   `OrderIdType.ORDER_ID_TYPE_EXCHANGE`.
 - The `OrderRecord` carries the broker's own numbers: `filled_price` from
-  `executed_order_price`, `filled_lots` from `lots_executed`, and `commission`
+  `average_position_price`, `filled_lots` from `lots_executed`, and `commission`
   from `executed_commission`. None of the three is estimated, and none comes from
   a quote.
+- **`filled_price` is `average_position_price`, and was wrongly
+  `executed_order_price` until v1.98 (#258).** On an `OrderState` that field is
+  the order's rouble total — price × lots × lot size, measured in §2.1 — not a
+  price. It is per share only on `PostOrderResponse`, where `post_market_order`
+  correctly reads it, and every fill the bot had recorded came from there. Read
+  here it would have booked the 09-16 MTSS stop at 1867.50 against an entry of
+  196.60 — a realised profit of about 16,700 on a position that lost 100.
+- **`since` and `until` bound the stop's creation, not its execution (v1.98,
+  #259).** They are passed to `get_stop_orders` as `from_` and `to` unchanged,
+  and the broker filters on the date each stop was **placed** (§2.1). A caller
+  that wants a stop's fill must pass a `since` at or before the moment that stop
+  was posted; a window keyed to the day of the fill returns nothing for a stop
+  placed on an earlier day.
+- **Every omission is logged at WARNING with the `stop_order_id` and its cause
+  (v1.98, #259)**: no `exchange_order_id`, an exchange order `get_order_state`
+  cannot resolve (with the status code), or no executed lots. Omitting is still
+  the answer — the caller retries — but silently omitting is how the only real
+  stop execution on the account went unbooked for a session with nothing on the
+  record to say why. A plain log line, not a §7.1 event: it has no catalogue row,
+  and an unknown `event` name makes `scripts/deploy/export_health.py` fail.
 - **A stop whose `exchange_order_id` does not resolve is omitted, not guessed
   at.** The caller leaves the position open and retries. A position closed a
   minute late is recoverable; a position closed at an invented price is not.
@@ -3726,6 +3776,12 @@ wrong number, which is why it is admissible where FIGI-and-time matching is not.
   same value — the row's primary key in the `orders` table.
 - Raises `OrderNotFound` when the broker has no record, which proves the order
   was never accepted.
+- **`filled_price` is the `OrderState`'s `average_position_price`, and
+  `get_order_state_by_broker_id` reads it the same way (v1.98, #258).** Never
+  `executed_order_price`, which on this message is the order's rouble total
+  (§2.1). This is the recovery path of rules 5 and 27: a recovered entry priced
+  from the total would have its stop derived from it and posted far above the
+  market, which the exchange fires at the first print.
 - **There is exactly one recovery path, and it is this one (v1.73).** Until
   v1.73 this contract offered a "documented fallback": that `PostOrder` is
   idempotent on the `(orderId, accountId)` pair, so recovery "may re-call
@@ -6282,8 +6338,9 @@ Fixed ordering; each step completes before the next begins:
    execution. A stop filled by the exchange closes its position here.
 
    **Execution is confirmed, never inferred.** The cycle calls
-   `broker.client.get_executed_stop_fills` once, over the window from the start
-   of the current Moscow trading day to now, and closes a position **only** when
+   `broker.client.get_executed_stop_fills` once, over the window from Moscow
+   midnight of the earliest `entry_at` among the `EXCHANGE`-protected positions
+   to now, and closes a position **only** when
    that result contains the `stop_order_id` recorded in its own `stop_orders`
    row. Matching is on that persisted broker identifier, never on the UUID we
    generated: `list_stop_orders` builds its key from `order_request_id` when the
@@ -6297,6 +6354,29 @@ Fixed ordering; each step completes before the next begins:
    invented price, started a cooldown on an instrument the bot still held, and
    left the shares to be re-adopted as a fresh position at a new cost basis: one
    phantom round trip in the P&L from two reads that merely lagged (#5).
+
+   **The window reaches back to the earliest entry, not to today's midnight
+   (v1.98, #259).** The broker bounds that query by the date each stop was
+   *placed* (§2.1), and every stop is placed at entry and held for up to
+   `max_holding_days` trading days. The window this step used until v1.98 began
+   at the current Moscow midnight, so it could only ever return a stop placed and
+   filled on the same day: on 2026-09-16 the MTSS stop placed on 09-14 filled at
+   10:02 MSK, one process ran every cycle of the rest of the session, and not one
+   of them saw it. The position was booked fifteen hours later by startup
+   reconciliation, as `EXTERNAL`, only because the process restarted. The same
+   window also meant a fill not confirmed by the day's last cycle — an evening
+   session, or an order state that was not yet resolvable at 18:54 — could never
+   be confirmed in-session at all.
+
+   `entry_at` is the lower bound because every stop this bot places is posted
+   after its position row is written, and midnight of that day rather than the
+   instant itself leaves the host clock's skew against the broker's no room to
+   matter. A `LOCAL` position is not in the set: the exchange holds no stop for
+   it. A wider window re-resolves, every cycle, any stop in it that fired for a
+   position already closed — one `get_order_state` each, for a count bounded by
+   the stops that fired inside one holding period, which is small; the result is
+   matched against open positions' own `stop_order_id` exactly as before, so a
+   stale fill closes nothing.
 
    **An absence is a discrepancy, not an exit.** A position whose stop is no
    longer live and for which no execution is confirmed stays open, and is
