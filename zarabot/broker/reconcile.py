@@ -37,7 +37,9 @@ from zarabot.telegram.notifier import alert
 _LOG = logging.getLogger(__name__)
 
 # Every way the broker names a sale. A sale is identified by what the broker
-# called it, never by the sign of a payment (#11).
+# called it, never by the sign of a payment (#11). A full bond repayment is
+# not one of these: its price and quantity are 0, and the exit price is the
+# payment divided by the position's own size.
 _SALE_TYPES = frozenset(
     {
         "OPERATION_TYPE_SELL",
@@ -45,6 +47,7 @@ _SALE_TYPES = frozenset(
         "OPERATION_TYPE_SELL_MARGIN",
     }
 )
+_FULL_REPAYMENT = "OPERATION_TYPE_BOND_REPAYMENT_FULL"
 
 
 def _reject_naive(moment: datetime) -> None:
@@ -62,11 +65,40 @@ def _by_ticker(positions: list[Position] | tuple[Position, ...]) -> dict[str, Po
 
 @dataclass(frozen=True)
 class _ResolvedSale:
-    """What the broker says happened, and nothing this module worked out."""
+    """What the broker says happened, and nothing this module worked out.
+
+    `stop_fired` is true for a sale, which is the exchange stop executing.
+    A full repayment did not fire the stop, so the local row is cancelled.
+    """
 
     price: Decimal
     occurred_at: datetime
     commission: Decimal
+    stop_fired: bool = True
+
+
+@dataclass(frozen=True)
+class _RepaymentLookup:
+    """A priced repayment, a reason it cannot be priced, or neither.
+
+    Neither means the feed has no full repayment, and the sale path applies.
+    A reason means a full repayment is present and must not fall through to a
+    sale: the position left by the repayment, and a sale price would be a
+    substitute.
+    """
+
+    sale: _ResolvedSale | None = None
+    reason: str | None = None
+
+
+def _parented_commission(
+    operations: list[OperationRecord], parents: set[str]
+) -> Decimal:
+    """Fees whose parent is one of the covering operations. Anything else is not."""
+    return sum(
+        (item.commission for item in operations if item.parent_operation_id in parents),
+        Decimal("0"),
+    )
 
 
 def _resolve_sale(
@@ -104,18 +136,52 @@ def _resolve_sale(
         Decimal("0"),
     )
     sale_ids = {item.id for item in sales}
-    commission = sum(
-        (
-            item.commission
-            for item in operations
-            if item.parent_operation_id in sale_ids
-        ),
-        Decimal("0"),
-    )
     return _ResolvedSale(
         price=gross / units,
         occurred_at=max(item.occurred_at for item in sales),
-        commission=commission,
+        commission=_parented_commission(operations, sale_ids),
+    )
+
+
+def _lookup_repayment(
+    position: Position, operations: list[OperationRecord]
+) -> _RepaymentLookup:
+    """Price one full repayment, or say why the position must stay open.
+
+    The owner rule is one payment divided by this position's own size. Price
+    and quantity on the operation are 0, so a weighted average is undefined,
+    and the cash amount is not itself a unit price. Several repayments, a
+    non-positive payment, a printed price or quantity, or a position size of
+    0 have no rule, so they stay unresolved instead of borrowing a sale.
+    """
+    repayments = [
+        item
+        for item in operations
+        if item.figi == position.figi and item.operation_type == _FULL_REPAYMENT
+    ]
+    if not repayments:
+        return _RepaymentLookup()
+    if len(repayments) != 1:
+        return _RepaymentLookup(
+            reason="more than one full bond repayment in the window"
+        )
+    item = repayments[0]
+    if item.price != Decimal("0") or item.quantity != 0:
+        return _RepaymentLookup(
+            reason="full bond repayment did not print price 0 and quantity 0"
+        )
+    units = position.lots * position.lot_size
+    if units <= 0 or item.payment <= 0:
+        return _RepaymentLookup(
+            reason="full bond repayment has no positive payment or position size"
+        )
+    return _RepaymentLookup(
+        sale=_ResolvedSale(
+            price=item.payment / Decimal(units),
+            occurred_at=item.occurred_at,
+            commission=_parented_commission(operations, {item.id}),
+            stop_fired=False,
+        )
     )
 
 
@@ -132,7 +198,12 @@ async def _close_externally(position: Position, moment: datetime) -> dict[str, o
         operations = await get_operations(position.entry_at, moment)
     except (BrokerUnavailable, BrokerRateLimited) as exc:
         return await _report_unresolved_exit(position, f"operations feed: {exc}")
-    sale = _resolve_sale(position, operations)
+    repayment = _lookup_repayment(position, operations)
+    if repayment.reason is not None:
+        return await _report_unresolved_exit(position, repayment.reason)
+    sale = repayment.sale
+    if sale is None:
+        sale = _resolve_sale(position, operations)
     if sale is None:
         return await _report_unresolved_exit(
             position, "no executed sale for this instrument in the window"
@@ -151,25 +222,30 @@ async def _close_externally(position: Position, moment: datetime) -> dict[str, o
         f"on {sale.occurred_at.isoformat()} (id={position.id})"
     )
     if position.stop_protection is StopProtection.EXCHANGE:
-        # The exchange held the stop and it fired, so the local row records a
-        # stop that no longer exists anywhere. Nothing else can move it out of
-        # `ACTIVE`: every stop check is scoped to open positions, and this
-        # position is now closed (#250). A status write is not an order
-        # operation — there is nothing left at the broker to place or cancel —
-        # and it goes through `db.stop_orders`, which owns the table.
+        # A status write, not an order. The broker is not asked to sell or to
+        # post or cancel a stop: a sale means the exchange already executed
+        # its stop, and a repayment means the broker already cancelled it.
+        # The write goes through `db.stop_orders`, which owns the table.
+        # Nothing else can move the row out of `ACTIVE` once the position is
+        # closed, because every stop check is scoped to open positions (#250).
         standing = await active_for_position(position.id)
-        if standing is not None:
-            await settle_stop(standing.key, StopOrderStatus.EXECUTED, sale.occurred_at)
-        _LOG.info(
-            "stop_order_executed",
-            extra={
-                "event": "stop_order_executed",
-                "position_id": position.id,
-                "ticker": position.ticker,
-                "fill_price": sale.price,
-                "gap_vs_stop": sale.price - position.stop_price,
-            },
-        )
+        if sale.stop_fired:
+            if standing is not None:
+                await settle_stop(
+                    standing.key, StopOrderStatus.EXECUTED, sale.occurred_at
+                )
+            _LOG.info(
+                "stop_order_executed",
+                extra={
+                    "event": "stop_order_executed",
+                    "position_id": position.id,
+                    "ticker": position.ticker,
+                    "fill_price": sale.price,
+                    "gap_vs_stop": sale.price - position.stop_price,
+                },
+            )
+        elif standing is not None:
+            await settle_stop(standing.key, StopOrderStatus.CANCELLED, sale.occurred_at)
     return {
         "type": "CLOSED_EXTERNALLY",
         "ticker": position.ticker,

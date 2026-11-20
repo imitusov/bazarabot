@@ -908,6 +908,27 @@ partial-fill cases sat unreachable that way until v1.80 (#189).
   `entry_price` (proves the zero-P&L fabrication is gone).
 - An operations feed containing no covering sale for the figi behaves identically
   (proves absence and unavailability are both "unknown", never "zero").
+- A full bond repayment (`OPERATION_TYPE_BOND_REPAYMENT_FULL`) with price 0,
+  quantity 0 and payment 1654.2, on a position of 3 lots at lot size 1 entered
+  at 534.6 with entry commission 0.64 and no fee parented to the repayment, is
+  closed `EXTERNAL` at exit price 551.4 (`payment / (lots × lot_size)`) with
+  realised P&L 49.76 and exit commission 0. The cash is not stored as the
+  price, and 0 is not stored as the price. The position's standing exchange
+  stop is `CANCELLED` at the repayment instant, `list_active` is empty, no
+  order row is written, and `stop_order_executed` is not emitted.
+- A fee parented to that repayment is the exit commission and reduces realised
+  P&L by the same amount. A fee parented to the buy is not an exit fee; the
+  entry commission remains the one total on the opening order.
+- A full repayment whose payment is not positive, whose price is not 0, whose
+  quantity is not 0, or which is one of several full repayments in the window,
+  leaves the position open as `EXIT_UNRESOLVED` even when a sale is also in
+  the feed, and the standing stop stays `ACTIVE`. `lots` or `lot_size` of 0
+  does the same.
+- `OPERATION_TYPE_BOND_REPAYMENT` is not a covering exit. Alone, the position
+  stays open. Beside a sale, the close is booked from the sale and the exchange
+  stop is `EXECUTED`.
+- A full repayment of a `LOCAL` position closes it at the same price and
+  settles no stop row.
 - A holding present at the broker but absent locally is reported as
   `FOREIGN_HOLDING` naming its ticker, lots and average price, and **no position
   row is written** (proves the bot no longer takes ownership of shares it did not
@@ -3852,16 +3873,46 @@ module's own task never carried it (#177). No other module writes
   a trade that occurred — not, as in #10, a blend across orders invented to fit
   a signature.
 
+  **A full bond repayment is a covering exit, and it is the only operation
+  added to the three sale types above (owner decision).** The same window also
+  accepts `OPERATION_TYPE_BOND_REPAYMENT_FULL` for the position's `figi`.
+  Partial repayment is not added, and there is no catch-all:
+  `OPERATION_TYPE_BOND_REPAYMENT` and every other type stay as they are. A
+  partial repayment with no sale is still `EXIT_UNRESOLVED`. A partial
+  repayment beside a sale is still booked from the sale.
+
+  The repayment is not folded into the quantity-weighted average. On this
+  operation `price` is 0 and `quantity` is 0, so that average is undefined.
+  `exit_price` is `payment / (position.lots × position.lot_size)`, in
+  `Decimal`. The cash is the exit proceeds; it is not stored in `exit_price`,
+  and 0 is not stored there either. Realised P&L stays the formula
+  `db.positions.close` already uses: `(exit − entry) × lots × lot_size` minus
+  the entry commission and the exit commission. The entry commission is the
+  one total on the opening order, not a per-lot figure. The exit commission is
+  the sum of fee operations parented to that repayment, the same rule as a
+  sale, and zero when the feed has none. The measured case is payment 1654.2,
+  3 lots, lot size 1, entry 534.6, entry commission 0.64 and no repayment fee:
+  exit price 551.4, realised P&L 49.76. The trigger is `EXTERNAL`. No new
+  trigger and no schema change.
+
+  The position stays `EXIT_UNRESOLVED`, and a sale in the same window is not
+  used in its place, when that repayment cannot be priced this way: `lots` or
+  `lot_size` is 0, `payment` is not positive, `price` is not 0, `quantity` is
+  not 0, or the window holds more than one full repayment. One payment divided
+  by the position's own size is the rule; summing or picking among several is
+  not. No full repayment at all falls through to the sale path above.
+
   The close still passes `order = None`. This module records **no** order row: it
   did not submit one, and inventing one would contradict its own prohibition on
   trading.
 
   **This close starts the ticker's cooldown, and that is a write this contract
   now admits (v1.78).** `db.cooldowns.start(position.ticker, sale.occurred_at)`
-  is called immediately after the close, from the instant of the *sale* and not
-  the instant of detection, for the same reason the exit price comes from the
-  operations feed. A position that left the account is a position the bot just
-  exited, and every other exit path starts a cooldown; skipping it here would let
+  is called immediately after the close, from the instant the position left
+  the account — the sale, or the repayment — and not the instant of detection,
+  for the same reason the exit price comes from the operations feed. A position
+  that left the account is a position the bot just exited, and every other exit
+  path starts a cooldown; skipping it here would let
   the next cycle re-enter a ticker the account sold minutes ago. Until v1.78 the
   write was in the code and in no contract (#110, failure class 2), which is the
   worst arrangement available: the next agent rebuilding this module from its
@@ -3881,10 +3932,10 @@ module's own task never carried it (#177). No other module writes
   is the owner's, and it is bound to rule 25's: whoever settles rule 25 settles
   this. No agent may add a halt path here on its own reading.
 
-  **This close settles the position's standing `stop_orders` row `EXECUTED`,
+  **A sale close settles the position's standing `stop_orders` row `EXECUTED`,
   and that is a write this contract now admits (v1.96, #250).** When the
-  position being closed is `EXCHANGE`-protected, the shares left the account
-  because the stop the exchange held fired. The row that recorded that stop is
+  position being closed is `EXCHANGE`-protected and the covering operation is a
+  sale, the shares left the account because the stop the exchange held fired. The row that recorded that stop is
   the only local record of it, and until v1.96 nothing on this path moved it out
   of `ACTIVE`: `db.stop_orders.settle` was reached from `execution.orders`
   alone, on the `app.loops` path where the bot detects its own stop fill. The
@@ -3936,6 +3987,17 @@ module's own task never carried it (#177). No other module writes
   exchange executed, and a refusal to start is the report the operator needs.
   Both are bookkeeping states that only the owner can resolve, and neither is
   reachable from a database this module wrote.
+
+  **A full repayment settles that row `CANCELLED`, not `EXECUTED` (owner
+  decision).** The broker stop is already cancelled; it did not fire.
+  `stop_order_executed` is not emitted, nothing is sold, and no stop is
+  posted. The same `active_for_position` read, and if it returns a row,
+  `db.stop_orders.settle(row.key, StopOrderStatus.CANCELLED,
+  repayment.occurred_at)` — the instant of the repayment, as the sale settle
+  uses the instant of the sale. The condition is still `stop_protection is
+  EXCHANGE`: a `LOCAL` position's row is not settled. This is a status write
+  through `db.stop_orders`, the same as the sale settle, and it does not call
+  the broker. A failed settle propagates on the terms above.
 - **A sale that cannot be resolved is reported, not booked.** When the feed
   returns no covering sale, or is unavailable, the position **stays open** and
   the report carries
@@ -3944,8 +4006,8 @@ module's own task never carried it (#177). No other module writes
   late is recoverable and one closed at a substituted number is not, because
   nothing downstream can tell the substituted number from a real one. A covering
   sale that is genuinely absent means the shares left the account by some route
-  that was not a trade, and that is the owner's to explain rather than this
-  module's to guess.
+  that was not a trade — other than the full bond repayment defined above —
+  and that is the owner's to explain rather than this module's to guess.
 - `EXIT_UNRESOLVED` does **not** stop the bot, unlike rule 32's foreign holding.
   That refusal exists for shares the bot might trade; this is a row describing
   shares the account no longer has. While it stands, the row still marks to
@@ -4222,8 +4284,9 @@ module's own task never carried it (#177). No other module writes
   emits, with count 0 and `types` an empty list — silence here is how a failed
   reconcile looks like a skip.
 - **Emits `stop_order_executed` when it books an exchange-fired stop close, and
-  `stop_order_orphaned` when it reports `STOP_ORPHAN` (v1.61).** Fields match
-  §7.1.
+  `stop_order_orphaned` when it reports `STOP_ORPHAN` (v1.61).** A full
+  repayment does not emit `stop_order_executed`: that event claims a fill, and
+  the stop did not fire. Fields match §7.1.
 - Idempotent.
 - Ordering constraint: runs during `app.startup` after migrations and after
   unresolved-order recovery, and before any entry is permitted.

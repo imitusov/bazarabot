@@ -1134,7 +1134,15 @@ from `get_operations(position.entry_at, now)`, filtered to the position's `figi`
 and the sale operation types: `exit_price` is the quantity-weighted average,
 `exit_at` the latest sale timestamp, `exit_commission` the sum of the fee
 operations parented to those sales, closed with `order=None` and **no** `orders`
-row. With no covering sale, or the feed unavailable, the position **stays open**
+row. A full bond repayment (`OPERATION_TYPE_BOND_REPAYMENT_FULL` with price 0
+and quantity 0) is the only other covering operation: `exit_price` is
+`payment / (lots * lot_size)` as `Decimal` (1654.2 / 3 = 551.4), realised P&L
+stays `(exit − entry) × lots × lot_size` minus both commissions (49.76 with
+entry commission 0.64 and no repayment fee), the trigger is `EXTERNAL`, and the
+local exchange stop is settled `CANCELLED` with no `stop_order_executed`. A
+repayment that is not that shape, or more than one, stays `EXIT_UNRESOLVED`
+even if a sale is also in the feed. Partial repayment is not a covering
+operation. With no covering sale, or the feed unavailable, the position **stays open**
 and the report carries `{"type": "EXIT_UNRESOLVED", "ticker", "position_id",
 "reason"}` with an alert; no exit is ever recorded at a quote or at
 `entry_price` (#11, rule 33). Broker-only and
@@ -1180,8 +1188,9 @@ identifier); an identifier is `stop_order_id` when known, else the stop's key.
 Idempotent against an unchanged broker. Raises `ValueError` on naive `now`.
 After persist, emits `reconciliation` (INFO) with `adjustments_count` and
 distinct `types` (empty agreement still emits, count 0). Emits
-`stop_order_executed` when an EXCHANGE-protected position is booked as an
-external close, and `stop_order_orphaned` on each `STOP_ORPHAN` (v1.61). The
+`stop_order_executed` when an EXCHANGE-protected position is booked from a
+sale, not when it is booked from a full repayment, and `stop_order_orphaned`
+on each `STOP_ORPHAN` (v1.61). The
 orphaned event names `stop_order_id` when known, else the stop's key.
 
 ## `zarabot.telegram.notifier`

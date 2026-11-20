@@ -43,6 +43,14 @@ from zarabot.models import (
 
 NOW = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
 PRICE = Decimal("100.00")
+# Position 10 as the broker recorded it: a full repayment, not a sale.
+PIKK_FIGI = "BBG004S68BH6"
+PIKK_ENTRY = Decimal("534.6")
+PIKK_ENTRY_AT = datetime(2026, 9, 14, 6, 10, 18, tzinfo=UTC)
+PIKK_REPAID_AT = datetime(2026, 11, 11, 12, 18, tzinfo=UTC)
+PIKK_NOW = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+PIKK_PAYMENT = Decimal("1654.2")
+PIKK_STOP = Decimal("507.87")
 REQUIRED_ENV = {
     "TINVEST_TOKEN": "token",
     "TINVEST_ACCOUNT_ID": "acct",
@@ -209,6 +217,108 @@ async def _open_local() -> Position:
     )
     return await open_position(
         signal, order, _instrument(), Decimal("95"), Decimal("110"), NOW
+    )
+
+
+async def _open_pikk() -> Position:
+    """3 lots, lot size 1, entry 534.6, entry commission 0.64 on the buy."""
+    async with transaction() as conn:
+        await conn.execute(
+            """
+            INSERT INTO orders (
+                key, ticker, figi, side, intent, lots, status,
+                filled_lots, filled_price, commission, created_at, settled_at
+            ) VALUES (
+                'order-pikk', 'PIKK', ?, 'BUY', 'ENTRY', 3,
+                'FILLED', 3, '534.6', '0.64', ?, ?
+            )
+            """,
+            (PIKK_FIGI, PIKK_ENTRY_AT.isoformat(), PIKK_ENTRY_AT.isoformat()),
+        )
+    signal = Signal(
+        ticker="PIKK",
+        strategy="rsi_reversion",
+        side=Side.BUY,
+        generated_at=PIKK_ENTRY_AT,
+        reference_price=PIKK_ENTRY,
+    )
+    order = OrderRecord(
+        key="order-pikk",
+        ticker="PIKK",
+        figi=PIKK_FIGI,
+        side=Side.BUY,
+        intent="ENTRY",
+        lots=3,
+        status=OrderStatus.FILLED,
+        filled_lots=3,
+        filled_price=PIKK_ENTRY,
+        commission=Decimal("0.64"),
+        broker_reason=None,
+        created_at=PIKK_ENTRY_AT,
+        settled_at=PIKK_ENTRY_AT,
+    )
+    instrument = replace(_instrument(ticker="PIKK", figi=PIKK_FIGI), lot=1)
+    return await open_position(
+        signal,
+        order,
+        instrument,
+        PIKK_STOP,
+        Decimal("588.06"),
+        PIKK_ENTRY_AT,
+    )
+
+
+def _repayment(
+    op_id: str = "op-repay",
+    *,
+    payment: Decimal = PIKK_PAYMENT,
+    price: Decimal | None = Decimal("0"),
+    quantity: int | None = 0,
+    operation_type: str = "OPERATION_TYPE_BOND_REPAYMENT_FULL",
+) -> OperationRecord:
+    return _operation(
+        op_id,
+        operation_type,
+        price=price,
+        quantity=quantity,
+        payment=payment,
+        occurred_at=PIKK_REPAID_AT,
+        figi=PIKK_FIGI,
+    )
+
+
+def _pikk_buy_and_fee() -> list[OperationRecord]:
+    """The buy and its fee. The fee is parented to the buy, not the repayment."""
+    return [
+        _operation(
+            "op-buy",
+            "OPERATION_TYPE_BUY",
+            price=PIKK_ENTRY,
+            quantity=3,
+            payment=Decimal("-1603.8"),
+            occurred_at=PIKK_ENTRY_AT,
+            figi=PIKK_FIGI,
+        ),
+        _operation(
+            "fee-buy",
+            "OPERATION_TYPE_BROKER_FEE",
+            commission=Decimal("0.64"),
+            payment=Decimal("-0.64"),
+            occurred_at=PIKK_ENTRY_AT,
+            parent="op-buy",
+            figi=PIKK_FIGI,
+        ),
+    ]
+
+
+def _pikk_sale() -> OperationRecord:
+    return _operation(
+        "op-sale",
+        "OPERATION_TYPE_SELL",
+        price=Decimal("110.00"),
+        quantity=3,
+        occurred_at=PIKK_REPAID_AT,
+        figi=PIKK_FIGI,
     )
 
 
@@ -1232,6 +1342,238 @@ async def test_a_local_position_closed_externally_settles_no_stop_row(
     await reconcile(NOW)
 
     assert await _stop_row_status(key) is StopOrderStatus.ACTIVE
+
+
+async def _open_pikk_exchange() -> tuple[Position, str]:
+    position = await _open_pikk()
+    key = await _standing_stop_row(position, lots=3, price=PIKK_STOP)
+    await set_stop_protection(position.id, StopProtection.EXCHANGE, key)
+    return position, key
+
+
+async def _exit_commission(position_id: int) -> Decimal | None:
+    cursor = await shared().execute(
+        "SELECT exit_commission FROM positions WHERE id = ?", (position_id,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    if row[0] is None:
+        return None
+    return Decimal(row[0])
+
+
+def _stop_executed(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", None) == "stop_order_executed"
+    ]
+
+
+async def test_full_bond_repayment_closes_at_payment_over_position_size(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A full repayment with price 0 and quantity 0 is an EXTERNAL close.
+
+    PIKK: payment 1654.2, 3 lots, lot size 1, entry 534.6, entry commission
+    0.64, no repayment fee. Exit price is 1654.2 / 3 = 551.4. Realised P&L is
+    (551.4 - 534.6) * 3 - 0.64 = 49.76. The standing stop is CANCELLED.
+    """
+    position, key = await _open_pikk_exchange()
+    env.holdings = ()
+    env.operations = [*_pikk_buy_and_fee(), _repayment()]
+    orders_before = await _count("orders")
+    with caplog.at_level(logging.INFO, logger="zarabot.broker.reconcile"):
+        report = await reconcile(PIKK_NOW)
+
+    closed = next(
+        item for item in report.adjustments if item["type"] == "CLOSED_EXTERNALLY"
+    )
+    assert closed["ticker"] == "PIKK"
+    assert closed["position_id"] == position.id
+    assert closed["exit_price"] == "551.4"
+    assert closed["exit_at"] == PIKK_REPAID_AT.isoformat()
+    assert closed["exit_commission"] == "0"
+    stored = await get(position.id)
+    assert stored is not None
+    assert stored.status == "CLOSED"
+    assert stored.exit_trigger is ExitTrigger.EXTERNAL
+    assert stored.exit_price == Decimal("551.4")
+    assert stored.exit_at == PIKK_REPAID_AT
+    assert stored.realised_pnl == Decimal("49.76")
+    assert stored.close_order_key is None
+    assert await _exit_commission(position.id) == Decimal("0")
+    assert await _stop_row_status(key) is StopOrderStatus.CANCELLED
+    cursor = await shared().execute(
+        "SELECT settled_at FROM stop_orders WHERE key = ?", (key,)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert datetime.fromisoformat(row[0]) == PIKK_REPAID_AT
+    assert await list_active() == []
+    assert await _count("orders") == orders_before
+    assert "post_market_order" not in env.calls
+    assert "post_stop_loss" not in env.calls
+    assert "cancel_stop_order" not in env.calls
+    assert _stop_executed(caplog) == []
+    cooldown = await shared().execute(
+        "SELECT started_at FROM cooldowns WHERE ticker = ?", ("PIKK",)
+    )
+    cooldown_row = await cooldown.fetchone()
+    assert cooldown_row is not None
+    assert datetime.fromisoformat(cooldown_row[0]) == PIKK_REPAID_AT
+
+
+async def test_full_bond_repayment_exit_commission_is_the_parented_fee(
+    env: _Broker,
+) -> None:
+    """A fee parented to the repayment is the exit commission. The buy's fee is not."""
+    position = await _open_pikk()
+    env.holdings = ()
+    env.operations = [
+        *_pikk_buy_and_fee(),
+        _repayment(),
+        _operation(
+            "fee-repay",
+            "OPERATION_TYPE_BROKER_FEE",
+            commission=Decimal("0.10"),
+            payment=Decimal("-0.10"),
+            parent="op-repay",
+            figi=PIKK_FIGI,
+        ),
+        _operation(
+            "fee-other",
+            "OPERATION_TYPE_BROKER_FEE",
+            commission=Decimal("9.99"),
+            parent="somebody-else",
+            figi=PIKK_FIGI,
+        ),
+    ]
+    report = await reconcile(PIKK_NOW)
+    closed = next(
+        item for item in report.adjustments if item["type"] == "CLOSED_EXTERNALLY"
+    )
+    assert closed["exit_price"] == "551.4"
+    assert closed["exit_commission"] == "0.10"
+    stored = await get(position.id)
+    assert stored is not None
+    assert stored.realised_pnl == Decimal("49.66")
+    assert await _exit_commission(position.id) == Decimal("0.10")
+
+
+async def _repayment_stays_open(
+    env: _Broker, operations: list[OperationRecord]
+) -> None:
+    """A repayment that cannot be priced leaves the position and its stop open."""
+    _position, key = await _open_pikk_exchange()
+    env.holdings = ()
+    env.operations = operations
+    report = await reconcile(PIKK_NOW)
+    types = [item["type"] for item in report.adjustments]
+    assert "EXIT_UNRESOLVED" in types
+    assert "CLOSED_EXTERNALLY" not in types
+    stored = await get(_position.id)
+    assert stored is not None
+    assert stored.status == "OPEN"
+    assert stored.exit_trigger is None
+    assert stored.exit_price is None
+    assert stored.realised_pnl is None
+    assert await _stop_row_status(key) is StopOrderStatus.ACTIVE
+    assert len(await list_active()) == 1
+
+
+async def test_full_repayment_with_zero_payment_stays_open(env: _Broker) -> None:
+    await _repayment_stays_open(env, [_repayment(payment=Decimal("0")), _pikk_sale()])
+
+
+async def test_full_repayment_with_negative_payment_stays_open(env: _Broker) -> None:
+    await _repayment_stays_open(env, [_repayment(payment=Decimal("-1")), _pikk_sale()])
+
+
+async def test_full_repayment_with_a_printed_price_or_quantity_stays_open(
+    env: _Broker,
+) -> None:
+    await _repayment_stays_open(
+        env,
+        [_repayment(price=Decimal("551.4"), quantity=0), _pikk_sale()],
+    )
+
+
+async def test_full_repayment_with_a_printed_quantity_stays_open(
+    env: _Broker,
+) -> None:
+    await _repayment_stays_open(
+        env,
+        [_repayment(price=Decimal("0"), quantity=3), _pikk_sale()],
+    )
+
+
+async def test_two_full_repayments_stay_open(env: _Broker) -> None:
+    await _repayment_stays_open(
+        env,
+        [
+            _repayment(),
+            _repayment(op_id="op-repay-2", payment=Decimal("100")),
+            _pikk_sale(),
+        ],
+    )
+
+
+async def test_partial_bond_repayment_is_not_a_covering_exit(env: _Broker) -> None:
+    await _repayment_stays_open(
+        env,
+        [
+            _repayment(
+                operation_type="OPERATION_TYPE_BOND_REPAYMENT",
+                payment=PIKK_PAYMENT,
+            )
+        ],
+    )
+
+
+async def test_partial_bond_repayment_beside_a_sale_is_booked_as_the_sale(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A partial repayment is not a covering exit and does not block a sale."""
+    _position, key = await _open_pikk_exchange()
+    env.holdings = ()
+    env.operations = [
+        _repayment(
+            operation_type="OPERATION_TYPE_BOND_REPAYMENT",
+            payment=PIKK_PAYMENT,
+        ),
+        _pikk_sale(),
+    ]
+    with caplog.at_level(logging.INFO, logger="zarabot.broker.reconcile"):
+        await reconcile(PIKK_NOW)
+    stored = await get(_position.id)
+    assert stored is not None
+    assert stored.status == "CLOSED"
+    assert stored.exit_trigger is ExitTrigger.EXTERNAL
+    assert stored.exit_price == Decimal("110.00")
+    assert await _stop_row_status(key) is StopOrderStatus.EXECUTED
+    assert len(_stop_executed(caplog)) == 1
+
+
+async def test_full_bond_repayment_on_a_local_position_settles_no_stop(
+    env: _Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The CANCELLED settle is gated on EXCHANGE protection, as the sale settle is."""
+    position = await _open_pikk()
+    key = await _standing_stop_row(position, lots=3, price=PIKK_STOP)
+    assert position.stop_protection is StopProtection.LOCAL
+    env.holdings = ()
+    env.operations = [_repayment()]
+    with caplog.at_level(logging.INFO, logger="zarabot.broker.reconcile"):
+        await reconcile(PIKK_NOW)
+    stored = await get(position.id)
+    assert stored is not None
+    assert stored.status == "CLOSED"
+    assert stored.exit_trigger is ExitTrigger.EXTERNAL
+    assert stored.exit_price == Decimal("551.4")
+    assert stored.realised_pnl == Decimal("49.76")
+    assert await _stop_row_status(key) is StopOrderStatus.ACTIVE
+    assert _stop_executed(caplog) == []
 
 
 def _reconciliation_events(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
